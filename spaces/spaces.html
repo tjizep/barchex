@@ -663,7 +663,8 @@ function exampleArgs(c) {
 
 async function openConsole() {
   const list = await loadCommands();
-  const fams = [...new Set(list.map(c => c.family))];
+  const fams = [...new Set(["Stored Procs", ...list.map(c => c.family)])].filter(
+    f => list.some(c => c.family === f));
   show(`<div class="top"><h2>${ico("terminal")} RESP console · ${esc(current)}</h2><button onclick="shut()">Close</button></div>
     <div class="valuebox console">
       <label class="cl">Command
