@@ -24,20 +24,26 @@ function call()
     return "spacesapi"
 end
 
--- Accounts live in this space as the USERS stored function (users.luau), not
--- in the shop's `users` space. GETF + load so the same helpers run here.
-local users_mod
-local function users()
-    if users_mod then return users_mod end
-    local src = barch.call("GETF", "USERS")
-    if type(src) ~= "string" then error("USERS function is missing from this space") end
-    local env = {}
-    setmetatable(env, { __index = _G })
-    local chunk, err = load(src, "=USERS", "t", env)
-    if not chunk then error(err) end
-    chunk()
-    users_mod = env
-    return env
+-- Accounts are the USERS function in this space (users.luau). The same
+-- keys: user:<email>, sess:<sid>, admin:<email>. With none yet, a local
+-- admin so a clean server works. The sandbox has no load(), so these
+-- helpers are copied rather than compiling USERS here.
+local function has_accounts()
+    local page = barch.store.range("user:", "user;", 1)
+    return type(page) == "table" and #page > 0
+end
+
+local function current(req)
+    local sid = req:cookie("sid")
+    if sid ~= nil and sid ~= "" then
+        local email = barch.store.get("sess:" .. sid)
+        if email ~= nil then
+            local raw = barch.store.get("user:" .. email)
+            if raw ~= nil then return simdjson.parse(raw) end
+        end
+    end
+    if not has_accounts() then return { email = "local", name = "local" } end
+    return nil
 end
 
 local function send(res, body, code)
@@ -607,16 +613,17 @@ local function stats(req, res)
     })
 end
 
--- Who may write. Reading needs a sign-in (or the guest admin while no
--- accounts exist yet). Writing needs USERS.is_admin.
 local function is_admin(req)
-    return users().is_admin(req)
+    local user = current(req)
+    if user == nil or user.email == nil then return false end
+    if not has_accounts() then return true end
+    return barch.store.get("admin:" .. string.lower(user.email)) ~= nil
 end
 
 function get(req, res, params, query)
     -- Signed in, at the least. This is every space the HTTP user can read, so it
     -- is not for a public port whatever the gate says.
-    if users().current(req) == nil then
+    if current(req) == nil then
         return fail(res, "sign in to use the space viewer", 401)
     end
     local tail = string.sub(req.url, string.len("/api/admin/") + 1)
@@ -703,7 +710,7 @@ end
 local MAX_VALUE = 512000
 
 local function post(req, res, params, query)
-    local user = users().current(req)
+    local user = current(req)
     if user == nil then return fail(res, "sign in to use the space viewer", 401) end
     if not is_admin(req) then return fail(res, "this account may look, not change", 403) end
 
