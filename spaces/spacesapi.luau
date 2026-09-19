@@ -646,6 +646,7 @@ end
 -- POST /api/admin/<op>?space=...   the body is the value or the file, as bytes.
 --
 --   space_add?name              USE name, which creates the space if it is new
+--   space_rm?name               KSPACE DROP name; not the default, configuration, or this space
 --   key_put?space&key           set a key to the body (a value is at most 512 kB)
 --   key_rm?space&key            delete a key
 --   function_put?space&name     SETF name to the body, with RELOAD
@@ -733,6 +734,23 @@ local function post(req, res, params, query)
         if exists then return fail(res, name .. " already exists", 409) end
         local used, why = pcall(function() return barch.call("USE", name) end)
         if not used then
+            return fail(res, string.gsub(tostring(why), "^[^:]*:%d+: ", ""), 400)
+        end
+        return ok(res, { ok = true, name = name })
+    end
+
+    if tail == "space_rm" then
+        local name = query.name
+        if name == nil or name == "" then return fail(res, "a space name is required") end
+        if name == "(default)" then return fail(res, "the default space cannot be dropped") end
+        if name == "configuration" then return fail(res, "configuration cannot be dropped") end
+        if name == barch.running() then
+            return fail(res, "cannot drop " .. name .. ": that is the space this page is running in")
+        end
+        local exists = pcall(function() return barch.space[name] end)
+        if not exists then return fail(res, "no key space called " .. name, 404) end
+        local dropped, why = pcall(function() return barch.call("KSPACE", "DROP", name) end)
+        if not dropped then
             return fail(res, string.gsub(tostring(why), "^[^:]*:%d+: ", ""), 400)
         end
         return ok(res, { ok = true, name = name })

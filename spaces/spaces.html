@@ -92,6 +92,9 @@ function drawSpaces() {
         <span class="icon">${ico(s.files ? "folder" : "key")}</span>
         <span class="sname">${esc(s.name)}</span>
         <span class="count">${num(s.keys)}</span>
+        ${isAdmin && s.openable ? `<button class="ib" title="Delete ${esc(s.name)}"
+          aria-label="Delete ${esc(s.name)}"
+          onclick="dropSpace(event,'${esc(enc(s.name))}')">${ico("minus")}</button>` : ""}
       </a>`).join("");
 }
 
@@ -108,6 +111,22 @@ async function newSpace(ev) {
     drawSpaces();
     draw();
   }
+}
+
+async function dropSpace(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  name = decodeURIComponent(name);
+  if (!confirm(`KSPACE DROP ${name}? This deletes the space and cannot be undone.`)) return;
+  if (!await write("space_rm", { name })) return;
+  const out = await api("spaces").catch(() => null);
+  if (out) spaces = out.spaces || [];
+  if (current === name) {
+    const open = spaces.filter(s => s.openable);
+    current = (open[0] || spaces[0] || {}).name || null;
+  }
+  drawSpaces();
+  if (current) draw();
 }
 
 function pickSpace(ev, name) {
