@@ -1,46 +1,35 @@
 # barchex
 
-The key-space viewer from the barch shop example, as a git repository
-`FUNCTIONS SYNC` can install.
+Extensions for barch, as a git repository `FUNCTIONS SYNC` can install.
 
-| File | What git sync does with it |
-|---|---|
-| `spacesapi.luau` | stored function `SPACESAPI` — `GET`/`POST /api/admin/*` |
-| `spacesui.luau` | stored function `SPACESUI` — `GET /spaces` |
-| `spaces.html` | ordinary key `spaces.html` (not a file-store file) |
-
-A git repository is the truth for **one key space's functions**. Syncing this
-into `shop` would delete `SHOPAPI`, `SHOPUI` and the rest. Install it into a
-space of its own:
+A top-level folder is a key space of that name. Do not set
+`git/repositories/barchex/space` — that would dump every folder into one
+space and wipe whatever functions were already there.
 
 ```
-CONFIG SET functions_dir /home/test/shop-run/functions
+spaces/
+  spacesapi.luau   →  function SPACESAPI  (GET/POST /api/admin/*)
+  spacesui.luau    →  function SPACESUI   (GET /spaces)
+  spaces.html      →  key spaces.html
+```
+
+```
+CONFIG SET functions_dir /path/to/checkouts
 
 USE configuration
 SET git/repositories/barchex/url    https://github.com/tjizep/barchex.git
 SET git/repositories/barchex/pull   on
 SET git/repositories/barchex/branch main
-SET git/repositories/barchex/space  barchex
 SET git/repositories/barchex/as     keys
+SET git/repositories/barchex/space  off
 
 FUNCTIONS SYNC barchex
 FUNCTIONS STATUS
-USE barchex
+USE spaces
 KEYSF
 ```
 
 `as = keys` is required: `as = fs` would put the Luau in the file store and
 it would never become a function.
 
-To publish onto a shop that is already serving HTTP (same port, without
-replacing the shop's other functions):
-
-```
-USE barchex
-GETF SPACESAPI
-USE shop
-SETF SPACESAPI <that source> RELOAD
-FS PUT /app/spaces.html <spaces.html>
-```
-
-`SPACESUI` only answers if the HTTP conf lists it.
+`SPACESUI` only answers if HTTP is started in the `spaces` space.
