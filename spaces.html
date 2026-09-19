@@ -82,13 +82,32 @@ async function boot() {
 
 function drawSpaces() {
   document.getElementById("spaces").innerHTML =
-    `<h3>Spaces</h3>` + spaces.map(s => `
+    `<div class="spaces-head">
+      <h3>Spaces</h3>
+      ${isAdmin ? `<button class="gear" title="Add a key space" aria-label="Add a key space"
+        onclick="newSpace(event)">${ico("plus")}</button>` : ""}
+    </div>` + spaces.map(s => `
       <a href="#" class="${s.name === current ? "on" : ""}${s.openable ? "" : " off"}"
          onclick="pickSpace(event, '${esc(s.name)}')">
         <span class="icon">${ico(s.files ? "folder" : "key")}</span>
         <span class="sname">${esc(s.name)}</span>
         <span class="count">${num(s.keys)}</span>
       </a>`).join("");
+}
+
+async function newSpace(ev) {
+  if (ev) ev.preventDefault();
+  const name = (prompt("Name of the new key space:") || "").trim();
+  if (!name) return;
+  if (!/^[A-Za-z0-9_]+$/.test(name))
+    return alert("a space name is letters, digits and underscores");
+  if (await write("space_add", { name })) {
+    const out = await api("spaces").catch(() => null);
+    if (out) spaces = out.spaces || [];
+    current = name; fsPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = ""; fnMatch = "";
+    drawSpaces();
+    draw();
+  }
 }
 
 function pickSpace(ev, name) {

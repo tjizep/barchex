@@ -630,6 +630,7 @@ end
 
 -- POST /api/admin/<op>?space=...   the body is the value or the file, as bytes.
 --
+--   space_add?name              USE name, which creates the space if it is new
 --   key_put?space&key           set a key to the body (a value is at most 512 kB)
 --   key_rm?space&key            delete a key
 --   function_put?space&name     SETF name to the body, with RELOAD
@@ -703,6 +704,24 @@ local function post(req, res, params, query)
     if q then tail = string.sub(tail, 1, q - 1) end
     local space = query.space
     local body = req.body or ""
+
+    -- USE name creates a space (and is a no-op switch inside a script).
+    -- barch.space[name] only looks one up and never creates.
+    if tail == "space_add" then
+        local name = query.name
+        if name == nil or name == "" then return fail(res, "a space name is required") end
+        if name == "(default)" then return fail(res, "the default space cannot be created by name") end
+        if string.find(name, "[^0-9A-Za-z_]") then
+            return fail(res, "a space name is letters, digits and underscores")
+        end
+        local exists = pcall(function() return barch.space[name] end)
+        if exists then return fail(res, name .. " already exists", 409) end
+        local used, why = pcall(function() return barch.call("USE", name) end)
+        if not used then
+            return fail(res, string.gsub(tostring(why), "^[^:]*:%d+: ", ""), 400)
+        end
+        return ok(res, { ok = true, name = name })
+    end
 
     if tail == "key_put" or tail == "key_rm" then
         local sp, err = open(space)
