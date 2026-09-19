@@ -10,8 +10,12 @@ space and wipe whatever functions were already there.
 spaces/
   spacesapi.luau   →  function SPACESAPI  (GET/POST /api/admin/*)
   spacesui.luau    →  function SPACESUI   (GET /spaces)
+  users.luau       →  function USERS      (accounts in this space)
   spaces.html      →  key spaces.html
 ```
+
+USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. With none yet,
+the viewer treats you as a local admin. It does not use a `users` key space.
 
 ```
 CONFIG SET functions_dir /path/to/checkouts
