@@ -631,6 +631,18 @@ function get(req, res, params, query)
     if q then tail = string.sub(tail, 1, q - 1) end
 
     if tail == "me" then return ok(res, { admin = is_admin(req) }) end
+    if tail == "commands" then
+        local raw = barch.store.get("commands.json")
+        if type(raw) ~= "string" then
+            local held, body = pcall(function() return barch.fs.get("/app/commands.json") end)
+            if held then raw = body end
+        end
+        if type(raw) ~= "string" then return fail(res, "commands.json is not in this space", 404) end
+        res.code = 200
+        res:header("Content-Type", "application/json")
+        res.body = raw
+        return
+    end
     if tail == "spaces" then return spaces(req, res) end
     if tail == "keys" then return keys(req, res, query) end
     if tail == "value" then return value(req, res, query) end

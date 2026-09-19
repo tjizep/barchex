@@ -620,8 +620,17 @@ let COMMANDS = null, consCmd = "GET", consHistory = [];
 try { consHistory = JSON.parse(localStorage.getItem("resp-history") || "[]"); } catch (e) {}
 
 async function loadCommands() {
-  if (COMMANDS) return COMMANDS;
-  COMMANDS = await fetch("/shop/commands.json").then(r => r.json()).catch(() => []);
+  if (Array.isArray(COMMANDS) && COMMANDS.length) return COMMANDS;
+  for (const url of ["/shop/commands.json", "/api/admin/commands"]) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const list = Array.isArray(j) ? j : j.commands;
+      if (Array.isArray(list) && list.length) { COMMANDS = list; return COMMANDS; }
+    } catch (e) {}
+  }
+  COMMANDS = [];
   return COMMANDS;
 }
 
@@ -673,6 +682,10 @@ async function openConsole() {
     </div>`);
   pickCommand(consCmd);
   drawHistory();
+  if (!list.length) {
+    document.getElementById("cons-hint").innerHTML =
+      `<div class="sum">The command list did not load (commands.json). Type a command name in the box, or put commands.json next to the page.</div>`;
+  }
   document.getElementById("cons-args").focus();
 }
 
