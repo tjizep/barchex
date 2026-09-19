@@ -9,7 +9,7 @@ function call()
 end
 
 function get(req, res)
-    local html = barch.store["spaces.html"]
+    local html = barch.store.get("spaces.html")
     if type(html) ~= "string" then
         res.code = 404
         res.body = "spaces.html is not in this space"
