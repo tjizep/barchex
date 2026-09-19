@@ -227,6 +227,9 @@ function showKeys(out) {
           <td class="kind">${esc(r.kind)}</td>
           <td class="sz">${r.size == null ? "" : bytes(r.size)}</td>
           <td class="v">${esc(r.value ?? "")}</td>
+          ${isAdmin ? `<td class="act">${String(r.key).startsWith("fs:") ? "" : `<button class="ib" title="Delete ${esc(r.key)}"
+            aria-label="Delete ${esc(r.key)}"
+            onclick="dropKey(event,'${esc(enc(r.key))}')">${ico("minus")}</button>`}</td>` : ""}
         </tr>`).join("")}</tbody></table>`;
   const from = keyAt * PAGE + 1;
   document.getElementById("slide-at").textContent =
@@ -301,6 +304,14 @@ async function removeKey(key) {
   key = decodeURIComponent(key);
   if (!confirm(`Delete ${key} from ${current}? This cannot be undone.${careful()}`)) return;
   if (await write("key_rm", { key })) { shut(); drawKeys(); }
+}
+
+async function dropKey(ev, key) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  key = decodeURIComponent(key);
+  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.${careful()}`)) return;
+  if (await write("key_rm", { key })) drawKeys();
 }
 
 function newKey() {
