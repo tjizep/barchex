@@ -2,8 +2,8 @@
 --
 -- Git sync with `as = keys` stores `.luau` as functions and everything else as
 -- ordinary keys, so the HTML is not in the file store. This route serves that
--- key. CSS and icons still come from the shop at `/shop/shop.css` and
--- `/shop/common.js` when both are on the same host.
+-- key. The page is self-contained: the CSS, the icons, the theme toggle and
+-- the sign-in form are inlined, so it needs nothing from the shop.
 function call()
     return "spacesui"
 end

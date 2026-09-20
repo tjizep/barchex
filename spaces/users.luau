@@ -3,7 +3,8 @@
 -- `admin:<email>` = "1".
 --
 -- With no accounts yet, every request is a local admin so a clean server is
--- usable. The first register() becomes admin and that guest path stops.
+-- usable. The first account to register — or the first existing account to
+-- sign on when no admin exists yet — becomes admin and that guest path stops.
 function call()
     return "users"
 end
@@ -28,8 +29,8 @@ function normalize_email(email)
     return string.lower(string.match(email or "", "^%s*(.-)%s*$"))
 end
 
-local function has_accounts()
-    local page = barch.store.range("user:", "user;", 1)
+local function has_admin()
+    local page = barch.store.range("admin:", "admin;", 1)
     return type(page) == "table" and #page > 0
 end
 
@@ -46,14 +47,14 @@ function current(req)
             if raw ~= nil then return simdjson.parse(raw) end
         end
     end
-    if not has_accounts() then return guest() end
+    if not has_admin() then return guest() end
     return nil
 end
 
 function is_admin(req)
     local user = current(req)
     if user == nil or user.email == nil then return false end
-    if not has_accounts() then return true end
+    if not has_admin() then return true end
     return barch.store.get("admin:" .. string.lower(user.email)) ~= nil
 end
 
@@ -81,7 +82,7 @@ function register(req, res)
     end
     local key = "user:" .. email
     if barch.store.get(key) ~= nil then return no("an account with that email already exists", 409) end
-    local first = not has_accounts()
+    local first = not has_admin()
     local salt = token(8)
     local doc = { email = email, name = j.name or "", salt = salt, hash = digest(salt .. password) }
     barch.store.set(key, simdjson.encode(doc))
@@ -100,6 +101,11 @@ function signon(req, res)
     if digest(u.salt .. tostring(j.password)) ~= u.hash then
         return no("no such account, or the password is wrong", 401)
     end
+    -- no admin yet (accounts imported or restored without one): whoever signs
+    -- on first claims it, same as the first register() above
+    if not has_admin() then
+        barch.store.set("admin:" .. string.lower(u.email), "1")
+    end
     start_session(res, u.email)
     return yes(u)
 end
@@ -107,7 +113,12 @@ end
 function signout(req, res)
     local sid = req:cookie("sid")
     if sid ~= nil and sid ~= "" then barch.store.remove("sess:" .. sid) end
+    -- belt and braces: some browsers need Expires as well as Max-Age=0,
+    -- and clearing by raw header also drops any sid the server never
+    -- issued (a stale cookie from another app on this host/port keeps
+    -- coming back otherwise and every request reads as signed out).
     res:cookie("sid", "", { path = "/", max_age = 0, httponly = true })
+    res:header("Set-Cookie", "sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly")
     return { ok = true }
 end
 

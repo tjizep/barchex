@@ -25,11 +25,11 @@ function call()
 end
 
 -- Accounts are the USERS function in this space (users.luau). The same
--- keys: user:<email>, sess:<sid>, admin:<email>. With none yet, a local
+-- keys: user:<email>, sess:<sid>, admin:<email>. With no admin yet, a local
 -- admin so a clean server works. The sandbox has no load(), so these
 -- helpers are copied rather than compiling USERS here.
-local function has_accounts()
-    local page = barch.store.range("user:", "user;", 1)
+local function has_admin()
+    local page = barch.store.range("admin:", "admin;", 1)
     return type(page) == "table" and #page > 0
 end
 
@@ -42,7 +42,7 @@ local function current(req)
             if raw ~= nil then return simdjson.parse(raw) end
         end
     end
-    if not has_accounts() then return { email = "local", name = "local" } end
+    if not has_admin() then return { email = "local", name = "local" } end
     return nil
 end
 
@@ -616,21 +616,36 @@ end
 local function is_admin(req)
     local user = current(req)
     if user == nil or user.email == nil then return false end
-    if not has_accounts() then return true end
+    if not has_admin() then return true end
     return barch.store.get("admin:" .. string.lower(user.email)) ~= nil
 end
 
 function get(req, res, params, query)
-    -- Signed in, at the least. This is every space the HTTP user can read, so it
-    -- is not for a public port whatever the gate says.
-    if current(req) == nil then
-        return fail(res, "sign in to use the space viewer", 401)
-    end
+    -- me answers for any signed-in user AND the local-admin guest on a
+    -- server with no admin yet: the page needs to know who it is before
+    -- it can decide what to draw. Everything else needs a real session
+    -- (or that same guest): this endpoint reads every space the HTTP
+    -- user can see, so it is not for a public port whatever the gate says.
     local tail = string.sub(req.url, string.len("/api/admin/") + 1)
     local q = string.find(tail, "?", 1, true)
     if q then tail = string.sub(tail, 1, q - 1) end
 
-    if tail == "me" then return ok(res, { admin = is_admin(req) }) end
+    if tail == "me" then
+        local user = current(req)
+        if user == nil then return fail(res, "sign in to use the space viewer", 401) end
+        -- admins get their name too: the header shows it next to the exit
+        -- door for everyone signed in, not just non-admins.
+        if is_admin(req) then
+            return ok(res, { admin = true, user = { email = tostring(user.email), name = tostring(user.name) } })
+        end
+        -- a non-admin still gets a name and an exit door: build the object
+        -- up front, because simdjson.encode drops the map keys off a table
+        -- whose row 1 is missing (admin=false leaves a hole).
+        return ok(res, { admin = false, user = { email = tostring(user.email), name = tostring(user.name) } })
+    end
+    if current(req) == nil then
+        return fail(res, "sign in to use the space viewer", 401)
+    end
     if tail == "commands" then
         local raw = barch.store.get("commands.json")
         if type(raw) ~= "string" then
