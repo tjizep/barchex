@@ -1536,7 +1536,7 @@ async function newSpace(ev) {
   const name = (prompt("Name of the new key space:") || "").trim();
   if (!name) return;
   if (!/^[A-Za-z0-9_]+$/.test(name))
-    return alert("a space name is letters, digits and underscores");
+    return toast("a space name is letters, digits and underscores", "warn");
   if (await write("space_add", { name })) {
     const out = await api("spaces").catch(() => null);
     if (out) spaces = out.spaces || [];
@@ -1700,7 +1700,7 @@ async function write(op, params, body, quiet) {
   const q = new URLSearchParams({ space: current, ...params });
   const r = await fetch("/api/admin/" + op + "?" + q, { method: "POST", body: body ?? "" });
   const out = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
-  if (out.error && !(quiet && (out.exists || out.notempty))) { alert(out.error); return null; }
+  if (out.error && !(quiet && (out.exists || out.notempty))) { toast(out.error, "warn"); return null; }
   return out;
 }
 
@@ -1728,10 +1728,10 @@ const careful = () => current === "configuration"
 
 async function saveKey(key) {
   key = key == null ? document.getElementById("ek").value.trim() : decodeURIComponent(key);
-  if (!key) return alert("a key name is required");
+  if (!key) { toast("a key name is required", "warn"); return; }
   const file = document.getElementById("ef").files[0];
   const body = file || document.getElementById("ev").value;
-  if (file && file.size > 512000) return alert("a value is at most 512 kB; that file is " + bytes(file.size));
+  if (file && file.size > 512000) { toast("a value is at most 512 kB; that file is " + bytes(file.size), "warn"); return; }
   if (!confirm(`Set ${key} in ${current}?${careful()}`)) return;
   if (await write("key_put", { key }, body)) { shut(); drawKeys(); }
 }
@@ -1775,7 +1775,7 @@ async function uploadFiles(input) {
 async function newFolder() {
   const name = prompt("New folder name (inside " + fsPath + "):");
   if (!name) return;
-  if (name.includes("/")) return alert("a folder name cannot contain /");
+  if (name.includes("/")) return toast("a folder name cannot contain /", "warn");
   if (await write("dir_mk", { path: (fsPath === "/" ? "" : fsPath) + "/" + name })) drawFiles();
 }
 
@@ -1971,8 +1971,9 @@ async function drawGraph() {
     <div class="crumbs">${crumbs.join(" <span>/</span> ")}</div>
     ${isAdmin ? `<div class="filter"><label class="upload">Add nodes here <input type="file" multiple onchange="uploadNodes(this)"></label>
         <span class="fill"></span>
-        <button onclick="linkNode()">${ico("link")} Link a node</button>
-        <button onclick="newNode()">${ico("folder")} New node</button></div>` : ""}
+        <button onclick="newNode()">${ico("folder")} New node</button>
+        <button onclick="newLeaf()">${ico("file")} New leaf</button>
+        <button onclick="linkNode()">${ico("link")} Link a node</button></div>` : ""}
     <div class="slider" id="gslider" hidden>
       <button onclick="gPageBy(-1)" aria-label="Previous page">${ico("back")}</button>
       <button onclick="gPageBy(1)" aria-label="Next page" style="transform:scaleX(-1)">${ico("back")}</button>
@@ -2087,6 +2088,47 @@ async function newNode() {
   if (!out) return;                    // the server said why, in an alert
   if (out.ok) return drawGraph();
   toast(out.error || "could not make that node", "warn");
+}
+
+// A leaf typed here rather than uploaded: same graph_put the file input uses,
+// with a text area for the body. The type comes from the extension when it is a
+// text kind, so a .json/.md/.html leaf reads back as one; an image extension is
+// ignored because what is being written is text.
+function newLeaf() {
+  show(`<div class="top"><h2>New leaf in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">under <code>${esc(gPath)}</code> · no file needed</div>
+      <div class="editor">
+        <input id="nleaf-name" placeholder="name, e.g. note.txt" autocomplete="off">
+        <textarea id="nleaf-body" rows="14" spellcheck="false" placeholder="leaf content"></textarea>
+        <div class="row">
+          <span class="fill"></span>
+          <button class="primary" onclick="saveLeaf()">Create</button>
+        </div>
+      </div>
+    </div>`);
+}
+
+async function saveLeaf() {
+  const name = (document.getElementById("nleaf-name").value || "").trim();
+  if (!name) { toast("a leaf name is required", "warn"); return; }
+  if (name.includes("/")) { toast("a name has no slashes in it — the path is where it goes", "warn"); return; }
+  const body = document.getElementById("nleaf-body").value;
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  let type = EXT_TYPES[ext] || "text/plain";
+  if (RAW_IMAGES.includes(type)) type = "text/plain";
+  const path = (gPath === "/" ? "" : gPath) + "/" + name;
+  // quiet: write() reports the failure itself; here we only handle the "exists"
+  // answer, which comes back as data rather than an error
+  const out = await write("graph_put", { path, type }, body, true);
+  if (out && out.exists) {
+    if (!confirm(`${path} is already there. Replace it?`)) return;
+    if (!await write("graph_put", { path, type, overwrite: 1 }, body)) return;
+  } else if (!out) {
+    return;
+  }
+  toast(`Saved ${name}`, "ok");
+  shut(); drawGraph();
 }
 
 // A path box that completes as it is typed, shared by Link and Move.
@@ -2422,46 +2464,62 @@ function editFunction(name, source, canEdit) {
   </div>`;
 }
 
+// The Call box and its one-line terminal, shared by a stored function and one
+// that is still being written. `e` is the escaped-encoded name, or null for a
+// new function, whose name is still in the #ek box.
+function callBlock(e, displayName) {
+  const fresh = e == null;
+  const arg = fresh ? "null" : `'${e}'`;
+  return `<div class="fncall">
+    <div class="row">
+      <input id="call-args" placeholder="parameters, e.g. key or &quot;two words&quot; 'single quoted'" spellcheck="false" autocomplete="off" aria-label="Call parameters"
+             onkeydown="if(event.key==='Enter')callFunction(${arg})">
+      <button class="primary" onclick="callFunction(${arg})">${ico("play")} Call</button>
+    </div>
+    <pre class="cons-out" id="call-out" aria-live="polite"><span class="dim">CALLF ${fresh ? "&lt;name&gt;" : esc(displayName)} in ${esc(current)} as the web user.</span></pre>
+  </div>`;
+}
+
 async function openFunction(name) {
   name = decodeURIComponent(name);
   const out = await api("function?space=" + encodeURIComponent(current) +
                         "&name=" + encodeURIComponent(name)).catch(() => null);
   if (!out) return;
-  if (out.error) return alert(out.error);
+  if (out.error) { toast(out.error, "warn"); return; }
   show(`<div class="top"><h2>${esc(out.name || name)}</h2><button onclick="shut()">Close</button></div>
     <div class="valuebox">
       <div class="meta">${esc(current)} · ${esc(out.kind || "luau")}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
       ${isAdmin ? editFunction(out.name || name, out.source ?? "", !out.truncated) : `<pre>${esc(out.source ?? "")}</pre>`}
-      <div class="fncall">
-        <div class="row">
-          <input id="call-args" placeholder="parameters, e.g. key or &quot;two words&quot; 'single quoted'" spellcheck="false" autocomplete="off" aria-label="Call parameters"
-                 onkeydown="if(event.key==='Enter')callFunction('${esc(enc(out.name || name))}')">
-          <button class="primary" onclick="callFunction('${esc(enc(out.name || name))}')">${ico("play")} Call</button>
-        </div>
-        <pre class="cons-out" id="call-out" aria-live="polite"><span class="dim">CALLF ${esc(out.name || name)} in ${esc(current)} as the web user.</span></pre>
-      </div>
+      ${callBlock(esc(enc(out.name || name)), out.name || name)}
     </div>`);
   tabifyFunctionBody();
 }
 
 async function callFunction(name) {
-  name = decodeURIComponent(name);
+  const fresh = name == null;
+  if (fresh) name = (document.getElementById("ek")?.value || "").trim();
+  else name = decodeURIComponent(name);
+  if (!name) { toast("name the function first", "warn"); return; }
   const box = document.getElementById("call-args"), out = document.getElementById("call-out");
   if (!box || !out) return;
-  // Save-before-Call (on by default, toggle in app settings): SETF the
-  // editor body first so the call runs what is on screen. Non-admins and
-  // truncated sources have no editor; they call the stored copy as-is.
-  if (isAdmin && saveBeforeCall()) {
+  // Save-before-Call (on by default, toggle in app settings): SETF the editor
+  // body first so the call runs what is on screen. A function that does not
+  // exist yet is always written first - there is nothing to call otherwise.
+  // Non-admins and truncated sources have no editor; they call the stored copy.
+  if (isAdmin && (fresh || saveBeforeCall())) {
     const ta = document.getElementById("ev");
     if (ta && !ta.disabled) {
       const body = ta.value;
-      if (typeof body === "string" && body.trim() && body !== callFunction._lastSaved?.get(name)) {
-        // write() alerts on failure; quiet it here so a failed save becomes
-        // a yellow toast and the call is skipped, not two stacked dialogs
+      if (typeof body === "string" && body.trim() && (fresh || body !== callFunction._lastSaved?.get(name))) {
+        // write() toasts on failure; quiet it here so a failed save is one
+        // yellow toast and the call is skipped, not two stacked dialogs
         const saved = await write("function_put", { name }, body, true).catch(() => null);
-        if (!saved) { toast(`Not called — ${name} would not compile`, "warn"); return; }
+        if (!saved) return;                 // write() said why
         toast(`Saved ${name}`, "ok");
         (callFunction._lastSaved ??= new Map()).set(name, body);
+      } else if (fresh) {
+        toast("source is required", "warn");
+        return;
       }
     }
   }
@@ -2548,19 +2606,17 @@ function insertFunctionTab(ta, outdent) {
 
 async function saveFunction(name) {
   name = name == null ? document.getElementById("ek").value.trim() : decodeURIComponent(name);
-  if (!name) return alert("a function name is required");
+  if (!name) { toast("a function name is required", "warn"); return; }
   const file = document.getElementById("ef").files[0];
   const body = file || document.getElementById("ev").value;
-  if (file && file.size > 512000) return alert("a value is at most 512 kB; that file is " + bytes(file.size));
-  if (typeof body === "string" && !body.trim()) return alert("source is required");
+  if (file && file.size > 512000) { toast("a value is at most 512 kB; that file is " + bytes(file.size), "warn"); return; }
+  if (typeof body === "string" && !body.trim()) { toast("source is required", "warn"); return; }
   if (!confirm(`SETF ${name} in ${current}? Every connection reloads it.${careful()}`)) return;
-  // quiet the alert: success is a green toast, failure a yellow one
+  // quiet: success is a green toast, a failure is write()'s own yellow one
   if (await write("function_put", { name }, body, true).catch(() => null)) {
     (callFunction._lastSaved ??= new Map()).set(name, typeof body === "string" ? body : "");
     toast(`Saved ${name}`, "ok");
     shut(); drawFunctions();
-  } else {
-    toast(`${name} would not compile`, "warn");
   }
 }
 
@@ -2573,7 +2629,7 @@ async function removeFunction(name) {
 function newFunction() {
   const src = "function call()\n    return \"ok\"\nend\n";
   show(`<div class="top"><h2>New function in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">${editFunction(null, src, true)}</div>`);
+    <div class="valuebox">${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
   tabifyFunctionBody();
 }
 
