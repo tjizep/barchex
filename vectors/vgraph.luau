@@ -59,14 +59,34 @@ end
 function entry()
     local v = barch.store.get(k_entry())
     if v == nil then return nil end
-    return v
+    -- a number, like every id inside the graph: the packed neighbour lists
+    -- give numbers back, and the two have to compare equal
+    return tonumber(v)
 end
 
--- the canonical point: an nk f32 vector decoded from the stored buffer
+-- How many bytes one stored point takes as f16: dim * 2, set at the top of
+-- insert and closest. Not worked out once and kept, because one session's
+-- module cache can serve more than one space.
+local half_bytes = 0
+
+-- The canonical point, as an nk f16 vector.
+--
+-- Stored as f16: half the bytes to keep, half to read back, and the
+-- distance kernels have their own f16 path. What the wire carries is still
+-- f32 - only the graph's own copy is half. A graph written before this
+-- holds f32 buffers, which are twice the bytes for the same number of
+-- components, so they are converted on the way in and everything in the
+-- graph is still compared in one resolution.
 function point_vec(id)
     local b = barch.store.get(k_vec(id))
     if b == nil then return nil end
-    return nkf32vector(b)
+    if half_bytes == 0 then
+        half_bytes = dim() * 2
+    end
+    if #b == half_bytes then
+        return nkf16vector(b)
+    end
+    return nkf16vector(nkf32vector(b))
 end
 
 function point_name(id)
@@ -74,25 +94,52 @@ function point_name(id)
 end
 
 function id_of(name)
-    return barch.store.get(k_id(name))
+    local v = barch.store.get(k_id(name))
+    if v == nil then return nil end
+    return tonumber(v)
 end
 
 function level_of(id)
     return getn(k_level(id), 0)
 end
 
+-- Neighbour lists are packed ids, not text.
+--
+-- Every node the search visits reads its list. Splitting a space separated
+-- one with string.gmatch measured 1.6 us against 0.07 to write a packed one
+-- and 0.46 to read it back, which is most of what an insert spends outside
+-- the arithmetic. The first byte says which it is: a packed list starts
+-- with \1 and a text one starts with a digit, so a graph written before
+-- this still reads, and rewrites itself as its neighbours are relinked.
+local NB_PACKED = "\1"
+
 function nbs_of(id, layer)
     local s = barch.store.get(k_nbs(id, layer))
     if s == nil or s == "" then return {} end
-    local out = {}
-    for tok in string.gmatch(s, "%S+") do
-        out[#out + 1] = tok
+    if string.sub(s, 1, 1) ~= NB_PACKED then
+        local out = {}
+        for tok in string.gmatch(s, "%S+") do
+            out[#out + 1] = tonumber(tok)
+        end
+        return out
+    end
+    local b = buffer.fromstring(s)
+    local n = (buffer.len(b) - 1) // 4
+    local out = table.create(n)
+    for i = 0, n - 1 do
+        out[i + 1] = buffer.readu32(b, 1 + i * 4)
     end
     return out
 end
 
 function set_nbs(id, layer, ids)
-    barch.store.set(k_nbs(id, layer), table.concat(ids, " "))
+    local n = #ids
+    local b = buffer.create(1 + n * 4)
+    buffer.writeu8(b, 0, 1)
+    for i = 1, n do
+        buffer.writeu32(b, 1 + (i - 1) * 4, ids[i])
+    end
+    barch.store.set(k_nbs(id, layer), buffer.tostring(b))
 end
 
 -- nk's metrics need both sides in the same resolution. Distances are
@@ -115,14 +162,64 @@ function distance(a, b)
     return dist(metric(), a, b)
 end
 
--- ART priority queue keyed by "dist id" so equal distances still order
-local function pq_key(dist, id)
-    return tostring(dist) .. " " .. tostring(id)
+-- A binary heap of (distance, id), in two plain arrays.
+--
+-- The search kept its queues in barch.art(), with the distance printed into
+-- the key so the tree would order by it - "0.1234 87" - and read back out
+-- with string.match. Measured on a queue of thirty: a set 0.68 us, a popmin
+-- 1.5, plus 0.14 to build the key and 0.12 to parse it again. Per candidate
+-- considered that is two to three microseconds of bookkeeping against 0.23
+-- for the distance the queue is there to order. The same push and pop on a
+-- heap of numbers is 0.15 us together, and it halved both the query and the
+-- build.
+--
+-- Only a min heap is written. W wants its *worst* element rather than its
+-- best, so it stores distances negated and the same heap answers the other
+-- question - the one place that reads W.d[1] negates it back. Equal
+-- distances come out in no particular order, where the tree used to order
+-- them by the id's printed form.
+local function heap_new()
+    return { d = {}, id = {}, n = 0 }
 end
 
-local function pq_dist(key)
-    return tonumber((string.match(key, "^(%S+)"))) or 0
+local function heap_push(h, d, id)
+    local hd, hi = h.d, h.id
+    local c = h.n + 1
+    h.n = c
+    -- sift the hole up rather than swapping pairs all the way
+    while c > 1 do
+        local p = c // 2
+        if hd[p] <= d then break end
+        hd[c], hi[c] = hd[p], hi[p]
+        c = p
+    end
+    hd[c], hi[c] = d, id
 end
+
+local function heap_pop(h)
+    local n = h.n
+    if n == 0 then return nil, nil end
+    local hd, hi = h.d, h.id
+    local topd, topid = hd[1], hi[1]
+    local ld, lid = hd[n], hi[n]
+    hd[n], hi[n] = nil, nil
+    n -= 1
+    h.n = n
+    if n > 0 then
+        local p = 1
+        while true do
+            local l = p * 2
+            if l > n then break end
+            if l < n and hd[l + 1] < hd[l] then l += 1 end
+            if hd[l] >= ld then break end
+            hd[p], hi[p] = hd[l], hi[l]
+            p = l
+        end
+        hd[p], hi[p] = ld, lid
+    end
+    return topd, topid
+end
+
 
 function random_level(m)
     local mL = 1 / math.log(math.max(m, 2))
@@ -173,8 +270,10 @@ end
 function search_layer(q, eps, ef, layer, m, expand)
     if ef < 1 then ef = 1 end
     local visited = {}
-    local C = barch.art()
-    local W = barch.art()
+    -- C is what to look at next, nearest first. W is the ef best found so
+    -- far, and it is asked for its worst, so it holds negated distances.
+    local C = heap_new()
+    local W = heap_new()
 
     local function consider(id)
         if visited[id] then return end
@@ -182,13 +281,12 @@ function search_layer(q, eps, ef, layer, m, expand)
         local w = point_vec(id)
         if w == nil then return end
         local d = dist(m, q, w)
-        local far = W:max()
-        if W:size() < ef or far == nil or d < pq_dist(far) then
-            local pk = pq_key(d, id)
-            C:set(pk, id)
-            W:set(pk, id)
-            if W:size() > ef then
-                W:popmax()
+        -- W.n < ef is checked first, so W.d[1] is never read while W is empty
+        if W.n < ef or d < -W.d[1] then
+            heap_push(C, d, id)
+            heap_push(W, -d, id)
+            if W.n > ef then
+                heap_pop(W)
             end
         end
     end
@@ -197,11 +295,10 @@ function search_layer(q, eps, ef, layer, m, expand)
         consider(eps[i])
     end
 
-    while C:size() > 0 do
-        local ck, cid = C:popmin()
+    while C.n > 0 do
+        local cd, cid = heap_pop(C)
         if cid == nil then break end
-        local far = W:max()
-        if far ~= nil and pq_dist(ck) > pq_dist(far) then
+        if W.n > 0 and cd > -W.d[1] then
             break
         end
         local nbs = nbs_of(cid, layer)
@@ -212,10 +309,13 @@ function search_layer(q, eps, ef, layer, m, expand)
         end
     end
 
-    local out = {}
-    while W:size() > 0 do
-        local _, id = W:popmin()
-        out[#out + 1] = id
+    -- W comes out worst first, so fill the answer from the back
+    local k = W.n
+    local out = table.create(k)
+    while W.n > 0 do
+        local _, id = heap_pop(W)
+        out[k] = id
+        k -= 1
     end
     return out
 end
@@ -270,19 +370,19 @@ function prune(id, layer, cap, mm)
     if #nbs <= cap then return end
     local w = point_vec(id)
     if w == nil then return end
-    local Q = barch.art()
+    local Q = heap_new()
+    local mmm = mm or metric()
     for i = 1, #nbs do
         local nb = nbs[i]
         local nw = point_vec(nb)
         if nw ~= nil then
-            local d = dist(mm or metric(), w, nw)
-            Q:set(pq_key(d, nb), nb)
+            heap_push(Q, dist(mmm, w, nw), nb)
         end
     end
     local keep = {}
     for i = 1, cap do
-        if Q:size() == 0 then break end
-        local _, nb = Q:popmin()
+        if Q.n == 0 then break end
+        local _, nb = heap_pop(Q)
         keep[#keep + 1] = nb
     end
     set_nbs(id, layer, keep)
@@ -330,17 +430,19 @@ function insert(name, f32vec)
     local use_heur = heur()
     local build_expand = build_expand_cap()
     local count_now = count() + 1
-    local id = tostring(count_now)
+    local id = count_now
     local lvl = random_level(m)
+    half_bytes = n * 2
+    local qvec = nkf16vector(f32vec)
     barch.store.set(k_count(), tostring(count_now))
-    barch.store.set(k_vec(id), f32vec:buffer())
+    barch.store.set(k_vec(id), qvec:buffer())
     barch.store.set(k_name(id), name)
-    barch.store.set(k_id(name), id)
+    barch.store.set(k_id(name), tostring(id))
     barch.store.set(k_level(id), tostring(lvl))
 
     local ep = entry()
     if ep == nil then
-        barch.store.set(k_entry(), id)
+        barch.store.set(k_entry(), tostring(id))
         return id, true
     end
 
@@ -348,7 +450,7 @@ function insert(name, f32vec)
     local curr = ep
     if ep_lvl > lvl then
         for layer = ep_lvl, lvl + 1, -1 do
-            curr = greedy(f32vec, curr, layer, mm)
+            curr = greedy(qvec, curr, layer, mm)
         end
     end
 
@@ -358,10 +460,10 @@ function insert(name, f32vec)
         -- build expansion cap: only the closest neighbours per pop during
         -- insert beam search (same cap as query time when set). Narrows the
         -- candidate set edges are chosen from, so it shapes the graph.
-        local found = search_layer(f32vec, {curr}, efc_now, layer, mm, build_expand)
+        local found = search_layer(qvec, {curr}, efc_now, layer, mm, build_expand)
         local pick
         if use_heur then
-            pick = select_heuristic(f32vec, found, m, mm)
+            pick = select_heuristic(qvec, found, m, mm)
         else
             pick = select_simple(found, m)
         end
@@ -375,7 +477,7 @@ function insert(name, f32vec)
     end
 
     if lvl > ep_lvl then
-        barch.store.set(k_entry(), id)
+        barch.store.set(k_entry(), tostring(id))
     end
     return id, true
 end
@@ -409,6 +511,9 @@ end
 -- Reads metric and efSearch once: everything below is pure compute.
 function closest(q, k)
     if k == nil or k < 1 then k = 1 end
+    -- the graph compares in f16, so the query joins it there
+    half_bytes = dim() * 2
+    q = nkf16vector(q)
     local m = metric()
     local beam = math.max(efs(), k)
     local ep = entry()
@@ -460,6 +565,9 @@ end
 -- count, M, efConstruction, efSearch, heuristic, metric, dim, entry,
 -- expand, build_expand
 function stats()
+    -- the entry point goes out as text, the way it always has: ids are
+    -- numbers inside the graph now, and PARAMS is a client-facing answer
+    local e = entry()
     return {
         count(),
         M(),
@@ -468,7 +576,7 @@ function stats()
         heur() and 1 or 0,
         metric(),
         dim(),
-        entry() or "",
+        e ~= nil and tostring(e) or "",
         expand_cap() or 0,
         build_expand_cap() or 0,
     }

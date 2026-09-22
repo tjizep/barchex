@@ -123,10 +123,12 @@ function cmd_set(name, buf)
     if id == nil then
         return {err = added_or_err or "could not insert"}
     end
+    -- as text: the graph keeps ids as numbers now, and SET has always
+    -- answered this one as a string
     if added_or_err then
-        return {"OK", id}
+        return {"OK", tostring(id)}
     end
-    return {"exists", id}
+    return {"exists", tostring(id)}
 end
 
 -- CLOSEST <buffer> [k]. Same packed buffer as SET; k is a separate bare

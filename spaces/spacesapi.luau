@@ -25,9 +25,16 @@ function call()
 end
 
 -- Accounts are the USERS function in this space (users.luau). The same
--- keys: user:<email>, sess:<sid>, admin:<email>. With no admin yet, a local
--- admin so a clean server works. The sandbox has no load(), so these
--- helpers are copied rather than compiling USERS here.
+-- keys: user:<email>, sess:<sid>, admin:<email>. The sandbox has no load(),
+-- so these helpers are copied rather than compiling USERS here.
+--
+-- A server with no admin has no way in and no guest either: `me` says so and
+-- the page puts the account form up at once, because the first account made
+-- here becomes the admin (users.luau register/signon do that). It used to
+-- hand the browser on the machine itself a `local` guest instead, which let
+-- a clean server be read without an account ever being made - and made
+-- signing out look as though the button did nothing, since the guest came
+-- straight back.
 local function has_admin()
     local page = barch.store.range("admin:", "admin;", 1)
     return type(page) == "table" and #page > 0
@@ -42,7 +49,6 @@ local function current(req)
             if raw ~= nil then return simdjson.parse(raw) end
         end
     end
-    if not has_admin() then return { email = "local", name = "local" } end
     return nil
 end
 
@@ -529,6 +535,146 @@ local function file(req, res, query)
     return ok(res, out)
 end
 
+
+-- Somebody already on the machine, rather than a browser somewhere else. The
+-- host paths - settings, and the export and import files - are open to one and
+-- refused to the other. `req.remote` is the connection's own peer address;
+-- barch does not read X-Forwarded-For, so a browser cannot claim to be local.
+local function is_local(req)
+    local ip = req.remote or ""
+    return ip == "::1" or string.find(ip, "^127%.") ~= nil or string.find(ip, "^::ffff:127%.") ~= nil
+end
+
+-- ---- the graph store -------------------------------------------------------
+--
+-- GRAPH is the same idea as the file store with the paths taken out. It keeps
+-- {parent, name, id} edges over a node table, so one node can hang under any
+-- number of parents and the same content answers at more than one path. Since
+-- no path is stored, this cannot walk a key range the way the Files tab does -
+-- it asks GRAPH to resolve one level at a time.
+--
+-- LS gives a line per edge: `kind edge node refs name`, the name last because
+-- it is the only field that can hold a space.
+
+local function graph_row(line)
+    local kind, edge, id, refs, name = string.match(tostring(line), "^(%S+) (%S+) (%S+) (%S+) (.*)$")
+    if kind == nil then return nil end
+    return {
+        dir = kind == "dir",
+        edge = tonumber(edge) or 0,
+        id = tonumber(id) or 0,
+        refs = tonumber(refs) or 0,
+        name = name,
+    }
+end
+
+-- STAT gives `k=v` pairs with the path first, and the path is the one field
+-- that can hold a space - so the pairs are read from `kind=` onwards.
+local NUMERIC = { id = true, refs = true, edge = true, size = true,
+                  chunk = true, chunks = true, version = true }
+
+local function graph_stat(sp, path)
+    local held, line = pcall(function() return sp:call("GRAPH", "STAT", path) end)
+    if not held or type(line) ~= "string" then return nil end
+    local at = string.find(line, " kind=", 1, true)
+    local out = { path = path }
+    for k, v in string.gmatch(at and string.sub(line, at + 1) or line, "(%w+)=(%S*)") do
+        out[k] = NUMERIC[k] and (tonumber(v) or 0) or v
+    end
+    return out
+end
+
+local function graph(req, res, query)
+    local sp, err = open(query.space)
+    if sp == nil then return fail(res, err, 404) end
+    if sp:get("graph:layout") == nil then
+        return ok(res, { space = query.space, path = "/", graph = false, entries = {} })
+    end
+    local path = query.path or "/"
+    if string.sub(path, 1, 1) ~= "/" then path = "/" .. path end
+    if path ~= "/" and string.sub(path, -1) == "/" then path = string.sub(path, 1, -2) end
+    local limit = clamp(query.limit, 1, 500, 25)
+    local offset = clamp(query.offset, 0, 100000000, 0)
+
+    -- one more than asked for, so the page knows whether to offer a next
+    local held, rows = pcall(function()
+        return sp:call("GRAPH", "LS", path, "OFFSET", tostring(offset), "LIMIT", tostring(limit + 1))
+    end)
+    if not held then
+        return fail(res, string.gsub(tostring(rows), "^[^:]*:%d+: ", ""), 404)
+    end
+    if type(rows) ~= "table" then rows = {} end
+    local entries = {}
+    for i = 1, math.min(#rows, limit) do
+        local row = graph_row(rows[i])
+        if row ~= nil then
+            -- what a leaf holds, for the same two columns the Files tab has.
+            -- One STAT per row, so only while the page is a page.
+            if not row.dir and limit <= 100 then
+                local at = (path == "/" and "" or path) .. "/" .. row.name
+                local n = graph_stat(sp, at)
+                if n ~= nil then
+                    row.size = n.size
+                    row.type = n.type
+                    row.version = n.version
+                end
+            end
+            entries[#entries + 1] = row
+        end
+    end
+    return ok(res, {
+        space = query.space, path = path, graph = true, entries = entries,
+        offset = offset, more = #rows > limit, node = graph_stat(sp, path),
+    })
+end
+
+-- One node: what it is, and what a leaf holds. Same shape the Files tab reads.
+local function graph_node(req, res, query)
+    local sp, err = open(query.space)
+    if sp == nil then return fail(res, err, 404) end
+    local path = query.path or ""
+    if string.sub(path, 1, 1) ~= "/" then path = "/" .. path end
+    local n = graph_stat(sp, path)
+    if n == nil then return fail(res, "no such node", 404) end
+    if n.kind == "dir" then
+        return ok(res, { space = query.space, path = path, node = n, kind = "dir" })
+    end
+
+    local want = query.raw == "1" and (n.size or 0) or PREVIEW
+    local held, bytes = pcall(function()
+        return sp:call("GRAPH", "GET", path, "FROM", "0", "LEN", tostring(want))
+    end)
+    if not held or type(bytes) ~= "string" then bytes = "" end
+
+    if query.raw == "1" and RAW_TYPES[n.type or ""] then
+        res.code = 200
+        res:header("Content-Type", n.type)
+        res:header("X-Content-Type-Options", "nosniff")
+        res:header("Cache-Control", "private, max-age=60")
+        res.body = bytes
+        return
+    end
+
+    local istext = string.find(bytes, "[\0-\8\11\12\14-\31]") == nil
+    if istext then
+        local okay, len = pcall(utf8.len, bytes)
+        istext = okay and len ~= nil
+    end
+    local out = {
+        space = query.space, path = path, kind = "leaf", node = n,
+        type = n.type or "", size = n.size, version = n.version,
+        truncated = #bytes < (n.size or 0),
+    }
+    if istext then
+        out.text = bytes
+    else
+        local hex = {}
+        for i = 1, math.min(#bytes, 512) do hex[i] = string.format("%02x", string.byte(bytes, i)) end
+        out.hex = table.concat(hex, " ")
+    end
+    return ok(res, out)
+end
+
 -- Settings this page will not change, or only from the machine itself.
 --
 -- Always locked: where the server listens and binds. Changing either cuts off the
@@ -548,10 +694,6 @@ local function host_only(name)
     return string.find(name, "_dir$") ~= nil or string.find(name, "_file$") ~= nil
         or string.find(name, "^tls") ~= nil or string.find(name, "^traffic_") ~= nil
         or string.find(name, "^functions_git") ~= nil or string.find(name, "^cgroup_") ~= nil
-end
-local function is_local(req)
-    local ip = req.remote or ""
-    return ip == "::1" or string.find(ip, "^127%.") ~= nil or string.find(ip, "^::ffff:127%.") ~= nil
 end
 -- nil when it may be set; otherwise why not
 local function locked(name, here)
@@ -621,27 +763,34 @@ local function is_admin(req)
 end
 
 function get(req, res, params, query)
-    -- me answers for any signed-in user AND the local-admin guest on a
-    -- server with no admin yet: the page needs to know who it is before
-    -- it can decide what to draw. Everything else needs a real session
-    -- (or that same guest): this endpoint reads every space the HTTP
-    -- user can see, so it is not for a public port whatever the gate says.
+    -- me answers for any signed-in user, and for nobody at all on a server
+    -- with no admin yet - the page needs to know which before it can decide
+    -- what to draw. Everything else needs a real session: this endpoint
+    -- reads every space the HTTP user can see, so it is not for a public
+    -- port whatever the gate says.
     local tail = string.sub(req.url, string.len("/api/admin/") + 1)
     local q = string.find(tail, "?", 1, true)
     if q then tail = string.sub(tail, 1, q - 1) end
 
     if tail == "me" then
         local user = current(req)
+        -- nobody is the admin yet: that is not a refusal, it is the one thing
+        -- the page can still do something about, so it is a 200 saying so
+        if user == nil and not has_admin() then
+            return ok(res, { admin = false, needs_admin = true, here = is_local(req) })
+        end
         if user == nil then return fail(res, "sign in to use the space viewer", 401) end
         -- admins get their name too: the header shows it next to the exit
         -- door for everyone signed in, not just non-admins.
         if is_admin(req) then
-            return ok(res, { admin = true, user = { email = tostring(user.email), name = tostring(user.name) } })
+            return ok(res, { admin = true, here = is_local(req),
+                             user = { email = tostring(user.email), name = tostring(user.name) } })
         end
         -- a non-admin still gets a name and an exit door: build the object
         -- up front, because simdjson.encode drops the map keys off a table
         -- whose row 1 is missing (admin=false leaves a hole).
-        return ok(res, { admin = false, user = { email = tostring(user.email), name = tostring(user.name) } })
+        return ok(res, { admin = false, here = is_local(req),
+                         user = { email = tostring(user.email), name = tostring(user.name) } })
     end
     if current(req) == nil then
         return fail(res, "sign in to use the space viewer", 401)
@@ -665,6 +814,8 @@ function get(req, res, params, query)
     if tail == "function" then return fn(req, res, query) end
     if tail == "fs" then return files(req, res, query) end
     if tail == "file" then return file(req, res, query) end
+    if tail == "graph" then return graph(req, res, query) end
+    if tail == "node" then return graph_node(req, res, query) end
     if tail == "config" then return config(req, res) end
     if tail == "stats" then return stats(req, res) end
     fail(res, "no such endpoint", 404)
@@ -685,6 +836,19 @@ end
 --   config_set?name             CONFIG SET name to the body (a server setting, not a space's)
 --   dir_mk?space&path           make a folder
 --   dir_rm?space&path[&recursive=1]   delete a folder; without `recursive` only an empty one
+--   graph_mkdir?space&path      make an interior node
+--   graph_put?space&path&type[&overwrite=1]   write the body as a leaf
+--   graph_mv?space&path&to      move one edge to another path
+--   graph_link?space&id&path    a second edge onto a node that already exists
+--   graph_unlink?space&path     take one edge away; the node goes with its last
+--   graph_rm?space&path[&recursive=1] the node and every edge naming it
+--   export?space&path          EXPORT the space to a file on the server
+--   import?space&path          IMPORT a file on the server into the space
+--   export_all?dir             a file per space, named after it, in that directory
+--   import_all?dir             every <name>.resp in it, back into <name>
+--
+-- The four above write and read files on the *server's* filesystem and are
+-- offered only to a request from the machine itself, like the host settings.
 --
 -- file_mv renames a folder too: the name records move and no chunk is touched.
 --
@@ -861,6 +1025,176 @@ local function post(req, res, params, query)
         if not set then return fail(res, tostring(why), 409) end
         local now = barch.call("CONFIG", "GET", name)
         return ok(res, { ok = true, name = name, value = now and tostring(now[2]) or body })
+    end
+
+    -- ---- export and import -------------------------------------------------
+    --
+    -- EXPORT writes a key space as the commands that would rebuild it - SET,
+    -- HSET, RPUSH, ZADD - as a RESP stream; IMPORT replays one. The path is on
+    -- the *server's* filesystem, not the browser's, which is why these are
+    -- local only: the same rule the host directory settings live under, for the
+    -- same reason. An import merges - keys the stream names are overwritten,
+    -- keys it does not name are left alone - so a replacement means clearing
+    -- the space first.
+    if tail == "export" or tail == "import" or tail == "export_all" or tail == "import_all" then
+        if not is_local(req) then
+            return fail(res, "export and import write files on the server, so they are "
+                             .. "only offered from the machine itself (127.0.0.1)", 403)
+        end
+        -- IMPORT carries `dangerous` as well as `admin`, and the web user is
+        -- usually granted neither, so the refusal is the first thing most
+        -- people will see here. Say what it means rather than leaving them
+        -- with the bare ACL message.
+        local function why(e)
+            local msg = string.gsub(tostring(e), "^[^:]*:%d+: ", "")
+            if string.find(msg, "not authorized", 1, true) ~= nil then
+                msg = msg .. " — EXPORT needs the `admin` category and IMPORT needs "
+                          .. "`dangerous` too. Grant them to the web user (setup.sh "
+                          .. "decides what it gets), or run the command from redis-cli."
+            end
+            return msg
+        end
+        -- EXPORT and IMPORT answer with a count, as barch's own 64 bit
+        -- `integer` rather than a Lua number - `tonumber` on one of those is
+        -- nil, which is how the first version of this reported every export as
+        -- nought keys. Through its text, then.
+        local function one(name, path, which)
+            local sp = barch.space[name]
+            local held, out = pcall(function() return sp:call(which, path) end)
+            if not held then return nil, why(out) end
+            return tonumber(tostring(out)) or 0
+        end
+
+        if tail == "export" or tail == "import" then
+            local sp, err = open(space)
+            if sp == nil then return fail(res, err, 404) end
+            local path = query.path
+            if path == nil or path == "" then return fail(res, "a file path is required") end
+            local n, bad = one(space, path, tail == "export" and "EXPORT" or "IMPORT")
+            if n == nil then return fail(res, bad, 409) end
+            return ok(res, { ok = true, space = space, path = path, keys = n })
+        end
+
+        -- every space into one directory, a file each, named after the space
+        local dir = query.dir
+        if dir == nil or dir == "" then return fail(res, "a directory is required") end
+        if string.sub(dir, -1) == "/" then dir = string.sub(dir, 1, -2) end
+
+        if tail == "export_all" then
+            local out = {}
+            for _, sp in ipairs(space_list()) do
+                if sp.openable then
+                    local n, bad = one(sp.name, dir .. "/" .. sp.name .. ".resp", "EXPORT")
+                    out[#out + 1] = { space = sp.name, keys = n, error = bad }
+                end
+            end
+            return ok(res, { ok = true, dir = dir, spaces = out })
+        end
+
+        -- and back: <space>.resp into the space it is named after, for every
+        -- space the server has. Nothing here can list a directory - DIR walks
+        -- keys that look like a tree, not the filesystem, and Luau has no way
+        -- to the host's files - so this asks the spaces, not the folder. A
+        -- space with no file beside it says so and the others carry on; a
+        -- space that is gone altogether has to be made first, which the page
+        -- does with the + beside Spaces.
+        local out = {}
+        for _, sp in ipairs(space_list()) do
+            if sp.openable then
+                local n, bad = one(sp.name, dir .. "/" .. sp.name .. ".resp", "IMPORT")
+                out[#out + 1] = { space = sp.name, keys = n, error = bad }
+            end
+        end
+        if #out == 0 then return fail(res, "no key spaces to import into", 404) end
+        return ok(res, { ok = true, dir = dir, spaces = out })
+    end
+
+    -- The graph store, through GRAPH in the named space. Same operations the
+    -- Files tab has, plus the two that only a graph can do: LINK hangs a node
+    -- that already exists under another name, and UNLINK takes one edge away
+    -- and leaves the node alone unless that was its last.
+    if string.sub(tail, 1, 6) == "graph_" then
+        local sp, err = open(space)
+        if sp == nil then return fail(res, err, 404) end
+        local path = query.path
+        if path == nil or string.sub(path, 1, 1) ~= "/" then
+            return fail(res, "an absolute path is required")
+        end
+        local function run(...)
+            local args = { ... }
+            local held, out = pcall(function() return sp:call(table.unpack(args)) end)
+            if not held then
+                return nil, string.gsub(tostring(out), "^[^:]*:%d+: ", "")
+            end
+            return out, nil
+        end
+        if tail == "graph_mkdir" then
+            local _, why = run("GRAPH", "MKDIR", path)
+            if why then return fail(res, why, 409) end
+            return ok(res, { ok = true })
+        end
+        if tail == "graph_put" then
+            if #body > MAX_VALUE then
+                return fail(res, "a node is at most " .. MAX_VALUE .. " bytes; that is " .. #body, 413)
+            end
+            -- an existing node is only replaced when the page says so, having asked
+            if query.overwrite ~= "1" and graph_stat(sp, path) ~= nil then
+                res.code = 409
+                res:header("Content-Type", "application/json")
+                res.body = simdjson.encode({ error = path .. " exists", exists = true })
+                return
+            end
+            local _, why
+            if query.type ~= nil and query.type ~= "" then
+                _, why = run("GRAPH", "PUT", path, body, "TYPE", query.type)
+            else
+                _, why = run("GRAPH", "PUT", path, body)
+            end
+            if why then return fail(res, why, 409) end
+            return ok(res, { ok = true, size = #body })
+        end
+        if tail == "graph_mv" then
+            local to = query.to
+            if to == nil or string.sub(to, 1, 1) ~= "/" then
+                return fail(res, "an absolute new path is required")
+            end
+            local _, why = run("GRAPH", "MV", path, to)
+            if why then return fail(res, why, 409) end
+            return ok(res, { ok = true })
+        end
+        if tail == "graph_link" then
+            local id = query.id
+            if id == nil or string.find(tostring(id), "^%d+$") == nil then
+                return fail(res, "a node id is required")
+            end
+            local _, why = run("GRAPH", "LINK", tostring(id), path)
+            if why then return fail(res, why, 409) end
+            return ok(res, { ok = true })
+        end
+        if tail == "graph_unlink" then
+            if path == "/" then return fail(res, "the root has no edge to take away", 403) end
+            local _, why = run("GRAPH", "UNLINK", path)
+            if why then return fail(res, why, 409) end
+            return ok(res, { ok = true })
+        end
+        if tail == "graph_rm" then
+            if path == "/" then return fail(res, "the root cannot be deleted", 403) end
+            local _, why
+            if query.recursive == "1" then
+                _, why = run("GRAPH", "RM", path, "RECURSIVE")
+            else
+                _, why = run("GRAPH", "RM", path)
+            end
+            if why then
+                res.code = 409
+                res:header("Content-Type", "application/json")
+                res.body = simdjson.encode({ error = why,
+                    notempty = string.find(why, "not empty", 1, true) ~= nil })
+                return
+            end
+            return ok(res, { ok = true })
+        end
+        return fail(res, "no such endpoint", 404)
     end
 
     if tail == "file_put" or tail == "file_mv" or tail == "file_rm" or tail == "dir_mk" or tail == "dir_rm" then

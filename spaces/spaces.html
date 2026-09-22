@@ -914,7 +914,7 @@ a.head-btn:hover { text-decoration: none; }
 
 main.viewer { grid-template-columns: 260px 1fr; }
 main.viewer nav a {
-  display: grid; grid-template-columns: 18px 1fr auto 28px; gap: 10px;
+  display: grid; grid-template-columns: 18px 1fr auto 26px 26px; gap: 8px;
   align-items: center;
 }
 main.viewer nav a .ib {
@@ -993,6 +993,8 @@ table.keys td.v {
 }
 .notice.small { font-size: 12.5px; }
 .notice a { color: var(--l1); }
+.notice.ok { background: var(--ok-soft); border-color: #a9d3bf; color: var(--ok); }
+.notice.warn { background: var(--l2-soft); border-color: #ddb493; color: var(--l2); }
 
 .valuebox { padding: 14px 18px 18px; }
 .valuebox .meta {
@@ -1119,6 +1121,32 @@ main.viewer nav a .icon .ico { width: 16px; height: 16px; }
 .slider input[type=range] { height: 28px; }
 .slider span { min-width: 12em; }
 
+/* a node the graph names more than once: the same content at several paths */
+table.keys td .refs { color: var(--ink-3); }
+
+/* the link panel: two boxes and the completion list under the second */
+.linker label { display: block; font-size: 12px; color: var(--ink-3); margin-bottom: 10px; }
+.linker input {
+  box-sizing: border-box; width: 100%; height: 34px; margin-top: 5px; padding: 0 10px;
+  font-family: var(--mono); font-size: 12.5px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.linker .row { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.linker input[readonly] { color: var(--ink-3); background: var(--surface-2); }
+.lk-note { font-size: 12px; color: var(--ink-3); }
+.lk-list {
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--paper); max-height: 260px; overflow: auto; margin: -4px 0 4px;
+}
+.lk-row {
+  display: grid; grid-template-columns: 18px 1fr auto auto; gap: 10px; align-items: center;
+  padding: 7px 10px; cursor: pointer; font-family: var(--mono); font-size: 12.5px;
+  border-bottom: 1px solid var(--line-2);
+}
+.lk-row:last-child { border-bottom: 0; }
+.lk-row:hover, .lk-row.on { background: var(--surface-2); }
+.lk-row .id, .lk-row .taken { color: var(--ink-3); font-size: 11px; }
+
 .filepic { display: flex; justify-content: center; padding: 8px; background: var(--surface-2); border-radius: var(--r-sm); }
 .filepic img { max-width: 100%; max-height: 62vh; object-fit: contain; }
 
@@ -1136,6 +1164,13 @@ table.keys td.act .ib:first-child { margin-left: 0; }
 table.keys td.act .ib:hover { color: var(--ink); border-color: var(--line-3); }
 table.keys td.act .ib:last-child:hover { color: var(--flag); border-color: var(--flag); }
 table.keys td.act .ico { width: 16px; height: 16px; }
+
+/* calling a function: parameter box plus Call, output below */
+.fncall { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.fncall .row { display: flex; gap: 8px; align-items: center; }
+.fncall input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; }
+.fncall button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.fncall .cons-out { margin: 8px 0 0; }
 
 .filter input + input { min-width: 0; }
 
@@ -1174,6 +1209,8 @@ table.cfg .cv { width: 100%; font-family: var(--mono); font-size: 11.5px; paddin
 table.cfg .locked { color: var(--ink-3); }
 table.cfg td.act { width: 52px; }
 #toast { position: fixed; right: 18px; bottom: 18px; z-index: 60; max-width: 60ch; }
+#toast.ok { background: var(--ok-soft); border-color: #a9d3bf; color: var(--ok); }
+#toast.warn { background: var(--l2-soft); border-color: #ddb493; color: var(--l2); }
 
 table.cfg select.cv { width: 100%; font-family: var(--mono); font-size: 11.5px; padding: 3px 6px; }
 
@@ -1183,6 +1220,15 @@ table.cfg select.cv { width: 100%; font-family: var(--mono); font-size: 11.5px; 
   justify-content: center; border-radius: 50%; color: var(--ink-3); background: transparent; }
 .gear:hover { color: var(--ink); border-color: var(--line-3); }
 .gear .ico { width: 15px; height: 15px; }
+
+/* app settings dialog: label/value rows, same chrome as the config editor */
+.appsettings { display: grid; gap: 10px; }
+.appsettings .asrow { display: flex; align-items: center; gap: 10px; }
+.appsettings .asrow label { flex: 1; font-size: 13px; color: var(--ink-2); }
+.appsettings .asrow select { font-family: var(--mono); font-size: 12.5px; padding: 6px 10px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.appsettings .asrow select:focus { outline: none; border-color: var(--l1); box-shadow: 0 0 0 2px var(--l1-soft); }
+.appsettings .ashint { font-size: 12px; color: var(--ink-3); }
 
 /* `hidden` has to win over the display these rules set (.subbar a, .slider) */
 [hidden] { display: none !important; }
@@ -1240,6 +1286,7 @@ table.cfg td.act .ib { width: 30px; height: 30px; }
     <div class="viewer-title"><i data-ico="database"></i> Key spaces</div>
     <span class="fill"></span>
     <span class="head-user" id="head-user" hidden style="font-family:var(--mono);font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40vw"></span>
+    <button class="head-btn" id="settings-btn" aria-label="App settings" title="App settings"><i data-ico="gear"></i></button>
     <button class="head-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle dark mode"><i data-ico="contrast"></i></button>
     <button class="head-btn" id="signout-btn" aria-label="Sign out" title="Sign out" hidden><i data-ico="exit"></i></button>
   </div>
@@ -1248,6 +1295,7 @@ table.cfg td.act .ib { width: 30px; height: 30px; }
   <div class="bar" id="tabs">
     <a href="#" data-tab="keys" class="on"><i data-ico="key"></i> Keys</a>
     <a href="#" data-tab="files"><i data-ico="folder"></i> Files</a>
+    <a href="#" data-tab="graph"><i data-ico="graph"></i> Graph</a>
     <a href="#" data-tab="functions"><i data-ico="code"></i> Function</a>
     <a href="#" data-tab="config"><i data-ico="sliders"></i> Configuration</a>
     <a href="#" data-tab="console" id="tab-console" hidden><i data-ico="terminal"></i> Console</a>
@@ -1279,7 +1327,10 @@ Object.assign(ICONS, {
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
   code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
   plus: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8"/><path d="M8 12h8"/>',
-  exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>'
+  exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  graph: '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="m10.6 7.2-3.9 9.4"/><path d="m13.4 7.2 3.9 9.4"/><path d="M7.5 19h9"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.8-1.7"/>',
+  transfer: '<path d="M4 8h13"/><path d="m13 4 4 4-4 4"/><path d="M20 16H7"/><path d="m11 12-4 4 4 4"/>'
 });
 const ico = n => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ICONS.tag}</svg>`;
 document.querySelectorAll("[data-ico]").forEach(e => { e.innerHTML = ico(e.dataset.ico); });
@@ -1290,6 +1341,7 @@ document.querySelectorAll("[data-ico]").forEach(e => { e.innerHTML = ico(e.datas
 (function () {
   const root = document.documentElement;
   try { const t = localStorage.getItem("theme"); if (t) root.dataset.theme = t; } catch (e) {}
+  applyTabWidth();
   document.addEventListener("DOMContentLoaded", () => {
     const b = document.getElementById("theme-btn");
     if (b) b.onclick = () => {
@@ -1298,14 +1350,88 @@ document.querySelectorAll("[data-ico]").forEach(e => { e.innerHTML = ico(e.datas
       root.dataset.theme = dark ? "light" : "dark";
       try { localStorage.setItem("theme", root.dataset.theme); } catch (e) {}
     };
+    const s = document.getElementById("settings-btn");
+    if (s) s.onclick = openAppSettings;
   });
 })();
+
+// ---- app settings ---------------------------------------------------------
+//
+// Per-browser viewer preferences in localStorage (no server round trip, so
+// they work signed out and differ per machine):
+//   tabWidth: how wide a tab renders AND how many spaces Tab inserts in the
+//     function editor (2, 4 or 8; default 4)
+//   saveBeforeCall: "1" to SETF the editor body before CALLF when Call is
+//     pressed (default), "0" to call the stored copy as-is
+function appSetting(key, dflt) {
+  try {
+    const v = localStorage.getItem("appsettings:" + key);
+    return v == null ? dflt : v;
+  } catch (e) { return dflt; }
+}
+
+function setAppSetting(key, value) {
+  try { localStorage.setItem("appsettings:" + key, value); } catch (e) {}
+}
+
+function tabWidth() {
+  const n = parseInt(appSetting("tabWidth", "4"), 10);
+  return [2, 4, 8].includes(n) ? n : 4;
+}
+
+// tab rendering follows the setting live: the editor textarea gets
+// tab-size, and Tab inserts that many spaces (real tabs would render at
+// the browser default of 8 whatever we set here)
+function applyTabWidth() {
+  const ta = document.getElementById("ev");
+  if (ta) ta.style.tabSize = String(tabWidth());
+}
+
+function openAppSettings() {
+  const w = tabWidth();
+  const save = saveBeforeCall();
+  show(`<div class="top"><h2>${ico("gear")} App settings</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox"><div class="appsettings">
+      <div class="asrow">
+        <label for="as-tabwidth">Tab width</label>
+        <select id="as-tabwidth" onchange="setTabWidth(this.value)">
+          ${[2, 4, 8].map(n => `<option value="${n}"${n === w ? " selected" : ""}>${n}</option>`).join("")}
+        </select>
+      </div>
+      <div class="asrow">
+        <label for="as-savecall">Save before Call</label>
+        <select id="as-savecall" onchange="setSaveBeforeCall(this.value)">
+          <option value="1"${save ? " selected" : ""}>On</option>
+          <option value="0"${save ? "" : " selected"}>Off</option>
+        </select>
+      </div>
+      <div class="ashint">Tab width applies to the function editor: how wide tabs render and how many spaces the Tab key inserts. Save before Call SETFs the editor body first when Call is pressed, so the call runs what you see. Stored in this browser only.</div>
+    </div></div>`);
+}
+
+function setTabWidth(value) {
+  const n = parseInt(value, 10);
+  if (![2, 4, 8].includes(n)) return;
+  setAppSetting("tabWidth", String(n));
+  applyTabWidth();
+  toast("Tab width = " + n);
+}
+
+function saveBeforeCall() {
+  return appSetting("saveBeforeCall", "1") !== "0";
+}
+
+function setSaveBeforeCall(value) {
+  setAppSetting("saveBeforeCall", value === "0" ? "0" : "1");
+  toast("Save before Call = " + (saveBeforeCall() ? "on" : "off"));
+}
 </script>
 <script>
 // A read-only look at every key space, out of /api/admin/*. Everything here is a
 // GET: the viewer never writes, which is why there is no confirm anywhere in it.
 let spaces = [], current = null, tab = "keys";
 let fsPath = "/", keyPrefix = "", keyMatch = "", fsMatch = "", fnMatch = "";
+let gPath = "/";                       // where the graph tab is looking
 
 // for a name that goes inside onclick='...': encodeURIComponent leaves ' alone
 const enc = s => encodeURIComponent(s).replace(/'/g, "%27");
@@ -1331,8 +1457,34 @@ async function boot() {
   // me goes first: /spaces 401s for non-admins, and reading it first used
   // to throw boot() out before setUser() ever ran.
   const me = await api("me").catch(() => null);
-  if (!me) return;
+  // Nobody is the admin yet. There is no guest and no way in, and the one
+  // thing that helps is making the account - the first one made here becomes
+  // the admin - so the form goes up at once rather than a refusal.
+  if (me && me.needs_admin) {
+    needsAdmin = true;
+    isHere = !!me.here;
+    setUser(null);
+    spaces = []; current = null;
+    document.getElementById("spaces").innerHTML = "";
+    document.getElementById("pane").innerHTML =
+      `<div class="notice">This server has no admin account yet.
+       The first account made here becomes the admin.</div>`;
+    openAuth("register");
+    return;
+  }
+  needsAdmin = false;
+  if (!me) {
+    // not signed in: the sign-in panel is already up (api() opens it on a 401),
+    // and what is behind it is not this browser's to look at any more
+    setUser(null);
+    spaces = []; current = null;
+    document.getElementById("spaces").innerHTML = "";
+    document.getElementById("pane").innerHTML =
+      `<div class="empty" style="padding:60px 0">Signed out.</div>`;
+    return;
+  }
   isAdmin = !!me.admin;
+  isHere = !!me.here;          // the browser is on the machine the server runs on
   document.getElementById("tab-console").hidden = !isAdmin;
   setUser(me.user);
   if (!isAdmin) {
@@ -1359,7 +1511,10 @@ function drawSpaces() {
   document.getElementById("spaces").innerHTML =
     `<div class="spaces-head">
       <h3>Spaces</h3>
-      ${isAdmin ? `<button class="gear" title="Add a key space" aria-label="Add a key space"
+      ${isAdmin ? `<button class="gear" title="Export or import every space"
+        aria-label="Export or import every space"
+        onclick="openTransferAll(event)">${ico("transfer")}</button>
+      <button class="gear" title="Add a key space" aria-label="Add a key space"
         onclick="newSpace(event)">${ico("plus")}</button>` : ""}
     </div>` + spaces.map(s => `
       <a href="#" class="${s.name === current ? "on" : ""}${s.openable ? "" : " off"}"
@@ -1367,7 +1522,10 @@ function drawSpaces() {
         <span class="icon">${ico(s.files ? "folder" : "key")}</span>
         <span class="sname">${esc(s.name)}</span>
         <span class="count">${num(s.keys)}</span>
-        ${isAdmin && s.openable ? `<button class="ib" title="Delete ${esc(s.name)}"
+        ${isAdmin && s.openable ? `<button class="ib" title="Export or import ${esc(s.name)}"
+          aria-label="Export or import ${esc(s.name)}"
+          onclick="openTransfer(event,'${esc(enc(s.name))}')">${ico("transfer")}</button>
+        <button class="ib" title="Delete ${esc(s.name)}"
           aria-label="Delete ${esc(s.name)}"
           onclick="dropSpace(event,'${esc(enc(s.name))}')">${ico("minus")}</button>` : ""}
       </a>`).join("");
@@ -1382,7 +1540,7 @@ async function newSpace(ev) {
   if (await write("space_add", { name })) {
     const out = await api("spaces").catch(() => null);
     if (out) spaces = out.spaces || [];
-    current = name; fsPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = ""; fnMatch = "";
+    current = name; fsPath = "/"; gPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = ""; fnMatch = "";
     drawSpaces();
     draw();
   }
@@ -1408,7 +1566,7 @@ function pickSpace(ev, name) {
   ev.preventDefault();
   const s = spaces.find(x => x.name === name);
   if (!s || !s.openable) return;
-  current = name; fsPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = ""; fnMatch = "";
+  current = name; fsPath = "/"; gPath = "/"; keyPrefix = ""; keyMatch = ""; fsMatch = ""; fnMatch = "";
   drawSpaces();
   draw();
 }
@@ -1427,6 +1585,7 @@ document.getElementById("tabs").onclick = ev => {
 function draw() {
   if (tab === "keys") return drawKeys();
   if (tab === "files") return drawFiles();
+  if (tab === "graph") return drawGraph();
   if (tab === "functions") return drawFunctions();
   if (tab === "stats") return drawStats();
 }
@@ -1440,6 +1599,8 @@ function draw() {
 
 const PAGE = 25;
 let isAdmin = false;     // the server decides; this only decides what to draw
+let isHere = false;      // the browser is on the machine the server runs on
+let needsAdmin = false;  // no admin account on this server yet, so make one
 let keyTotal = 0, keyAt = 0, keyTimer = null, keySeq = 0;
 
 async function drawKeys() {
@@ -1786,6 +1947,411 @@ async function openFile(ev, path) {
 
 function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(path || "%2F"); fsMatch = ""; drawFiles(); }
 
+
+// ---- graph ------------------------------------------------------------------
+//
+// The same shape as the file store with the paths taken out: {parent, name, id}
+// edges over a node table, so one node can hang under several parents and the
+// same content answers at more than one path. That is what the id and refs
+// columns are for - two rows with the same id are the same node, and refs says
+// how many edges name it, so a leaf with refs 3 is in three places at once.
+//
+// Nothing here can walk key ranges the way Files does, because no path is
+// stored: GRAPH LS resolves one level at a time, and it pages by offset with no
+// total to slide over, so this has a next and a previous instead of a slider.
+
+let gAt = 0, gSeq = 0, gMore = false, gNode = null;
+
+async function drawGraph() {
+  const pane = document.getElementById("pane");
+  const parts = gPath.split("/").filter(Boolean);
+  const crumbs = [`<a href="#" onclick="goNode(event,'%2F')">/</a>`].concat(
+    parts.map((p, i) => `<a href="#" onclick="goNode(event,'${esc(enc("/" + parts.slice(0, i + 1).join("/")))}')">${esc(p)}</a>`));
+  pane.innerHTML = head("graph store") + `
+    <div class="crumbs">${crumbs.join(" <span>/</span> ")}</div>
+    ${isAdmin ? `<div class="filter"><label class="upload">Add nodes here <input type="file" multiple onchange="uploadNodes(this)"></label>
+        <span class="fill"></span>
+        <button onclick="linkNode()">${ico("link")} Link a node</button>
+        <button onclick="newNode()">${ico("folder")} New node</button></div>` : ""}
+    <div class="slider" id="gslider" hidden>
+      <button onclick="gPageBy(-1)" aria-label="Previous page">${ico("back")}</button>
+      <button onclick="gPageBy(1)" aria-label="Next page" style="transform:scaleX(-1)">${ico("back")}</button>
+      <span id="gslide-at" style="flex:1"></span>
+    </div>
+    <div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
+  gAt = 0;
+  const out = await loadGraph();
+  if (!out) return;
+  if (!out.graph) {
+    document.getElementById("rows").innerHTML =
+      `<div class="empty" style="padding:40px 0">
+         <b>${esc(current)}</b> has no graph — nothing has written one here.</div>`;
+    return;
+  }
+  showGraph(out);
+}
+
+async function loadGraph() {
+  const q = new URLSearchParams({ space: current, path: gPath, limit: PAGE, offset: gAt * PAGE });
+  const seq = ++gSeq;
+  const out = await api("graph?" + q).catch(() => null);
+  if (out && out.error) { toast(out.error, "warn"); return null; }
+  return seq === gSeq ? out : null;          // a later click has already asked for another page
+}
+
+function showGraph(out) {
+  const entries = Array.isArray(out.entries) ? out.entries : [];
+  gMore = !!out.more;
+  gNode = out.node || null;
+  const at = e => enc((gPath === "/" ? "" : gPath) + "/" + e.name);
+  const where = gNode
+    ? `node ${num(gNode.id)}${gNode.refs > 1 ? ` · ${num(gNode.refs)} edges in` : ""}`
+    : "graph store";
+  document.querySelector(".head .count").textContent =
+    `${num(entries.length)}${gMore ? "+" : ""} ${entries.length === 1 ? "edge" : "edges"} · ${where}`;
+  document.getElementById("rows").innerHTML = !entries.length
+    ? `<div class="empty" style="padding:30px 0">Nothing under here.</div>`
+    : `<table class="keys"><tbody>${entries.map(e => `
+      <tr onclick="${e.dir ? "goNode(event" : "openNode(event"},'${esc(at(e))}')">
+        <td class="k" title="${esc(e.name)}">${ico(e.dir ? "folder" : "file")} ${esc(e.name)}${e.dir ? "/" : ""}</td>
+        <td class="kind" title="${esc(e.type || "")}">${esc(e.type || (e.dir ? "dir" : ""))}</td>
+        <td class="sz">${e.dir ? "" : bytes(e.size)}</td>
+        <td class="v" title="node ${esc(e.id)}, edge ${esc(e.edge)}${e.refs > 1 ? `, named by ${esc(e.refs)} edges` : ""}">
+          #${esc(e.id)}${e.refs > 1 ? ` <span class="refs">×${esc(e.refs)}</span>` : ""}</td>
+        ${isAdmin ? `<td class="act">
+          <button class="ib" title="Move or rename" aria-label="Move ${esc(e.name)}"
+                  onclick="moveNode(event,'${esc(at(e))}')">${ico("more")}</button>
+          <button class="ib" title="${e.refs > 1 ? "Unlink here" : "Delete"}"
+                  aria-label="${e.refs > 1 ? "Unlink" : "Delete"} ${esc(e.name)}"
+                  onclick="dropNode(event,'${esc(at(e))}',${e.dir ? "true" : "false"},${Number(e.refs) || 1})">${ico("minus")}</button></td>` : ""}
+      </tr>`).join("")}</tbody></table>`;
+  const from = gAt * PAGE + 1;
+  document.getElementById("gslider").hidden = gAt === 0 && !gMore;
+  document.getElementById("gslide-at").textContent =
+    entries.length ? `${num(from)}–${num(from + entries.length - 1)}${gMore ? "" : " of " + num(from + entries.length - 1)}` : "";
+}
+
+async function gPageBy(n) {
+  const to = gAt + n;
+  if (to < 0 || (n > 0 && !gMore)) return;
+  gAt = to;
+  const out = await loadGraph();
+  if (out) showGraph(out);
+}
+
+function goNode(ev, path) { ev.preventDefault(); gPath = decodeURIComponent(path || "%2F"); gAt = 0; drawGraph(); }
+
+async function openNode(ev, path) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  const q = "space=" + encodeURIComponent(current) + "&path=" + encodeURIComponent(path);
+  const out = await api("node?" + q).catch(() => null);
+  if (!out) return;
+  if (out.error) return toast(out.error, "warn");
+  const n = out.node || {};
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  const type = out.type || EXT_TYPES[ext] || "";
+  let shown;
+  if (RAW_IMAGES.includes(type)) {
+    shown = `<div class="filepic"><img alt="${esc(path)}" src="/api/admin/node?${q}&raw=1"></div>`;
+  } else if (out.text != null) {
+    let body = out.text;
+    if (type.includes("json")) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {} }
+    shown = `<pre>${esc(body)}</pre>`;
+  } else if (out.hex != null) {
+    shown = `<div class="meta">binary — first ${Math.min(512, out.size || 0)} bytes</div><pre>${esc(out.hex || "")}</pre>`;
+  } else {
+    shown = `<div class="empty" style="padding:20px 0">An interior node — open it from the list to see what hangs under it.</div>`;
+  }
+  // the node's own line: what a triple store knows that a path does not say
+  const ids = `node ${esc(n.id)}${n.edge != null ? ` · edge ${esc(n.edge)}` : ""} · named by ${esc(n.refs)} ${n.refs === 1 ? "edge" : "edges"}`;
+  show(`<div class="top"><h2>${esc(path)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(current)} · ${esc(ids)}</div>
+      <div class="meta">${esc(type || (out.kind === "dir" ? "interior node" : "unknown type"))}${out.size != null ? " · " + bytes(out.size) : ""}${out.version != null ? " · v" + esc(out.version) : ""}${out.truncated ? " · truncated" : ""}</div>
+      ${isAdmin ? `<div class="filter"><button onclick="linkNode(${Number(n.id) || 0})">${ico("link")} Link this node somewhere else</button></div>` : ""}
+      ${shown}
+    </div>`);
+}
+
+// ---- the graph, changed ------------------------------------------------------
+
+async function newNode() {
+  const name = prompt("Name for the new interior node");
+  if (!name) return;
+  if (await write("graph_mkdir", { path: (gPath === "/" ? "" : gPath) + "/" + name })) drawGraph();
+}
+
+// A path box that completes as it is typed, shared by Link and Move.
+//
+// Neither operation can be done from memory: Link needs a node to hang and a
+// path to hang it at, Move needs a destination. So a box lists what is under
+// the parent typed so far, puts the slash on when a directory is taken - and
+// the next listing with it - and marks the names already in use, which the
+// server would refuse anyway.
+//
+// One completer per box, each with its own listing cache, because the Link
+// panel has two of them and they are looking at different places. A directory
+// of more than 200 completes against the first 200 and the note says so.
+
+const PC = {};                       // input id -> what that box is completing
+
+function pathBox(id, value, label, hint) {
+  return `<label>${esc(label)}
+      <input id="${esc(id)}" autocomplete="off" spellcheck="false"
+             value="${esc(value)}" placeholder="${esc(hint || "/teams/core/ada.json")}"></label>
+    <div class="lk-list" id="${esc(id)}-list" hidden></div>`;
+}
+
+// took(row) is called with the row taken; submit() is what Enter does when no
+// row is highlighted.
+function pcStart(id, took, submit, focus) {
+  PC[id] = { shown: [], pick: -1, seq: 0, cache: new Map(), took, submit };
+  const box = document.getElementById(id);
+  box.addEventListener("input", () => pcComplete(id));
+  box.addEventListener("keydown", ev => pcKey(id, ev));
+  box.addEventListener("focus", () => {
+    for (const other of Object.keys(PC)) if (other !== id) pcHide(other);
+    pcComplete(id);
+  });
+  if (focus) {
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+    pcComplete(id);
+  }
+}
+
+function pcNote(msg) {
+  const n = document.getElementById("pc-note");
+  if (n) n.textContent = msg;
+}
+
+function pcHide(id) {
+  const list = document.getElementById(id + "-list");
+  if (list) list.hidden = true;
+  if (PC[id]) PC[id].pick = -1;
+}
+
+const PC_HINT = "Tab or ↓ to complete a name.";
+
+async function pcComplete(id) {
+  const st = PC[id];
+  const box = document.getElementById(id);
+  if (!st || !box) return;
+  const v = box.value;
+  const cut = v.lastIndexOf("/");
+  const parent = cut <= 0 ? "/" : v.slice(0, cut);
+  const frag = v.slice(cut + 1).toLowerCase();
+  if (!st.cache.has(parent)) {
+    const seq = ++st.seq;
+    const out = await api("graph?" + new URLSearchParams(
+      { space: current, path: parent, limit: 200 })).catch(() => null);
+    if (seq !== st.seq) return;                      // a later keystroke asked for another one
+    st.cache.set(parent, !out || out.error || !out.graph ? null
+      : { rows: Array.isArray(out.entries) ? out.entries : [], more: !!out.more });
+  }
+  const held = st.cache.get(parent);
+  if (held === null) {
+    pcHide(id);
+    return pcNote(`${parent} is not a node in ${current}`);
+  }
+  st.shown = held.rows.filter(e => e.name.toLowerCase().startsWith(frag)).slice(0, 8);
+  st.pick = -1;
+  if (!st.shown.length) {
+    pcHide(id);
+    return pcNote(frag
+      ? `nothing under ${parent} starts with that${held.more ? " (of the first 200)" : ""}`
+      : `${parent} is empty`);
+  }
+  pcDraw(id);
+  pcNote(held.more ? "the first 200 under this one" : PC_HINT);
+}
+
+function pcDraw(id) {
+  const st = PC[id];
+  const list = document.getElementById(id + "-list");
+  list.hidden = false;
+  list.innerHTML = st.shown.map((e, i) => `
+    <div class="lk-row${i === st.pick ? " on" : ""}"
+         onmousedown="event.preventDefault();pcTake('${esc(id)}',${i})">
+      ${ico(e.dir ? "folder" : "file")}
+      <span class="nm">${esc(e.name)}${e.dir ? "/" : ""}</span>
+      <span class="id">#${esc(e.id)}${e.refs > 1 ? ` ×${esc(e.refs)}` : ""}</span>
+      <span class="taken">${e.dir ? "" : "name taken"}</span>
+    </div>`).join("");
+}
+
+// taking one: a directory keeps the path going, so it gets its slash and its
+// listing at once; a leaf ends it. The panel is told which node it was.
+function pcTake(id, i) {
+  const st = PC[id];
+  const e = st && st.shown[i];
+  const box = document.getElementById(id);
+  if (!e || !box) return;
+  const cut = box.value.lastIndexOf("/");
+  box.value = box.value.slice(0, cut + 1) + e.name + (e.dir ? "/" : "");
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+  if (st.took) st.took(e, box.value);
+  pcComplete(id);
+}
+
+function pcKey(id, ev) {
+  const st = PC[id];
+  if (!st) return;
+  if (ev.key === "ArrowDown" || (ev.key === "Tab" && !ev.shiftKey)) {
+    if (!st.shown.length) return;
+    ev.preventDefault();
+    if (ev.key === "Tab" && st.shown.length === 1) return pcTake(id, 0);
+    st.pick = (st.pick + 1) % st.shown.length;
+    pcDraw(id);
+    return;
+  }
+  if (ev.key === "ArrowUp") {
+    if (!st.shown.length) return;
+    ev.preventDefault();
+    st.pick = (st.pick - 1 + st.shown.length) % st.shown.length;
+    pcDraw(id);
+    return;
+  }
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    if (st.pick >= 0) return pcTake(id, st.pick);
+    if (st.submit) st.submit();
+  }
+}
+
+// a path from a box, or null with the reason said out loud
+function pcWanted(id) {
+  const path = (document.getElementById(id).value || "").trim();
+  if (!path.startsWith("/")) { pcNote("the path is absolute: it starts at /"); return null; }
+  if (path.endsWith("/")) { pcNote("the path needs a name at the end, not just a folder"); return null; }
+  return path;
+}
+
+// LINK is the one a file store cannot do: a second edge onto a node that is
+// already there, so the same content answers at two paths.
+//
+// Two boxes, because they are two different questions and one box could not
+// answer both: walking the destination used to overwrite the id with whatever
+// directory was stepped through, so a node picked first was gone by the time
+// the path was finished. The top box finds the node - taking a row there fills
+// the id in, and offers the same name under the path being browsed - and the
+// bottom one says where the new edge goes.
+function linkNode(id) {
+  const here = gPath === "/" ? "" : gPath;
+  show(`<div class="top"><h2>${ico("link")} Link a node</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(current)} · in ${esc(gPath)} · a second edge onto a node that is already there</div>
+      <div class="linker">
+        ${pathBox("lk-src", "/", "Node to link — find it by its path", "/today")}
+        <label>Node id
+          <input id="lk-id" autocomplete="off" spellcheck="false" inputmode="numeric"
+                 value="${esc(id ? String(id) : "")}" placeholder="the # in the list, e.g. 5"></label>
+        ${pathBox("lk-path", here + "/", "Path for the new edge", here + "/name")}
+        <div class="row">
+          <button class="primary" onclick="doLink()">${ico("link")} Link</button>
+          <span class="lk-note" id="pc-note">${PC_HINT} Enter to link.</span>
+        </div>
+      </div>
+    </div>`);
+  // the source box fills the id, and proposes the same name under the path
+  // being browsed while that box is still just the folder
+  pcStart("lk-src", (e, value) => {
+    document.getElementById("lk-id").value = e.id;
+    const dest = document.getElementById("lk-path");
+    if (dest.value === here + "/" || dest.value === "") dest.value = here + "/" + e.name;
+    pcNote(`node ${e.id} · from ${value}`);
+  }, doLink, !id);
+  // the destination box does not touch the id: walking it is navigation
+  pcStart("lk-path", null, doLink, !!id);
+}
+
+async function doLink() {
+  const id = (document.getElementById("lk-id").value || "").trim();
+  if (!/^\d+$/.test(id)) return pcNote("a node id is a number — the # column, or pick one above");
+  const path = pcWanted("lk-path");
+  if (path == null) return;
+  if (!await write("graph_link", { id, path })) return;
+  shut();
+  const cut = path.lastIndexOf("/");
+  gPath = cut <= 0 ? "/" : path.slice(0, cut);       // land where the new edge is
+  gAt = 0;
+  drawGraph();
+}
+
+// MV moves one edge. The node does not move - nothing about it changes - which
+// is why this is the same box: the destination is a path like any other.
+function moveNode(ev, path) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  show(`<div class="top"><h2>${ico("more")} Move</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(current)} · in ${esc(gPath)} · the edge moves, the node stays as it is</div>
+      <div class="linker">
+        <label>Moving<input value="${esc(path)}" readonly tabindex="-1"></label>
+        ${pathBox("mv-to", path, "Move it to", path)}
+        <div class="row">
+          <button class="primary" onclick="doMove('${esc(enc(path))}')">${ico("more")} Move</button>
+          <span class="lk-note" id="pc-note">${PC_HINT} Enter to move.</span>
+        </div>
+      </div>
+    </div>`);
+  pcStart("mv-to", e => {
+    if (!e.dir) pcNote(`there is already a ${e.name} here — pick another name`);
+  }, () => doMove(enc(path)), true);
+}
+
+async function doMove(from) {
+  from = decodeURIComponent(from);
+  const to = pcWanted("mv-to");
+  if (to == null) return;
+  if (to === from) { shut(); return; }
+  if (!await write("graph_mv", { path: from, to })) return;
+  shut();
+  const cut = to.lastIndexOf("/");
+  gPath = cut <= 0 ? "/" : to.slice(0, cut);
+  gAt = 0;
+  drawGraph();
+}
+
+// refs > 1 means the node is somewhere else too, so the honest offer is to take
+// this edge away rather than to delete what is behind it.
+async function dropNode(ev, path, isDir, refs) {
+  ev.stopPropagation();
+  path = decodeURIComponent(path);
+  if (refs > 1) {
+    if (!confirm(`${path} is named by ${refs} edges. Take this one away and leave the node?`)) return;
+    if (await write("graph_unlink", { path })) drawGraph();
+    return;
+  }
+  if (!confirm(`Delete ${path}${isDir ? " and everything under it" : ""}?`)) return;
+  const out = await write("graph_rm", isDir ? { path, recursive: 1 } : { path }, null, true);
+  if (out && out.notempty) {
+    if (!confirm(`${path} is not empty. Delete it and everything under it?`)) return;
+    if (!await write("graph_rm", { path, recursive: 1 })) return;
+  } else if (!out) {
+    return;
+  }
+  drawGraph();
+}
+
+async function uploadNodes(input) {
+  const base = gPath === "/" ? "" : gPath;
+  for (const f of input.files) {
+    const path = base + "/" + f.name;
+    const body = await f.arrayBuffer();
+    let out = await write("graph_put", { path, type: f.type || "" }, body, true);
+    if (out && out.exists) {
+      if (!confirm(`${path} is already there. Replace it?`)) continue;
+      out = await write("graph_put", { path, type: f.type || "", overwrite: 1 }, body);
+    }
+    if (!out) break;
+  }
+  input.value = "";
+  drawGraph();
+}
+
 // ---- functions --------------------------------------------------------------
 //
 // KEYSF lists the stored functions in the space; they are not ordinary keys, so
@@ -1859,7 +2425,118 @@ async function openFunction(name) {
     <div class="valuebox">
       <div class="meta">${esc(current)} · ${esc(out.kind || "luau")}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
       ${isAdmin ? editFunction(out.name || name, out.source ?? "", !out.truncated) : `<pre>${esc(out.source ?? "")}</pre>`}
+      <div class="fncall">
+        <div class="row">
+          <input id="call-args" placeholder="parameters, e.g. key or &quot;two words&quot; 'single quoted'" spellcheck="false" autocomplete="off" aria-label="Call parameters"
+                 onkeydown="if(event.key==='Enter')callFunction('${esc(enc(out.name || name))}')">
+          <button class="primary" onclick="callFunction('${esc(enc(out.name || name))}')">${ico("play")} Call</button>
+        </div>
+        <pre class="cons-out" id="call-out" aria-live="polite"><span class="dim">CALLF ${esc(out.name || name)} in ${esc(current)} as the web user.</span></pre>
+      </div>
     </div>`);
+  tabifyFunctionBody();
+}
+
+async function callFunction(name) {
+  name = decodeURIComponent(name);
+  const box = document.getElementById("call-args"), out = document.getElementById("call-out");
+  if (!box || !out) return;
+  // Save-before-Call (on by default, toggle in app settings): SETF the
+  // editor body first so the call runs what is on screen. Non-admins and
+  // truncated sources have no editor; they call the stored copy as-is.
+  if (isAdmin && saveBeforeCall()) {
+    const ta = document.getElementById("ev");
+    if (ta && !ta.disabled) {
+      const body = ta.value;
+      if (typeof body === "string" && body.trim() && body !== callFunction._lastSaved?.get(name)) {
+        // write() alerts on failure; quiet it here so a failed save becomes
+        // a yellow toast and the call is skipped, not two stacked dialogs
+        const saved = await write("function_put", { name }, body, true).catch(() => null);
+        if (!saved) { toast(`Not called — ${name} would not compile`, "warn"); return; }
+        toast(`Saved ${name}`, "ok");
+        (callFunction._lastSaved ??= new Map()).set(name, body);
+      }
+    }
+  }
+  let args;
+  try { args = splitArgs(box.value.trim()); } catch (e) { out.innerHTML = `<span class="rerr">(error) ${esc(e.message)}</span>`; return; }
+  const quote = a => /[\s"'\\]/.test(a) || a === "" ? JSON.stringify(a) : a;
+  const shown = ["CALLF", name, ...args].map(quote).join(" ");
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n…`;
+  const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
+    { method: "POST", body: JSON.stringify({ args: ["CALLF", name, ...args] }) });
+  const res = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  if (!res.ok) {
+    // yellow toast for a failed call; the red inline line keeps the detail
+    toast(`Call to ${name} failed`, "warn");
+    out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
+      `<span class="rerr">(error) ${esc(res.error || "failed")}</span>`;
+    return;
+  }
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` + renderReply(res.reply, "");
+}
+
+// Tab inside the function body inserts indentation instead of moving focus.
+// Shift+Tab removes one level; Esc leaves the textarea. The unit is spaces
+// (tabWidth(): 2, 4 or 8, default 4, from app settings) so rendering matches
+// insertion whatever the browser default of 8 would do to a real tab.
+function tabifyFunctionBody() {
+  const ta = document.getElementById("ev");
+  if (!ta || ta.disabled || ta.dataset.tabify) { applyTabWidth(); return; }
+  ta.dataset.tabify = "1";
+  applyTabWidth();
+  ta.addEventListener("keydown", e => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      insertFunctionTab(ta, e.shiftKey);
+    } else if (e.key === "Escape") {
+      ta.blur();
+    }
+  });
+}
+
+function tabUnit() {
+  return " ".repeat(tabWidth());
+}
+
+function insertFunctionTab(ta, outdent) {
+  const unit = tabUnit();
+  const start = ta.selectionStart ?? ta.value.length;
+  const end = ta.selectionEnd ?? start;
+  if (outdent) {
+    // remove one unit (spaces) or one tab at the start of each selected line
+    const before = ta.value.slice(0, start);
+    const sel = ta.value.slice(start, end);
+    const after = ta.value.slice(end);
+    const sol = before.lastIndexOf("\n") + 1;
+    const head = before.slice(sol);
+    const lines = (head + sel).split("\n");
+    const fixed = lines.map(l => {
+      if (l.startsWith(unit)) return l.slice(unit.length);
+      if (l.startsWith("\t")) return l.slice(1);
+      return l.replace(/^ {1,8}/, m => m.length >= unit.length ? m.slice(unit.length) : "");
+    });
+    const joined = fixed.join("\n");
+    ta.value = before.slice(0, sol) + joined + after;
+    const moved = joined.length - (head + sel).length;
+    ta.selectionStart = start + (fixed[0].length - lines[0].length);
+    ta.selectionEnd = end + moved;
+    return;
+  }
+  if (start !== end) {
+    // indent every selected line by one unit
+    const before = ta.value.slice(0, start);
+    const sel = ta.value.slice(start, end);
+    const after = ta.value.slice(end);
+    const sol = before.lastIndexOf("\n") + 1;
+    const joined = (before.slice(sol) + sel).split("\n").map(l => unit + l).join("\n");
+    ta.value = before.slice(0, sol) + joined + after;
+    ta.selectionStart = start + unit.length;
+    ta.selectionEnd = start + joined.length - before.slice(sol).length;
+    return;
+  }
+  // no selection: insert one unit at the caret
+  ta.setRangeText(unit, start, end, "end");
 }
 
 async function saveFunction(name) {
@@ -1870,7 +2547,14 @@ async function saveFunction(name) {
   if (file && file.size > 512000) return alert("a value is at most 512 kB; that file is " + bytes(file.size));
   if (typeof body === "string" && !body.trim()) return alert("source is required");
   if (!confirm(`SETF ${name} in ${current}? Every connection reloads it.${careful()}`)) return;
-  if (await write("function_put", { name }, body)) { shut(); drawFunctions(); }
+  // quiet the alert: success is a green toast, failure a yellow one
+  if (await write("function_put", { name }, body, true).catch(() => null)) {
+    (callFunction._lastSaved ??= new Map()).set(name, typeof body === "string" ? body : "");
+    toast(`Saved ${name}`, "ok");
+    shut(); drawFunctions();
+  } else {
+    toast(`${name} would not compile`, "warn");
+  }
 }
 
 async function removeFunction(name) {
@@ -1883,6 +2567,7 @@ function newFunction() {
   const src = "function call()\n    return \"ok\"\nend\n";
   show(`<div class="top"><h2>New function in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
     <div class="valuebox">${editFunction(null, src, true)}</div>`);
+  tabifyFunctionBody();
 }
 
 // ---- RESP console (admins) --------------------------------------------------
@@ -2171,11 +2856,13 @@ async function authCall(op, body) {
 }
 
 function openAuth(mode) {
-  const signin = mode !== "register";
+  const signin = mode ? mode !== "register" : !needsAdmin;
   show(`<div class="top"><h2>${signin ? "Sign in" : "Create an account"}</h2>`
     + `<button onclick="shut()">Close</button></div>
     <div class="valuebox"><div class="auth-card" style="box-shadow:none;margin:0;max-width:none">
-      <p class="sub">The viewer reads every space this server has.</p>
+      <p class="sub">${needsAdmin && !signin
+        ? "This server has no admin yet — whoever creates the first account becomes it."
+        : "The viewer reads every space this server has."}</p>
       <div class="err" id="auth-err" style="display:none"></div>
       <form id="auth-f">
         ${signin ? "" : `<div><label for="auth-name">Name</label>`
@@ -2189,7 +2876,9 @@ function openAuth(mode) {
       </form>
       <div class="foot">${signin
         ? `New here? <a href="#" onclick="event.preventDefault();openAuth('register')">Create an account</a>`
-        : `Have one? <a href="#" onclick="event.preventDefault();openAuth('signin')">Sign in</a>`}</div>
+        : needsAdmin
+          ? `The account you make is the admin of this server.`
+          : `Have one? <a href="#" onclick="event.preventDefault();openAuth('signin')">Sign in</a>`}</div>
     </div></div>`);
   document.getElementById("auth-f").addEventListener("submit", async e => {
     e.preventDefault();
@@ -2231,7 +2920,122 @@ function setUser(user) {
 
 async function signout() {
   await fetch("/api/spaces-user/signout", { method: "POST" }).catch(() => null);
-  boot();
+  setUser(null);                       // signed out is signed out, whatever comes next
+  await boot();
+}
+
+
+// ---- export and import ------------------------------------------------------
+//
+// EXPORT writes a key space as the commands that would rebuild it - SET, HSET,
+// RPUSH, ZADD - as a RESP stream; IMPORT replays one. The file is on the
+// server's filesystem, not this machine's, which is the first thing the panel
+// says, and the pair is offered only to a browser on the server itself.
+//
+// An import merges: keys the stream names are overwritten, keys it does not are
+// left alone. That is the right default for a way back from a bad state, and
+// the wrong one if a replacement was meant, so the panel says so out loud.
+
+function transferNote(msg, kind) {
+  const n = document.getElementById("tr-note");
+  if (!n) return;
+  n.textContent = msg;
+  n.className = "notice small" + (kind === "ok" ? " ok" : kind === "warn" ? " warn" : "");
+}
+
+function notLocal() {
+  return `<div class="notice small warn">The file is written and read on the machine the
+    server runs on, so this is only offered from a browser on that machine (127.0.0.1).
+    You are somewhere else.</div>`;
+}
+
+function openTransfer(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  name = decodeURIComponent(name);
+  show(`<div class="top"><h2>${ico("transfer")} Export or import · ${esc(name)}</h2>
+      <button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">${esc(name)} · a RESP command stream, on the server's filesystem</div>
+      ${isHere ? `<div class="linker">
+        <label>File, on the server
+          <input id="tr-path" autocomplete="off" spellcheck="false"
+                 value="${esc(name)}.resp" placeholder="${esc(name)}.resp"></label>
+        <div class="row">
+          <button class="primary" onclick="doTransfer('export','${esc(enc(name))}')">${ico("transfer")} Export</button>
+          <button onclick="doTransfer('import','${esc(enc(name))}')">${ico("transfer")} Import</button>
+        </div>
+        <div class="notice small" id="tr-note">A relative path lands where the server runs.
+          Import merges into what is already there; clear the space first to replace it.</div>
+      </div>` : notLocal()}
+    </div>`);
+  if (isHere) document.getElementById("tr-path").focus();
+}
+
+async function doTransfer(op, name) {
+  name = decodeURIComponent(name);
+  const path = (document.getElementById("tr-path").value || "").trim();
+  if (!path) return transferNote("a file path is needed", "warn");
+  if (op === "import" && !confirm(
+      `Replay ${path} into ${name}?\n\nKeys the file names are overwritten. Keys it does not name are left alone.`))
+    return;
+  transferNote(op === "export" ? "writing…" : "replaying…");
+  const out = await write(op, { space: name, path });
+  if (!out) return transferNote("it did not run — see the message above", "warn");
+  transferNote(`${num(out.keys)} ${out.keys === 1 ? "key" : "keys"} ${op === "export" ? "written to" : "read from"} ${out.path}`, "ok");
+  if (op === "import") {
+    const list = await api("spaces").catch(() => null);
+    if (list) { spaces = list.spaces || []; drawSpaces(); }
+    if (name === current) draw();
+  }
+}
+
+function openTransferAll(ev) {
+  ev.preventDefault();
+  show(`<div class="top"><h2>${ico("transfer")} Export or import every space</h2>
+      <button onclick="shut()">Close</button></div>
+    <div class="valuebox">
+      <div class="meta">a file per space, named after it, on the server's filesystem</div>
+      ${isHere ? `<div class="linker">
+        <label>Directory, on the server
+          <input id="tr-path" autocomplete="off" spellcheck="false" value="." placeholder="."></label>
+        <div class="row">
+          <button class="primary" onclick="doTransferAll('export_all')">${ico("transfer")} Export all</button>
+          <button onclick="doTransferAll('import_all')">${ico("transfer")} Import all</button>
+        </div>
+        <div class="notice small" id="tr-note">Export writes &lt;space&gt;.resp for every space that can be
+          opened. Import looks for &lt;space&gt;.resp beside each space it finds and merges it in — a space
+          that is gone has to be made first, with the + above.</div>
+        <div id="tr-rows"></div>
+      </div>` : notLocal()}
+    </div>`);
+  if (isHere) document.getElementById("tr-path").focus();
+}
+
+async function doTransferAll(op) {
+  const dir = (document.getElementById("tr-path").value || "").trim();
+  if (!dir) return transferNote("a directory is needed", "warn");
+  if (op === "import_all" && !confirm(
+      `Replay every .resp in ${dir} into the space it is named after?\n\n` +
+      `Spaces that are not there are made. Keys the files name are overwritten.`))
+    return;
+  transferNote(op === "export_all" ? "writing…" : "replaying…");
+  document.getElementById("tr-rows").innerHTML = "";
+  const out = await write(op, { dir });
+  if (!out) return transferNote("it did not run — see the message above", "warn");
+  const rows = Array.isArray(out.spaces) ? out.spaces : [];
+  const bad = rows.filter(r => r.error).length;
+  transferNote(`${num(rows.length)} ${rows.length === 1 ? "space" : "spaces"} in ${esc(out.dir)}`
+    + (bad ? `, ${num(bad)} of them refused` : ""), bad ? "warn" : "ok");
+  document.getElementById("tr-rows").innerHTML = !rows.length ? "" :
+    `<table class="keys"><tbody>${rows.map(r => `
+      <tr><td class="k">${esc(r.space)}</td>
+          <td class="v">${r.error ? esc(r.error) : num(r.keys) + " keys"}</td></tr>`).join("")}</tbody></table>`;
+  if (op === "import_all") {
+    const list = await api("spaces").catch(() => null);
+    if (list) { spaces = list.spaces || []; drawSpaces(); }
+    draw();
+  }
 }
 
 // ---- shell ----------------------------------------------------------------
@@ -2246,9 +3050,12 @@ function head(what) {
   </div>`;
 }
 
-function toast(msg) {
+function toast(msg, kind) {
   let t = document.getElementById("toast");
-  if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "notice small"; document.body.appendChild(t); }
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+  // green for ok, copper/yellow for failure; plain notice when it ran fine
+  // and there is nothing to celebrate (a good call shows no toast at all)
+  t.className = "notice small" + (kind === "ok" ? " ok" : kind === "warn" ? " warn" : "");
   t.textContent = msg; t.hidden = false;
   clearTimeout(t._h); t._h = setTimeout(() => { t.hidden = true; }, 2500);
 }
