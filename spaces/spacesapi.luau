@@ -751,6 +751,7 @@ local function stats(req, res)
         server = lines_of(barch.call("INFO", "SERVER")),
         stats = pairs_of(barch.call("STATS")),
         ops = pairs_of(barch.call("OPS")),
+        errors = lines_of(barch.call("INFO", "ERRORS")),
         shard = { space = barch.running(), lines = lines_of(barch.call("INFO", "SHARD", "0")) },
     })
 end

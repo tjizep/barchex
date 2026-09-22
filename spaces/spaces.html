@@ -2837,7 +2837,11 @@ async function drawStats() {
   pane.innerHTML = head("statistics") + `<div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
   const out = await api("stats").catch(() => null);
   if (!out) return;
-  const table = rows => `<table class="keys"><tbody>${(rows || []).map(r => `
+  // every category reads in alphabetical order, so a name is found by looking
+  // where it belongs rather than where the server happened to list it
+  const table = rows => `<table class="keys"><tbody>${(rows || [])
+    .slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(r => `
     <tr><td class="k">${esc(r.name)}</td><td class="v">${esc(r.value)}</td></tr>`).join("")}</tbody></table>`;
   document.getElementById("rows").innerHTML = `
     <h4>Server</h4>${table(out.server)}
@@ -2847,7 +2851,8 @@ async function drawStats() {
       space whichever one is selected on the left.</div>
     ${table(out.shard.lines)}
     <h4>Allocator</h4>${table(out.stats)}
-    <h4>Operations</h4>${table(out.ops)}`;
+    <h4>Operations</h4>${table(out.ops)}
+    <h4>Errors</h4>${table(out.errors)}`;
 }
 
 
