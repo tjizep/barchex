@@ -2077,9 +2077,16 @@ async function openNode(ev, path) {
 // ---- the graph, changed ------------------------------------------------------
 
 async function newNode() {
-  const name = prompt("Name for the new interior node");
+  const name = (prompt("Name for the new node (interior)") || "").trim();
   if (!name) return;
-  if (await write("graph_mkdir", { path: (gPath === "/" ? "" : gPath) + "/" + name })) drawGraph();
+  if (name.includes("/")) return toast("a name has no slashes in it — the path is where it goes", "warn");
+  // a fresh key space has neither a graph store nor a file store: MKDIR is
+  // what brings the graph into being, so a refusal naming the space means
+  // the space itself is gone, not that the path is wrong
+  const out = await write("graph_mkdir", { path: (gPath === "/" ? "" : gPath) + "/" + name });
+  if (!out) return;                    // the server said why, in an alert
+  if (out.ok) return drawGraph();
+  toast(out.error || "could not make that node", "warn");
 }
 
 // A path box that completes as it is typed, shared by Link and Move.
