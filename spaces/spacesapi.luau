@@ -68,8 +68,13 @@ end
 
 -- The prefix walk, again: a range from the prefix to the same string with its
 -- last byte nudged up. Empty means the whole space.
+--
+-- A key whose name is all digits is stored as an integer key, and integer keys
+-- sort before every string key, so an empty-string lower bound (`""`) starts the
+-- walk *past* them and a space of numeric keys looks empty. The smallest int64
+-- sorts before any key of any type, which is what "the whole space" needs.
 local function bounds(prefix)
-    if prefix == nil or prefix == "" then return "", "\255" end
+    if prefix == nil or prefix == "" then return "-9223372036854775808", "\255" end
     local last = string.byte(prefix, #prefix)
     return prefix, string.sub(prefix, 1, #prefix - 1) .. string.char(last + 1)
 end
