@@ -55,4 +55,15 @@ KEYSF
 `as = keys` is required: `as = fs` would put the Luau in the file store and
 it would never become a function.
 
-`SPACESUI` only answers if HTTP is started in the `spaces` space.
+`SPACESUI` only answers if HTTP is started in the `spaces` space. The HTTP
+user also needs the rights the page's own buttons ask of it: `SETUSER` states
+the whole rule, and `+dangerous` is what lets Import and Export through
+(`IMPORT` carries the `dangerous` category; `EXPORT` does not).
+
+```
+ACL SETUSER web on +read +write +data +keys +function +config +dangerous
+```
+
+`+admin` is not a grantable right — `admin` is a preset name, and the command
+requirements that say `admin` are ignored by `cats2vec` — so a `SETUSER` that
+includes it fails with `ACL category not found`.
