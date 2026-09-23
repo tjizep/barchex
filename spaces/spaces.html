@@ -1163,6 +1163,7 @@ table.keys td.act .ib { width: 30px; height: 30px; min-height: 0; padding: 0; ma
 table.keys td.act .ib:first-child { margin-left: 0; }
 table.keys td.act .ib:hover { color: var(--ink); border-color: var(--line-3); }
 table.keys td.act .ib:last-child:hover { color: var(--flag); border-color: var(--flag); }
+table.keys td.act .ib.armed, table.keys td.act .ib.armed:hover { color: #fff; background: var(--flag); border-color: var(--flag); }
 table.keys td.act .ico { width: 16px; height: 16px; }
 
 /* calling a function: parameter box plus Call, output below */
@@ -1229,6 +1230,8 @@ table.cfg select.cv { width: 100%; font-family: var(--mono); font-size: 11.5px; 
   background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); }
 .appsettings .asrow select:focus { outline: none; border-color: var(--l1); box-shadow: 0 0 0 2px var(--l1-soft); }
 .appsettings .ashint { font-size: 12px; color: var(--ink-3); }
+.appsettings .asval { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+.appsettings .asrow button { padding: 6px 10px; font-size: 12.5px; }
 
 /* `hidden` has to win over the display these rules set (.subbar a, .slider) */
 [hidden] { display: none !important; }
@@ -1276,6 +1279,107 @@ table.cfg td.act .ib { width: 30px; height: 30px; }
 .cons-hist a { font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border: 1px solid var(--line);
   border-radius: 999px; color: var(--ink-2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cons-hist a .sp { color: var(--ink-3); }
+
+/* ---------- the Luau editor ----------
+ * The textarea sits on top with transparent text, so the caret, selection and
+ * undo stay the browser's own; the highlighted copy is drawn underneath and
+ * moved with the textarea's scroll. Both must share every metric that moves a
+ * glyph - font, size, line height, padding, tab size - or the caret drifts off
+ * the letters. Dark in both themes, like every other code block on the page. */
+.panel:has(.code) { max-width: 1120px; }
+.code {
+  --lh: 19px; --pad: 10px; --tab: 4;
+  --c-bg: #10151c; --c-ink: #dbe3ec; --c-dim: #5d6b7b; --c-line: #1a212b;
+  --c-kw: #c792ea; --c-str: #a5d68a; --c-num: #f3a86b; --c-com: #6f7d8c;
+  --c-api: #7fb0ff; --c-lib: #6fd3e0; --c-fn: #e8c268; --c-op: #97a6b6; --c-self: #f07f9e;
+  position: relative; display: grid; grid-template-columns: auto 1fr;
+  height: 48vh; min-height: 180px; resize: vertical; overflow: hidden;
+  background: var(--c-bg); color: var(--c-ink);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 12.5px; line-height: var(--lh);
+}
+.code:focus-within { border-color: var(--l1); box-shadow: 0 0 0 1px var(--l1); }
+.code-gutter {
+  position: relative; overflow: hidden; user-select: none; text-align: right;
+  color: var(--c-dim); background: #0c1016; border-right: 1px solid #1e2631;
+}
+.code-gutter .gl { position: absolute; left: 0; right: 0; top: var(--pad); }
+.code-gutter .gl div { height: var(--lh); padding: 0 10px 0 14px; cursor: pointer; }
+.code-gutter .gl div.cur { color: var(--c-ink); }
+.code-gutter .gl div.bad { color: #fff; background: #8a2338; }
+.code-main { position: relative; overflow: hidden; min-width: 0; }
+.code-marks { position: absolute; inset: 0; pointer-events: none; }
+.code-marks div { position: absolute; left: 0; right: 0; height: var(--lh); }
+.code-marks .cur { background: var(--c-line); }
+.code-marks .bad { background: rgba(224, 70, 100, .16); border-bottom: 1px dashed #e0466a; }
+.valuebox .code pre.code-hl, .code-hl {
+  position: absolute; top: 0; left: 0; margin: 0; border: 0; border-radius: 0;
+  padding: var(--pad) 14px; background: transparent; color: var(--c-ink);
+  font: inherit; line-height: var(--lh); tab-size: var(--tab);
+  white-space: pre; overflow: visible; max-height: none; overflow-wrap: normal;
+  pointer-events: none; will-change: transform;
+}
+.editor .code textarea, .code textarea {
+  position: relative; display: block; width: 100%; height: 100%; min-height: 0;
+  margin: 0; border: 0; border-radius: 0; outline: none; resize: none;
+  padding: var(--pad) 14px; background: transparent;
+  color: transparent; caret-color: #f5f7fa; -webkit-text-fill-color: transparent;
+  font: inherit; line-height: var(--lh); tab-size: var(--tab);
+  white-space: pre; overflow: auto;
+}
+.code textarea:focus { outline: none; border: 0; }
+.code textarea::selection { background: rgba(108, 147, 255, .35); }
+.code textarea::placeholder { color: var(--c-dim); -webkit-text-fill-color: var(--c-dim); }
+.code textarea[disabled] { cursor: default; }
+.code-hl .kw, .code-ro .kw { color: var(--c-kw); }
+.code-hl .str, .code-ro .str { color: var(--c-str); }
+.code-hl .num, .code-ro .num { color: var(--c-num); }
+.code-hl .com, .code-ro .com { color: var(--c-com); font-style: italic; }
+.code-hl .hot, .code-ro .hot { color: var(--c-kw); }
+.code-hl .api, .code-ro .api { color: var(--c-api); }
+.code-hl .lib, .code-ro .lib { color: var(--c-lib); }
+.code-hl .fn, .code-ro .fn { color: var(--c-fn); }
+.code-hl .op, .code-ro .op { color: var(--c-op); }
+.code-hl .self, .code-ro .self { color: var(--c-self); }
+.code-ro { --c-kw: #c792ea; --c-str: #a5d68a; --c-num: #f3a86b; --c-com: #6f7d8c; --c-api: #7fb0ff;
+  --c-lib: #6fd3e0; --c-fn: #e8c268; --c-op: #97a6b6; --c-self: #f07f9e; }
+.valuebox pre.code-ro { white-space: pre; overflow-wrap: normal; }
+
+/* under the editor: where the caret is, what the name there is, saved or not */
+.code-status {
+  display: flex; gap: 14px; align-items: baseline; margin-top: 6px; min-height: 18px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+}
+.code-status .pos { white-space: nowrap; }
+.code-status .hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.code-status .hint b { color: var(--l1); font-weight: 600; }
+.code-status .hint.bad { color: var(--flag); }
+.code-status .mod { white-space: nowrap; color: var(--l2); }
+.code-status .keys { white-space: nowrap; }
+.code-status kbd { font: inherit; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; }
+
+/* completion list, placed at the caret */
+.code-ac {
+  position: absolute; z-index: 5; min-width: 240px; max-width: min(560px, 90%);
+  background: #182029; color: var(--c-ink); border: 1px solid #2d3a49; border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .45); font-size: 12px; overflow: hidden;
+}
+.code-ac .list { max-height: calc(var(--lh) * 9); overflow-y: auto; }
+.code-ac .it { display: flex; gap: 8px; align-items: baseline; padding: 0 10px; line-height: var(--lh); cursor: pointer; white-space: nowrap; }
+.code-ac .it.on { background: #27405f; }
+.code-ac .it .k { width: 14px; flex: none; text-align: center; font-size: 10.5px; color: var(--c-dim); }
+.code-ac .it .k.fn { color: var(--c-fn); } .code-ac .it .k.mod { color: var(--c-api); }
+.code-ac .it .k.val { color: var(--c-lib); } .code-ac .it .k.kw { color: var(--c-kw); }
+.code-ac .it .n b { color: #fff; }
+.code-ac .it .s { color: var(--c-dim); overflow: hidden; text-overflow: ellipsis; }
+.code-ac .doc { padding: 6px 10px; border-top: 1px solid #2d3a49; color: #aab6c3; white-space: normal; line-height: 1.45; }
+.code-ac .doc code { color: var(--c-api); font: inherit; }
+.editor button.warn { color: var(--flag); border-color: var(--flag); }
+.editor label.aot { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.editor label.aot input { margin: 0; accent-color: var(--l1); }
+table.keys td.kind .native { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--l1); }
+.editor button.primary.warn { color: #fff; background: var(--flag); }
+.cons-out a.errline { color: inherit; text-decoration: underline dotted; cursor: pointer; }
 
 </style>
 </head>
@@ -1363,6 +1467,8 @@ document.querySelectorAll("[data-ico]").forEach(e => { e.innerHTML = ico(e.datas
 //     function editor (2, 4 or 8; default 4)
 //   saveBeforeCall: "1" to SETF the editor body before CALLF when Call is
 //     pressed (default), "0" to call the stored copy as-is
+//   editorHeight: the function editor's height in px, set by dragging its
+//     corner; unset means the default (48% of the window)
 function appSetting(key, dflt) {
   try {
     const v = localStorage.getItem("appsettings:" + key);
@@ -1385,6 +1491,7 @@ function tabWidth() {
 function applyTabWidth() {
   const ta = document.getElementById("ev");
   if (ta) ta.style.tabSize = String(tabWidth());
+  document.querySelectorAll(".code").forEach(b => b.style.setProperty("--tab", String(tabWidth())));
 }
 
 function openAppSettings() {
@@ -1405,8 +1512,34 @@ function openAppSettings() {
           <option value="0"${save ? "" : " selected"}>Off</option>
         </select>
       </div>
-      <div class="ashint">Tab width applies to the function editor: how wide tabs render and how many spaces the Tab key inserts. Save before Call SETFs the editor body first when Call is pressed, so the call runs what you see. Stored in this browser only.</div>
+      <div class="asrow">
+        <label>Editor height</label>
+        <span class="asval" id="as-edheight">${editorHeight() ? editorHeight() + " px" : "default"}</span>
+        <button onclick="resetEditorHeight()"${editorHeight() ? "" : " disabled"}>Reset</button>
+      </div>
+      <div class="ashint">Tab width applies to the function editor: how wide tabs render, how many spaces the Tab key inserts, and how far Enter indents after a line that opens a block. Save before Call SETFs the editor body first when Call is pressed, so the call runs what you see. Editor height is kept when you drag the editor's bottom-right corner. Stored in this browser only.</div>
     </div></div>`);
+}
+
+// the function editor's height, as the user last dragged it: px, or 0 for
+// the default. Clamped on the way in so a height saved on a big screen
+// still fits a small one.
+function editorHeight() {
+  const n = parseInt(appSetting("editorHeight", ""), 10);
+  return Number.isFinite(n) && n >= 120 ? n : 0;
+}
+
+function editorHeightStyle() {
+  const h = editorHeight();
+  return h ? `height:min(${h}px, calc(100vh - 160px))` : "";
+}
+
+function resetEditorHeight() {
+  try { localStorage.removeItem("appsettings:editorHeight"); } catch (e) {}
+  document.querySelectorAll(".code").forEach(b => { b.style.height = ""; });
+  const v = document.getElementById("as-edheight");
+  if (v) { v.textContent = "default"; v.nextElementSibling.disabled = true; }
+  toast("Editor height = default");
 }
 
 function setTabWidth(value) {
@@ -1424,6 +1557,1041 @@ function saveBeforeCall() {
 function setSaveBeforeCall(value) {
   setAppSetting("saveBeforeCall", value === "0" ? "0" : "1");
   toast("Save before Call = " + (saveBeforeCall() ? "on" : "off"));
+}
+</script>
+<script>
+// ---- the Luau editor --------------------------------------------------------
+//
+// The function body is still the <textarea id="ev"> that Save and Call read, so
+// the caret, selection, undo and IME stay the browser's own. Its text is made
+// transparent and a highlighted copy is drawn underneath, with a line number
+// gutter beside it and a status line below. Edits made from here (Tab, Enter,
+// completion) go through insertText so Ctrl+Z undoes them like typing.
+//
+// Completion is a list of what luau_driver.cpp puts in reach of a stored
+// function (open_safe and state_for): the barch table, simdjson, http, mail,
+// resp, sql, nk, the Luau libraries, and req/res in an HTTP handler. It follows
+// a chain as far as it knows the types - barch.current():get, a local assigned
+// from barch.space.x, http.request(u):timeout(5):get() - and gives up quietly
+// past that. It is a list, not a type checker.
+
+const LUAU_KW = new Set(("and break continue do else elseif end false for function if in " +
+  "local nil not or repeat return then true until while").split(" "));
+
+// entries: fn = called with a dot, m = a method (colon), v = a value, t = a table
+// of more names. `ret` is the type a call gives back, `type` what indexing gives.
+const LUAU_TYPES = (() => {
+  const fn = (sig, doc, ret) => ({ kind: "fn", sig, doc, ret });
+  const m = (sig, doc, ret) => ({ kind: "fn", sig, doc, ret, method: true });
+  const v = (sig, doc, type) => ({ kind: "val", sig, doc, type });
+  const t = (sig, doc, type) => ({ kind: "mod", sig, doc, type });
+  const lib = (name, names, doc) => {
+    const out = {};
+    for (const n of names.split(" ")) out[n] = fn(`${name}.${n}(…)`, doc);
+    return out;
+  };
+  const T = {};
+  T.barch = { members: {
+    call: fn("barch.call(cmd, …)", "Runs a command in this function's space with the caller's rights and returns the reply. Integer replies arrive as the <code>integer</code> type: use <code>integer.tonumber</code>, not tonumber."),
+    queue: fn("barch.queue(name, message)", "Publishes to a queue and returns the sequence number. Raises on failure. Refused inside <code>barch.store.locked</code>."),
+    config: fn("barch.config()", "This space's own settings, as a table."),
+    tomb: v("barch.tomb", "A cached source miss. It isn't nil, so compare with <code>v == barch.tomb</code>."),
+    store: t("barch.store", "Point reads and writes of the space the call is running in.", "store"),
+    space: t("barch.space[name]", "A key space as a value: <code>sp[k]</code> reads, <code>sp[k] = v</code> writes, <code>for row in sp</code> walks it. An unknown name is refused.", "spaces"),
+    current: fn("barch.current()", "The space this call runs against, as a space handle.", "space"),
+    running: fn("barch.running()", "The name of the running space, or an empty string for the default one."),
+    art: fn("barch.art()", "A private, unsaved one-shard space for a working set, with min/max/range/popmin/popmax.", "space"),
+    auth: fn("barch.auth(user, secret)", "true when that user and secret would pass AUTH."),
+    user: fn("barch.user()", "The user this call runs as."),
+    fs: t("barch.fs", "The space's file store, addressed by path.", "fs"),
+    graph: t("barch.graph", "The space's GRAPH store, addressed by path.", "graph"),
+  } };
+  T.spaces = { members: {}, any: "space",
+    dyn: () => (typeof spaces !== "undefined" && Array.isArray(spaces) ? spaces : [])
+      .filter(s => s && s.name && /^[A-Za-z_]\w*$/.test(s.name))
+      .map(s => [s.name, t(`barch.space.${s.name}`, "The " + s.name + " key space, as a handle.", "space")]) };
+  T.store = { members: {
+    get: fn("barch.store.get(k)", "The value, nil when nothing is there, or <code>barch.tomb</code>. Reads the cache and never fetches."),
+    fetch: fn("barch.store.fetch(k)", "Like get, but fills from the space's foreign source on a miss. Returns the value, or nil and the reason."),
+    set: fn("barch.store.set(k, v)", "Writes a key. <code>set(k, nil)</code> removes it."),
+    remove: fn("barch.store.remove(k)", "Removes a key."),
+    exists: fn("barch.store.exists(k)", "Whether the key is there."),
+    count: fn("barch.store.count()", "How many keys the space holds."),
+    getJson: fn("barch.store.getJson(k)", "The value parsed as JSON. nil when missing, or nil and the parser's reason when it isn't JSON."),
+    setJson: fn("barch.store.setJson(k, t)", "Stores t as JSON. Raises when it can't be encoded. <code>setJson(k, nil)</code> removes."),
+    parseJson: fn("barch.store.parseJson(k, name, …)", "Only the named top-level fields, one value per name. Cheaper than getJson on a big document."),
+    range: fn("barch.store.range(lo, hi, n [, offset])", "Keys in [lo, hi), at most n (capped at 10000), after skipping offset. This is how a script pages."),
+    min: fn("barch.store.min()", "The lowest key in the space."),
+    max: fn("barch.store.max()", "The highest key in the space."),
+    locked: fn("barch.store.locked(k, fn)", "Runs fn with k's shard write-locked, or every shard when k is nil. No barch.call, sql or mail inside, and no nesting."),
+    shardNumber: fn("barch.store.shardNumber(k)", "Which shard k routes to. Two keys with the same number can be locked together."),
+    hasLock: fn("barch.store.hasLock(k)", "Whether this call already holds k's shard."),
+    getBufferAt: fn("barch.store.getBufferAt(k, offset, len)", "Bytes of a value, as a buffer."),
+    setBufferAt: fn("barch.store.setBufferAt(k, offset, buf)", "Writes bytes into a value at offset."),
+    getInt32At: fn("barch.store.getInt32At(k, offset)", "A 32 bit integer read out of a value."),
+    setInt32At: fn("barch.store.setInt32At(k, offset, n)", "A 32 bit integer written into a value."),
+    getInt64At: fn("barch.store.getInt64At(k, offset)", "A 64 bit integer read out of a value."),
+    setInt64At: fn("barch.store.setInt64At(k, offset, n)", "A 64 bit integer written into a value."),
+  } };
+  T.space = { members: {
+    call: m("sp:call(cmd, …)", "Runs a command in this handle's space, checked against the caller's rights there. Refused inside a locked region and on barch.art()."),
+    get: m("sp:get(k)", "The value, nil, or barch.tomb. The same as <code>sp[k]</code>."),
+    set: m("sp:set(k, v)", "Writes a key. The same as <code>sp[k] = v</code>."),
+    remove: m("sp:remove(k)", "Removes a key."),
+    exists: m("sp:exists(k)", "Whether the key is there."),
+    count: m("sp:count()", "How many keys the space holds."),
+    size: m("sp:size()", "How many keys the space holds."),
+    fetch: m("sp:fetch(k)", "Like get, but fills from the space's foreign source on a miss."),
+    getJson: m("sp:getJson(k)", "The value parsed as JSON. nil when missing, or nil and the reason."),
+    setJson: m("sp:setJson(k, t)", "Stores t as JSON."),
+    parseJson: m("sp:parseJson(k, name, …)", "Only the named top-level fields, one value per name."),
+    range: m("sp:range(lo, hi, n [, offset])", "Keys in [lo, hi), at most n, after skipping offset."),
+    min: m("sp:min()", "The lowest key."), max: m("sp:max()", "The highest key."),
+    popmin: m("sp:popmin()", "Removes and returns the lowest key."),
+    popmax: m("sp:popmax()", "Removes and returns the highest key."),
+    kind: m("sp:kind(n)", "What container n is: list, hash or orderedset."),
+    container: m("sp:container(n)", "A handle over container n: <code>for member, value in c</code>. An ordered set's value is its score.", "container"),
+    getBufferAt: m("sp:getBufferAt(k, offset, len)", "Bytes of a value, as a buffer."),
+    setBufferAt: m("sp:setBufferAt(k, offset, buf)", "Writes bytes into a value at offset."),
+  } };
+  T.container = { members: {} };
+  T.row = { members: {
+    key: v("row.key", "The key, as the text KEYS prints."),
+    value: v("row.value", "The value, decoded only when read."),
+    type: v("row.type", "key, list, hash, orderedset or function."),
+    container: v("row.container", "The container name, for a container member."),
+  } };
+  const fsDoc = "the space's file store";
+  T.fs = { members: {
+    list: fn("fs.list(path [, after, limit, source, offset])", "One level of " + fsDoc + ", as entries with name, path, dir, size and the rest. Pass nil for the arguments you skip."),
+    get: fn("fs.get(path)", "A file's content."), put: fn("fs.put(path, body [, type])", "Writes a file."),
+    stat: fn("fs.stat(path)", "An entry: name, path, dir, size, chunks, version, type."),
+    fetch: fn("fs.fetch(path)", "A file, filled through the space's fs_source when it's missing."),
+    remove: fn("fs.remove(path)", "Removes a file."), mkdir: fn("fs.mkdir(path)", "Makes a directory."),
+    rmdir: fn("fs.rmdir(path)", "Removes a directory."), rename: fn("fs.rename(from, to)", "Renames a file or directory."),
+    copy: fn("fs.copy(from, to)", "Copies a file."), publish: fn("fs.publish(path, …)", "Publishes a file."),
+    space: fn("barch.fs.space(name)", "The same functions on another key space's file store. The space must already exist.", "fs"),
+  } };
+  T.graph = { members: {
+    get: fn("graph.get(path [, from, len])", "A leaf's content."), stat: fn("graph.stat(path)", "An entry: id, name, path, dir, refs, edge, and size/chunks/version/type for a leaf."),
+    list: fn("graph.list(path [, after, limit, offset])", "One level. Pages by edge id: pass the last entry's edge as after."),
+    put: fn("graph.put(path, body [, type, chunk])", "Writes a leaf."), mkdir: fn("graph.mkdir(path)", "Makes a node."),
+    link: fn("graph.link(node_id, path)", "Links an existing node at path."), unlink: fn("graph.unlink(path [, edge])", "Removes a link."),
+    remove: fn("graph.remove(path [, recursive])", "Removes a node."), rm: fn("graph.rm(path [, recursive])", "Removes a node."),
+    rename: fn("graph.rename(from, to [, edge])", "Moves a node."),
+    bfs: fn("graph.bfs(start [, depth, limit, offset])", "Breadth first walk."), dfs: fn("graph.dfs(start [, depth, limit, offset])", "Depth first walk."),
+    space: fn("barch.graph.space(name)", "The same functions on another key space's graph.", "graph"),
+  } };
+  T.simdjson = { members: {
+    parse: fn("simdjson.parse(s)", "JSON text or a buffer to a Lua value. Raises on anything that isn't one complete JSON value."),
+    encode: fn("simdjson.encode(t)", "A Lua value to JSON text."),
+    encodeBuffer: fn("simdjson.encodeBuffer(t)", "A Lua value to JSON, in a buffer."),
+    open: fn("simdjson.open(s)", "A document you read by JSON pointer: <code>doc:at(\"/a/0\")</code>.", "jsondoc"),
+    activeImplementation: fn("simdjson.activeImplementation()", "Which SIMD kernel the parser picked."),
+    null: v("simdjson.null", "JSON null, which isn't nil."),
+  } };
+  T.jsondoc = { members: { at: m("doc:at(pointer)", "The value at a JSON pointer such as \"/a/0\".") } };
+  T.http = { members: {
+    request: fn("http.request(url)", "A request builder: <code>http.request(u):timeout(5000):get()</code>. Needs the outbound category.", "httpreq"),
+  } };
+  const verb = n => m(`req:${n}()`, "Sends the request and returns {ok, status, body, headers, error}.", "httpres");
+  T.httpreq = { members: {
+    headers: m("req:headers(t)", "Request headers, as a table.", "httpreq"), body: m("req:body(s)", "The request body.", "httpreq"),
+    timeout: m("req:timeout(ms)", "How long to wait, in milliseconds.", "httpreq"),
+    redirects: m("req:redirects(n)", "How many redirects to follow.", "httpreq"),
+    get: verb("get"), post: verb("post"), put: verb("put"), patch: verb("patch"), delete: verb("delete"),
+  } };
+  T.httpres = { members: {
+    ok: v("r.ok", "true when the request completed."), status: v("r.status", "The HTTP status code."),
+    body: v("r.body", "The response body."), headers: v("r.headers", "The response headers, as a table."),
+    error: v("r.error", "Why it failed, when ok is false."),
+  } };
+  T.mail = { members: {
+    send: fn("mail.send{to, subject, text|html, …}", "Sends one message over SMTP. Returns {ok, code, message_id, error}. The server settings live in the configuration space.", "mailres"),
+  } };
+  T.mailres = { members: { ok: v("r.ok", ""), code: v("r.code", "The server's last reply code."),
+    message_id: v("r.message_id", ""), error: v("r.error", "") } };
+  T.resp = { members: {
+    connect: fn("resp.connect(host, port [, opts])", "A client for another RESP server. opts: user, password, password_from, db, protocol, timeout, connect_timeout.", "respconn"),
+  } };
+  T.respconn = { members: {
+    call: m("c:call(cmd, …)", "One command. An error reply raises."),
+    pipeline: m("c:pipeline({{cmd, …}, …})", "Several commands in one round trip. An error reply comes back as {err = message} in its place."),
+  } };
+  T.sql = { members: { query: fn("sql.query(sql, key)", "This space's MySQL or Postgres backend, when a DSN is set.") } };
+  T.request = { members: {
+    body: v("req.body", "The request body, as a string."), bodyBuffer: v("req.bodyBuffer", "The request body, as a buffer."),
+    url: v("req.url", "The path, without the query."), raw_url: v("req.raw_url", "The path with its query string."),
+    method: v("req.method", "GET, POST, …"), remote: v("req.remote", "The client's address."),
+    header: m("req:header(name)", "A request header, or nil."), param: m("req:param(name)", "A query parameter, or nil."),
+    cookie: m("req:cookie(name)", "A cookie, or nil."),
+  } };
+  T.response = { members: {
+    body: v("res.body", "The response body. Set it to answer."), bodyBuffer: v("res.bodyBuffer", "The response body, as a buffer."),
+    code: v("res.code", "The status code, 200 by default."),
+    header: m("res:header(name, value)", "Sets a response header."), write: m("res:write(s)", "Appends to the body."),
+    redirect: m("res:redirect(url)", "Answers with a redirect."),
+    cookie: m("res:cookie(name, value [, {path, max_age, httponly, secure, samesite}])", "Sets a cookie."),
+  } };
+  const nkT = t("nk.f32", "Scalar, vector and matrix constructors of one element type.");
+  T.nk = { members: { f64: nkT, f32: nkT, f16: nkT, bf16: nkT,
+    vector: t("nk.vector", "Vector constructors: nk.vector.f32(…) and so on."), matrix: t("nk.matrix", "Matrix constructors: nk.matrix.f32(…) and so on.") } };
+  T.math = { members: { ...lib("math", "abs acos asin atan ceil cosh cos deg exp floor fmod frexp ldexp log max min modf pow rad random randomseed sinh sin sqrt tanh tan noise clamp sign round map lerp isnan isinf isfinite"),
+    pi: v("math.pi", ""), huge: v("math.huge", "") } };
+  T.string = { members: lib("string", "byte char find format gmatch gsub len lower match rep reverse sub upper split pack packsize unpack") };
+  T.table = { members: lib("table", "concat foreach foreachi getn maxn insert remove sort pack unpack move create find clear freeze isfrozen clone") };
+  T.utf8 = { members: { ...lib("utf8", "offset codepoint char len codes"), charpattern: v("utf8.charpattern", "") } };
+  T.bit32 = { members: lib("bit32", "arshift band bnot bor bxor btest extract lrotate lshift replace rrotate rshift countlz countrz byteswap") };
+  T.coroutine = { members: lib("coroutine", "create running status wrap yield isyieldable close") };
+  T.buffer = { members: lib("buffer", "create fromstring tostring len copy fill readbits writebits readi8 readu8 readi16 readu16 readi32 readu32 readf32 readf64 writei8 writeu8 writei16 writeu16 writei32 writeu32 writef32 writef64 readstring writestring readinteger writeinteger") };
+  T.vector = { members: { ...lib("vector", "create magnitude normalize cross dot angle floor ceil abs sign clamp max min lerp"),
+    zero: v("vector.zero", ""), one: v("vector.one", "") } };
+  T.integer = { members: lib("integer", "add sub mul div idiv mod rem neg udiv urem tonumber create fromstring min max clamp band bor bxor bnot btest lshift rshift arshift lrotate rrotate extract replace countlz countrz bswap lt le gt ge ult ule ugt uge maxsigned minsigned") };
+  T.integer.members.tonumber.doc = "An integer reply as a Lua number. tonumber() gives nil for one.";
+  // what a bare name can be
+  const base = {};
+  for (const n of ("assert error getmetatable ipairs next pairs pcall print rawequal rawget rawlen rawset " +
+                   "select setmetatable tonumber tostring type typeof unpack xpcall newproxy gcinfo").split(" "))
+    base[n] = { ...fn(n + "(…)", ""), lib: true };
+  base.require = { ...fn("require(what [, reload])", "Another stored function (<code>\"NAME\"</code>, <code>\"space.name\"</code>) or a file (<code>\":/x.luau\"</code>, <code>\"space:/x.luau\"</code>). Call it inside the handler, not at the top of the file."), lib: true };
+  for (const n of ["math", "string", "table", "utf8", "bit32", "coroutine", "buffer", "vector", "integer"])
+    base[n] = { ...t(n, "The " + n + " library.", n), lib: true };
+  base.barch = t("barch", "The server: the running space, other spaces, commands, files, graph.", "barch");
+  base.simdjson = t("simdjson", "JSON parse and encode.", "simdjson");
+  base.http = t("http", "Outbound HTTP.", "http");
+  base.mail = t("mail", "Outbound SMTP.", "mail");
+  base.resp = t("resp", "A client for another RESP server.", "resp");
+  base.sql = t("sql", "The space's SQL backend.", "sql");
+  base.nk = t("nk", "Numeric kernels: f64/f32/f16/bf16 scalars, vectors and matrices.", "nk");
+  for (const k of ["f64", "f32", "f16", "bf16"]) {
+    base["nk" + k] = fn(`nk${k}(x)`, "A " + k + " scalar.");
+    base["nk" + k + "vector"] = fn(`nk${k}vector(…)`, "A " + k + " vector.");
+    base["nk" + k + "matrix"] = fn(`nk${k}matrix(…)`, "A " + k + " matrix.");
+  }
+  // names a stored function defines rather than calls
+  base.call = { ...fn("function call(…)", "The entry point CALLF runs. Its arguments are the CALLF parameters."), hook: true };
+  base.transport = { ...fn("function transport()", "Declares how the function is served: kind = \"resource\" | \"resp\" | \"files\" | \"queue\" | \"cron\", with a route and methods."), hook: true };
+  T._G = { members: base };
+  return T;
+})();
+
+// ---- lexing and painting ----
+
+// [kind, start, end] triples. Long strings and comments ([[ ]], [==[ ]==])
+// run across lines, which is why the whole body is lexed on every change.
+function luauLex(src) {
+  const out = [], n = src.length;
+  const longOpen = p => {
+    if (src[p] !== "[") return -1;
+    let q = p + 1;
+    while (src[q] === "=") q++;
+    return src[q] === "[" ? q - p - 1 : -1;
+  };
+  const longClose = (p, lvl) => {
+    const e = src.indexOf("]" + "=".repeat(lvl) + "]", p);
+    return e < 0 ? n : e + lvl + 2;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      let j = i + 1;
+      while (j < n && (src[j] === " " || src[j] === "\t" || src[j] === "\n" || src[j] === "\r")) j++;
+      out.push(["ws", i, j]); i = j; continue;
+    }
+    if (c === "-" && src[i + 1] === "-") {
+      const lvl = longOpen(i + 2);
+      let j;
+      if (lvl >= 0) j = longClose(i + lvl + 4, lvl);
+      else { j = src.indexOf("\n", i); if (j < 0) j = n; }
+      out.push([lvl < 0 && src[i + 2] === "!" ? "hot" : "com", i, j]); i = j; continue;
+    }
+    if (c === "[") {
+      const lvl = longOpen(i);
+      if (lvl >= 0) { const j = longClose(i + lvl + 2, lvl); out.push(["str", i, j]); i = j; continue; }
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < n && src[j] !== c && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+      if (src[j] === c) j++;
+      out.push(["str", i, Math.min(j, n)]); i = Math.min(j, n); continue;
+    }
+    const d = c.charCodeAt(0);
+    if ((d >= 48 && d <= 57) || (c === "." && /\d/.test(src[i + 1] || ""))) {
+      const mt = /^(?:0[xX][\da-fA-F_]+|0[bB][01_]+|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?)/.exec(src.slice(i, i + 64));
+      const j = i + (mt ? mt[0].length : 1);
+      out.push(["num", i, j]); i = j; continue;
+    }
+    if (c === "_" || (d >= 65 && d <= 90) || (d >= 97 && d <= 122)) {
+      let j = i + 1;
+      while (j < n && /\w/.test(src[j])) j++;
+      out.push([LUAU_KW.has(src.slice(i, j)) ? "kw" : "id", i, j]); i = j; continue;
+    }
+    // `..` and `...` stay one token so a member dot is never confused with them
+    if (c === "." && src[i + 1] === ".") {
+      const j = src[i + 2] === "." ? i + 3 : i + 2;
+      out.push(["op", i, j]); i = j; continue;
+    }
+    out.push(["op", i, i + 1]); i++;
+  }
+  return out;
+}
+
+const luauEsc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// the entry a name has in a type, dynamic members (the space list) included
+function luauMember(type, name) {
+  if (!type) return null;
+  if (Object.prototype.hasOwnProperty.call(type.members, name)) return type.members[name];
+  if (type.dyn) { const hit = type.dyn().find(([n]) => n === name); if (hit) return hit[1]; }
+  if (type.any) return { kind: "mod", sig: name, doc: "", type: type.any };
+  return null;
+}
+
+// Colour: keywords, strings, numbers, comments, operators; a name the barch
+// API knows (followed through dots, colons and calls) in the API colour; a
+// library in its own; a function name where it is defined or called.
+function luauHighlight(src, locals) {
+  const toks = luauLex(src);
+  let html = "", ctx = null, prev = null, pending = null;
+  const stack = [];                          // what the call being closed gives back
+  for (let k = 0; k < toks.length; k++) {
+    const [kind, s, e] = toks[k];
+    const text = src.slice(s, e);
+    if (kind === "ws") { html += text; continue; }
+    let cls = kind;
+    if (kind === "id") {
+      const after = prev && prev[0] === "op" && (prev[3] === "." || prev[3] === ":");
+      let entry = null;
+      if (after) entry = luauMember(ctx, text);
+      else if (!(prev && prev[3] === "local")) {
+        entry = LUAU_TYPES._G.members[text] || null;
+        if (entry && entry.hook) entry = null;
+        if (!entry && locals && locals[text]) entry = { kind: "val", type: locals[text] };
+      }
+      let next = k + 1;
+      while (next < toks.length && toks[next][0] === "ws") next++;
+      const nextText = next < toks.length ? src.slice(toks[next][1], toks[next][2]) : "";
+      if (text === "self") cls = "self";
+      else if (entry && entry.lib && !after) cls = "lib";
+      else if (entry && (entry.sig || after)) cls = "api";
+      else if (prev && prev[3] === "function") cls = "fn";
+      else if (nextText === "(" || nextText === "{" || (nextText && nextText[0] === '"')) cls = "fn";
+      else cls = "";
+      ctx = entry ? (entry.type ? LUAU_TYPES[entry.type] : null) : null;
+      pending = entry && entry.ret ? LUAU_TYPES[entry.ret] : null;
+    } else if (kind === "op") {
+      if (text === "(") { stack.push(pending); ctx = null; }
+      else if (text === ")") { ctx = stack.pop() || null; }
+      else if (text === "." || text === ":") { /* keep ctx for the member */ }
+      else if (text === "[") { stack.push(ctx && ctx.any ? LUAU_TYPES[ctx.any] : null); ctx = null; }
+      else if (text === "]") { ctx = stack.pop() || null; }
+      else ctx = null;
+      if (text !== "(") pending = null;
+    } else { ctx = null; pending = null; }
+    prev = [kind, s, e, text];
+    html += cls ? `<span class="${cls}">${luauEsc(text)}</span>` : luauEsc(text);
+  }
+  return html;
+}
+
+// `local x = barch.space.users` and friends: which locals hold something the
+// completion knows the members of. req/res are the HTTP handler's arguments.
+function luauLocals(src) {
+  const out = { req: "request", res: "response" };
+  const re = /\blocal\s+([A-Za-z_]\w*)\s*=\s*([^\n;]+)/g;
+  let mt;
+  while ((mt = re.exec(src))) {
+    const ty = luauTypeOf(luauChain(mt[2].trim(), true), out);
+    if (ty) out[mt[1]] = ty.name;
+  }
+  const fr = /\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n]+?)\s+do\b/g;
+  while ((mt = fr.exec(src))) {
+    const ty = luauTypeOf(luauChain(mt[2].trim(), true), out);
+    if (ty && ty.name === "space") out[mt[1]] = "row";
+  }
+  return out;
+}
+for (const [k, v] of Object.entries(LUAU_TYPES)) v.name = k;
+
+// A chain of names, dots, colons, calls and indexes, as segments. Read from
+// the end of `text` (what is before the caret), or from its start (`fromStart`,
+// for the right-hand side of an assignment).
+function luauChain(text, fromStart) {
+  if (fromStart) {
+    const mt = /^[A-Za-z_]\w*(?:\s*(?:[.:]\s*[A-Za-z_]\w*|\((?:[^()]|\([^()]*\))*\)|\[[^\]]*\]|"[^"]*"|\{[^}]*\}))*/.exec(text);
+    return mt ? luauChain(mt[0], false) : null;
+  }
+  const segs = [];
+  let i = text.length;
+  const skipWs = () => { while (i > 0 && /\s/.test(text[i - 1])) i--; };
+  const matchBack = (open, close) => {
+    let depth = 0;
+    while (i > 0) {
+      const c = text[--i];
+      if (c === close) depth++;
+      else if (c === open && --depth === 0) return true;
+    }
+    return false;
+  };
+  for (;;) {
+    skipWs();
+    if (i === 0) break;
+    const c = text[i - 1];
+    if (c === ")") { if (!matchBack("(", ")")) return null; segs.unshift({ call: true }); continue; }
+    if (c === "]") { if (!matchBack("[", "]")) return null; segs.unshift({ index: true }); continue; }
+    if (c === '"' && segs.length) {            // f"x" / f{…} call sugar: treat as a call
+      const q = text.lastIndexOf('"', i - 2);
+      if (q < 0) return null;
+      i = q; segs.unshift({ call: true }); continue;
+    }
+    const mt = /[A-Za-z_]\w*$/.exec(text.slice(0, i));
+    if (!mt) break;
+    i -= mt[0].length;
+    segs.unshift({ name: mt[0] });
+    skipWs();
+    if (i > 0 && (text[i - 1] === "." || text[i - 1] === ":") && text[i - 2] !== ".") { i--; continue; }
+    break;
+  }
+  if (!segs.length || !segs[0].name) return null;
+  if (LUAU_KW.has(segs[0].name)) return null;
+  return segs;
+}
+
+// the type a chain ends on, or null past the first name it doesn't know
+function luauTypeOf(segs, locals) {
+  if (!segs) return null;
+  let entry = null, type = null;
+  for (let k = 0; k < segs.length; k++) {
+    const sg = segs[k];
+    if (k === 0) {
+      entry = LUAU_TYPES._G.members[sg.name];
+      if (entry && entry.hook) entry = null;
+      if (!entry && locals && locals[sg.name]) entry = { kind: "val", type: locals[sg.name] };
+      if (!entry) return null;
+      type = entry.type ? LUAU_TYPES[entry.type] : null;
+    } else if (sg.name) {
+      entry = luauMember(type, sg.name);
+      if (!entry) return null;
+      type = entry.type ? LUAU_TYPES[entry.type] : null;
+    } else if (sg.call) {
+      type = entry && entry.ret ? LUAU_TYPES[entry.ret] : null;
+      entry = null;
+    } else if (sg.index) {
+      type = type && type.any ? LUAU_TYPES[type.any] : null;
+      entry = null;
+    }
+  }
+  return type;
+}
+
+// the entry a chain names (its last segment), for the status line hint
+function luauEntryOf(segs, locals) {
+  if (!segs || !segs.length || !segs[segs.length - 1].name) return null;
+  if (segs.length === 1) {
+    const e = LUAU_TYPES._G.members[segs[0].name];
+    return e && !e.hook ? e : null;
+  }
+  return luauMember(luauTypeOf(segs.slice(0, -1), locals), segs[segs.length - 1].name);
+}
+
+// ---- the editor itself ----
+
+// "space/NAME" -> {start, end, top, base, text}: where the caret was, and any
+// edits not yet saved over the source they started from. Closing the dialog
+// (Esc, the backdrop, Close) keeps them for this page's life, so there is
+// no "discard changes?" to answer; reopening puts them back.
+const codeViews = new Map();
+
+// The markup for the editor. `id` stays "ev" for the function body because
+// saveFunction/callFunction/applyTabWidth read it by that id.
+function codeEditor(source, attrs) {
+  return `<div class="code" style="--tab:${tabWidth()};${editorHeightStyle()}">
+    <div class="code-gutter" aria-hidden="true"><div class="gl"></div></div>
+    <div class="code-main">
+      <div class="code-marks"><div class="cur"></div><div class="bad" hidden></div></div>
+      <pre class="code-hl" aria-hidden="true"></pre>
+      <textarea id="ev" class="fn-src" wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" ${attrs || ""}>${esc(source ?? "")}</textarea>
+    </div>
+    <div class="code-ac" hidden><div class="list" role="listbox"></div><div class="doc"></div></div>
+  </div>
+  <div class="code-status">
+    <span class="pos">Ln 1, Col 1</span><span class="hint"></span><span class="mod"></span>
+    <span class="keys"><kbd>Ctrl</kbd>+<kbd>S</kbd> save · <kbd>Ctrl</kbd>+<kbd>Enter</kbd> call · <kbd>Ctrl</kbd>+<kbd>Space</kbd> complete</span>
+  </div>`;
+}
+
+function codeParts(ta) {
+  const box = ta.closest(".code");
+  return {
+    box, hl: box.querySelector(".code-hl"), gl: box.querySelector(".gl"),
+    cur: box.querySelector(".code-marks .cur"), err: box.querySelector(".code-marks .bad"),
+    ac: box.querySelector(".code-ac"), status: box.nextElementSibling,
+  };
+}
+
+// wire an editor rendered by codeEditor(); `name` keys the remembered caret
+function codeAttach(ta, name) {
+  if (!ta || ta._code) return;
+  const P = codeParts(ta);
+  ta._code = { P, name, saved: ta.value, errLine: 0, errMsg: "", lines: 0, raf: 0, ac: null, dedent: null, locals: {} };
+  const paint = () => {
+    ta._code.raf = 0;
+    ta._code.locals = luauLocals(ta.value);
+    P.hl.innerHTML = luauHighlight(ta.value, ta._code.locals) + "\n ";
+    codeGutter(ta);
+    codeScroll(ta);
+    codeStatus(ta);
+  };
+  // at once while typing, so the colours never trail the caret (a 1300 line
+  // body is a few ms); only a very large one waits for the next frame
+  ta._code.paint = () => {
+    if (ta.value.length < 200000) { cancelAnimationFrame(ta._code.raf); paint(); }
+    else if (!ta._code.raf) ta._code.raf = requestAnimationFrame(paint);
+  };
+  paint();
+  ta.addEventListener("input", e => { ta._code.paint(); if (!ta.disabled) codeTyped(ta, e); codeRemember(ta); });
+  ta.addEventListener("scroll", () => { codeScroll(ta); codeAcPlace(ta); });
+  for (const ev of ["keyup", "click", "focus"]) ta.addEventListener(ev, () => { codeStatus(ta); codeRemember(ta); });
+  ta.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== ta) codeAcClose(ta); }, 120));
+  P.gl.addEventListener("mousedown", e => {
+    const row = e.target.closest(".gl > div");
+    if (!row) return;
+    e.preventDefault();
+    codeGoto(ta, [...P.gl.children].indexOf(row) + 1);
+  });
+  P.ac.addEventListener("mousedown", e => {
+    const it = e.target.closest(".it");
+    e.preventDefault();
+    if (it) { ta._code.ac.at = +it.dataset.i; codeAcAccept(ta); }
+  });
+  new ResizeObserver(() => codeScroll(ta)).observe(ta);
+  // Remember the height only when it is the user dragging the corner: the
+  // grip belongs to the box itself (everything inside it is covered by the
+  // gutter and the text), so a pointerdown aimed at the box is a drag. A
+  // window resize changes the height too and must not be saved.
+  P.box.addEventListener("pointerdown", e => {
+    if (e.target !== P.box) return;
+    const start = P.box.offsetHeight;
+    window.addEventListener("pointerup", () => {
+      const h = Math.round(P.box.offsetHeight);
+      if (h !== start) setAppSetting("editorHeight", String(h));
+    }, { once: true });
+  });
+  if (!ta.disabled) ta.addEventListener("keydown", e => codeKey(ta, e));
+  const view = name != null && codeViews.get(name);
+  const base = ta.value;
+  if (view && !ta.disabled && view.base === base && view.text !== base) {
+    // unsaved edits over the same stored source: put them back, undoably
+    codeInsert(ta, view.text, 0, base.length);
+    toast("Unsaved edits restored — Ctrl+Z goes back to the stored copy");
+  }
+  ta._code.base = base;
+  if (view) {
+    ta.setSelectionRange(Math.min(view.start, ta.value.length), Math.min(view.end, ta.value.length));
+    ta.scrollTop = view.top;
+  }
+}
+
+function codeRemember(ta) {
+  const c = ta._code;
+  if (c.name == null || c.base == null) return;
+  codeViews.set(c.name, { start: ta.selectionStart, end: ta.selectionEnd, top: ta.scrollTop,
+                          base: c.base, text: ta.value });
+}
+
+function codeLineOf(v, pos) {
+  let line = 1;
+  for (let i = v.indexOf("\n"); i >= 0 && i < pos; i = v.indexOf("\n", i + 1)) line++;
+  return line;
+}
+
+function codeGutter(ta) {
+  const { P } = ta._code;
+  const count = ta.value.split("\n").length;
+  if (count !== ta._code.lines) {
+    const rows = [];
+    for (let i = 1; i <= count; i++) rows.push(`<div>${i}</div>`);
+    P.gl.innerHTML = rows.join("");
+    P.gl.parentElement.style.minWidth = `calc(${String(count).length + 3}ch)`;
+    ta._code.lines = count;
+    ta._code.curRow = null;
+  }
+  const line = codeLineOf(ta.value, ta.selectionStart);
+  const row = P.gl.children[line - 1];
+  if (ta._code.curRow !== row) {
+    if (ta._code.curRow) ta._code.curRow.classList.remove("cur");
+    if (row) row.classList.add("cur");
+    ta._code.curRow = row;
+  }
+  [...P.gl.querySelectorAll(".bad")].forEach(r => { r.classList.remove("bad"); r.title = ""; });
+  const er = ta._code.errLine && P.gl.children[ta._code.errLine - 1];
+  if (er) { er.classList.add("bad"); er.title = ta._code.errMsg; }
+}
+
+function codeScroll(ta) {
+  const { P } = ta._code;
+  const x = ta.scrollLeft, y = ta.scrollTop;
+  const lh = parseFloat(getComputedStyle(P.box).getPropertyValue("--lh")) || 19;
+  const pad = parseFloat(getComputedStyle(P.box).getPropertyValue("--pad")) || 10;
+  ta._code.lh = lh; ta._code.pad = pad;
+  P.hl.style.transform = `translate(${-x}px, ${-y}px)`;
+  P.gl.style.transform = `translateY(${-y}px)`;
+  const line = codeLineOf(ta.value, ta.selectionStart);
+  P.cur.style.top = (pad + (line - 1) * lh - y) + "px";
+  P.cur.hidden = document.activeElement !== ta && ta.selectionStart === 0;
+  P.err.hidden = !ta._code.errLine;
+  if (ta._code.errLine) P.err.style.top = (pad + (ta._code.errLine - 1) * lh - y) + "px";
+}
+
+// the status line: position, what the name at the caret is, saved or not
+function codeStatus(ta) {
+  const c = ta._code;
+  if (!c) return;
+  const v = ta.value, s = ta.selectionStart;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const line = codeLineOf(v, s);
+  const col = codeCol(v.slice(sol, s)) + 1;
+  const st = c.P.status;
+  st.querySelector(".pos").textContent = `Ln ${line}, Col ${col}` +
+    (ta.selectionEnd > s ? ` (${ta.selectionEnd - s} selected)` : "");
+  const hint = st.querySelector(".hint");
+  if (c.errLine) {
+    hint.className = "hint bad";
+    hint.textContent = `line ${c.errLine}: ${c.errMsg}`;
+  } else {
+    hint.className = "hint";
+    const e = codeHintAt(ta);
+    hint.innerHTML = e ? `<b>${luauEsc(e.sig)}</b>${e.doc ? " — " + e.doc.replace(/<(?!\/?code>)[^>]*>/g, "") : ""}` : "";
+    hint.title = hint.textContent;
+  }
+  st.querySelector(".mod").textContent = ta.disabled ? "read only" : v !== c.saved ? "● modified" : "";
+  codeGutter(ta);
+  codeScroll(ta);
+}
+
+// visual column, tabs expanded to the tab width
+function codeCol(text) {
+  const tw = tabWidth();
+  let col = 0;
+  for (const ch of text) col = ch === "\t" ? col + tw - (col % tw) : col + 1;
+  return col;
+}
+
+// the call the caret is inside, or the name it is on, if the API knows it
+function codeHintAt(ta) {
+  const v = ta.value, s = ta.selectionStart;
+  if (codeInStrOrCom(v, s)) return null;
+  const locals = ta._code.locals;
+  // the name under the caret first: barch.store.get|
+  const word = /[A-Za-z_]\w*$/.exec(v.slice(Math.max(0, s - 200), s));
+  const tail = /^\w*/.exec(v.slice(s, s + 100))[0];
+  if (word || tail) {
+    const upto = v.slice(Math.max(0, s - 400), s) + tail;
+    const e = luauEntryOf(luauChain(upto), locals);
+    if (e && e.sig) return e;
+  }
+  // otherwise the innermost open call: barch.store.range("a", |
+  let depth = 0;
+  for (let i = s - 1, lim = Math.max(0, s - 2000); i >= lim; i--) {
+    const c = v[i];
+    if (c === ")") depth++;
+    else if (c === "(") {
+      if (depth === 0) {
+        const e = luauEntryOf(luauChain(v.slice(Math.max(0, i - 400), i)), locals);
+        return e && e.sig ? e : null;
+      }
+      depth--;
+    }
+  }
+  return null;
+}
+
+// is pos inside a string or a comment? Lexes the text before it.
+function codeInStrOrCom(v, pos) {
+  const toks = luauLex(v.slice(0, pos));
+  const last = toks[toks.length - 1];
+  if (!last || last[2] !== pos) return false;
+  if (last[0] === "com" || last[0] === "hot") return !/\n$/.test(v.slice(last[1], pos));
+  if (last[0] !== "str") return false;
+  const t = v.slice(last[1], pos);
+  // a closed short string ends at its quote; the caret after it is outside
+  if (/^["'`]/.test(t)) return t.length < 2 || t[t.length - 1] !== t[0] || t[t.length - 2] === "\\";
+  return !/\]=*\]$/.test(t);
+}
+
+// Replace [start, end) with text through the browser's own editing, so undo
+// keeps it. setRangeText is the fallback where insertText is not supported.
+function codeInsert(ta, text, start, end) {
+  // execCommand edits whatever has focus, and only an edit it makes is undoable
+  if (document.activeElement !== ta) ta.focus({ preventScroll: true });
+  if (start != null) ta.setSelectionRange(start, end ?? start);
+  ta._code.quiet = true;
+  let done = false;
+  // an empty insertText is not a reliable delete everywhere; "delete" is
+  try { done = text ? document.execCommand("insertText", false, text)
+                    : ta.selectionStart === ta.selectionEnd || document.execCommand("delete"); } catch (e) {}
+  if (!done) {
+    ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
+    ta.dispatchEvent(new Event("input"));
+  }
+  ta._code.quiet = false;
+}
+
+// ---- keys ----
+
+function codeKey(ta, e) {
+  const c = ta._code, mod = e.ctrlKey || e.metaKey;
+  if (c.ac) {
+    const n = c.ac.items.length;
+    if (e.key === "ArrowDown") { e.preventDefault(); c.ac.at = (c.ac.at + 1) % n; codeAcDraw(ta); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); c.ac.at = (c.ac.at - 1 + n) % n; codeAcDraw(ta); return; }
+    if (e.key === "PageDown") { e.preventDefault(); c.ac.at = Math.min(n - 1, c.ac.at + 8); codeAcDraw(ta); return; }
+    if (e.key === "PageUp") { e.preventDefault(); c.ac.at = Math.max(0, c.ac.at - 8); codeAcDraw(ta); return; }
+    if ((e.key === "Enter" && !mod) || e.key === "Tab") { e.preventDefault(); codeAcAccept(ta); return; }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); codeAcClose(ta); return; }
+  }
+  if (e.key === "Escape") {
+    // one Esc leaves the editor, the next closes the dialog; never both at once
+    e.stopPropagation();
+    ta.blur();
+    return;
+  }
+  if (mod && (e.key === " " || e.code === "Space")) { e.preventDefault(); codeAcOpen(ta, true); return; }
+  if (e.key === "Tab" && !mod && !e.altKey) { e.preventDefault(); insertFunctionTab(ta, e.shiftKey); return; }
+  if (e.key === "Backspace" && !mod && !e.altKey && !e.shiftKey && codeBackIndent(ta)) { e.preventDefault(); return; }
+  if (e.key === "Enter" && !mod && !e.shiftKey && !e.altKey && !e.isComposing) { e.preventDefault(); codeEnter(ta); return; }
+}
+
+// what a line does to the indent of the one after it
+function codeOpens(line) {
+  const t = line.replace(/--.*$/, "")
+    .replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, '""').trim();
+  if (!t) return false;
+  if (/^(else|elseif\b.*\bthen|repeat)$/.test(t) || /^elseif\b.*\bthen$/.test(t)) return true;
+  let net = 0;
+  for (const w of t.match(/\b(function|then|do|repeat|end|until)\b|[{}()]/g) || []) {
+    if (w === "function" || w === "then" || w === "do" || w === "repeat" || w === "{" || w === "(") net++;
+    else net--;
+  }
+  // `while x do` / `for … do` count do once; `elseif … then` starts dedented
+  if (/^(elseif|else)\b/.test(t)) net++;
+  return net > 0;
+}
+
+// Enter: the new line starts under the text of the line it came from, one step
+// further in after a line that opens a block. A line left holding nothing but
+// its indent is emptied rather than kept as trailing spaces.
+function codeEnter(ta) {
+  const v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const eol = v.indexOf("\n", e) < 0 ? v.length : v.indexOf("\n", e);
+  const before = v.slice(sol, s), after = v.slice(e, eol);
+  const base = /^[ \t]*/.exec(before)[0];
+  const indent = base + (codeOpens(before) ? tabUnit() : "");
+  if (/[{(\[]\s*$/.test(before) && /^\s*[})\]]/.test(after)) {
+    // between a bracket and its closer: the closer goes on a line of its own
+    codeInsert(ta, "\n" + indent + "\n" + base, s, e);
+    const at = ta.selectionStart - 1 - base.length;
+    ta.setSelectionRange(at, at);
+  } else {
+    codeInsert(ta, "\n" + indent, before.trim() === "" ? sol : s, e);
+  }
+  codeScrollCaret(ta);
+}
+
+// Backspace with the caret in a line's leading spaces takes it back to the
+// previous tab stop, one indent level, rather than one space at a time.
+// Anything else - a selection, text before the caret - is the browser's.
+function codeBackIndent(ta) {
+  const v = ta.value, s = ta.selectionStart;
+  if (s !== ta.selectionEnd || s === 0) return false;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const before = v.slice(sol, s);
+  if (!before || !/^ +$/.test(before)) return false;
+  const unit = tabUnit().length;
+  const drop = before.length % unit || unit;
+  codeInsert(ta, "", s - Math.min(drop, before.length), s);
+  return true;
+}
+
+// keep the caret in view after an edit made from script
+function codeScrollCaret(ta) {
+  const c = ta._code, lh = c.lh || 19, pad = c.pad || 10;
+  const y = pad + (codeLineOf(ta.value, ta.selectionStart) - 1) * lh;
+  if (y < ta.scrollTop) ta.scrollTop = y - pad;
+  else if (y + lh > ta.scrollTop + ta.clientHeight) ta.scrollTop = y + lh + pad - ta.clientHeight;
+}
+
+// After a keystroke: pull a closing word back to its block's indent, and open
+// or refresh completion.
+function codeTyped(ta, e) {
+  const c = ta._code;
+  if (c.quiet) return;
+  const v = ta.value, s = ta.selectionStart;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const eol = v.indexOf("\n", s) < 0 ? v.length : v.indexOf("\n", s);
+  const line = v.slice(sol, eol);
+  if (e.inputType === "insertText" && e.data) {
+    // `ending` after `end` was dedented: give the indent back
+    if (c.dedent && c.dedent.sol === sol && /^\s*(end|else|until)\w/.test(line) && !/^\s*elseif\b/.test(line)) {
+      const d = c.dedent; c.dedent = null;
+      codeInsert(ta, d.removed, sol, sol);
+      return;
+    }
+    if (!codeMaybeDedent(ta, e.data) && !(c.dedent && c.dedent.sol === sol)) c.dedent = null;
+  }
+  const typedWord = e.inputType === "insertText" && e.data && /[\w.:]$/.test(e.data);
+  if (typedWord || (c.ac && /^delete/.test(e.inputType || ""))) codeAcOpen(ta, false);
+  else codeAcClose(ta);
+}
+
+// the line so far is just a closing word (or bracket) that was finished by
+// `last`: pull it back to its block's indent
+function codeMaybeDedent(ta, last) {
+  const v = ta.value, s = ta.selectionStart;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const eol = v.indexOf("\n", s) < 0 ? v.length : v.indexOf("\n", s);
+  const mt = /^([ \t]*)(end|else|elseif|until|\}|\))$/.exec(v.slice(sol, s));
+  if (!mt || v.slice(s, eol).trim() !== "" || (last && !mt[2].endsWith(last))) return false;
+  codeDedent(ta, sol, mt[1]);
+  return true;
+}
+
+function codeDedent(ta, sol, have) {
+  const v = ta.value;
+  // the nearest line above with something on it
+  let p = sol - 1, prevLine = "";
+  while (p > 0) {
+    const ps = v.lastIndexOf("\n", p - 1) + 1;
+    prevLine = v.slice(ps, p);
+    if (prevLine.trim()) break;
+    p = ps - 1;
+  }
+  const pi = /^[ \t]*/.exec(prevLine)[0];
+  const unit = tabUnit();
+  let want = codeOpens(prevLine) ? pi : pi.endsWith(unit) ? pi.slice(0, -unit.length) : pi.replace(/(\t| {1,8})$/, "");
+  if (codeCol(have) <= codeCol(want)) return;
+  const s = ta.selectionStart, e2 = ta.selectionEnd;
+  codeInsert(ta, want, sol, sol + have.length);
+  const shift = have.length - want.length;
+  ta.setSelectionRange(s - shift, e2 - shift);
+  ta._code.dedent = { sol, removed: have.slice(want.length) };
+}
+
+// ---- completion ----
+
+function codeAcOpen(ta, forced) {
+  const c = ta._code, v = ta.value, s = ta.selectionStart;
+  if (ta.selectionEnd !== s || codeInStrOrCom(v, s)) { codeAcClose(ta); return; }
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const before = v.slice(Math.max(sol - 400, 0), s);
+  const prefix = /[A-Za-z_]\w*$/.exec(before)?.[0] || "";
+  const head = before.slice(0, before.length - prefix.length);
+  const sep = /([.:])\s*$/.exec(head);
+  let pool = [];
+  if (sep && !/\.\.\s*$/.test(head)) {
+    const segs = luauChain(head.slice(0, head.length - sep[0].length));
+    const type = luauTypeOf(segs, c.locals);
+    if (!type) { codeAcClose(ta); return; }
+    const all = Object.entries(type.members).concat(type.dyn ? type.dyn() : []);
+    const colon = sep[1] === ":";
+    pool = all.filter(([, e]) => !!e.method === colon);
+    if (!pool.length) pool = all;
+    if (!pool.length) { codeAcClose(ta); return; }
+  } else {
+    if (!forced && prefix.length < 2) { codeAcClose(ta); return; }
+    // a name straight after `local` or `function` is being made up, not looked up
+    if (!forced && /\b(local|function)\s+$/.test(head)) { codeAcClose(ta); return; }
+    const seen = new Set();
+    for (const [n, e] of Object.entries(LUAU_TYPES._G.members)) { pool.push([n, e]); seen.add(n); }
+    for (const k of LUAU_KW) { pool.push([k, { kind: "kw", sig: "" }]); seen.add(k); }
+    // names already in the body
+    const words = new Set(v.match(/\b[A-Za-z_]\w+\b/g) || []);
+    for (const w of words) if (!seen.has(w) && w !== prefix)
+      pool.push([w, { kind: "word", sig: c.locals[w] ? w + " : " + c.locals[w] : "" }]);
+  }
+  const lp = prefix.toLowerCase();
+  const items = pool
+    .filter(([n]) => n !== prefix || forced)
+    .map(([n, e]) => {
+      const ln = n.toLowerCase();
+      const score = n.startsWith(prefix) ? 0 : ln.startsWith(lp) ? 1 : lp && ln.includes(lp) ? 2 : -1;
+      return { n, e, score };
+    })
+    .filter(it => it.score >= 0)
+    .sort((a, b) => a.score - b.score || (a.e.kind === "word") - (b.e.kind === "word") ||
+                    (a.e.kind === "kw") - (b.e.kind === "kw") || a.n.localeCompare(b.n))
+    .slice(0, 60);
+  if (!items.length) { codeAcClose(ta); return; }
+  const keep = c.ac && c.ac.items[c.ac.at] && items.findIndex(it => it.n === c.ac.items[c.ac.at].n);
+  c.ac = { items, at: keep > 0 ? keep : 0, from: s - prefix.length, prefix };
+  codeAcDraw(ta);
+}
+
+function codeAcDraw(ta) {
+  const { P, ac } = ta._code;
+  const K = { fn: ["ƒ", "fn"], mod: ["▣", "mod"], val: ["◆", "val"], kw: ["k", "kw"], word: ["·", ""] };
+  const list = P.ac.querySelector(".list");
+  list.innerHTML = ac.items.map((it, i) => {
+    const [glyph, cls] = K[it.e.kind] || K.word;
+    const pre = it.n.slice(0, ac.prefix.length), rest = it.n.slice(ac.prefix.length);
+    const name = it.score === 0 && pre ? `<b>${luauEsc(pre)}</b>${luauEsc(rest)}` : luauEsc(it.n);
+    const sig = it.e.sig && it.e.sig !== it.n ? (it.e.sig.includes("(") ? it.e.sig.slice(it.e.sig.indexOf("(")) : "") : "";
+    return `<div class="it${i === ac.at ? " on" : ""}" data-i="${i}" role="option"><span class="k ${cls}">${glyph}</span>` +
+           `<span class="n">${name}</span><span class="s">${luauEsc(sig)}</span></div>`;
+  }).join("");
+  const cur = ac.items[ac.at];
+  const doc = P.ac.querySelector(".doc");
+  doc.innerHTML = cur && cur.e.sig ? `<code>${luauEsc(cur.e.sig)}</code>${cur.e.doc ? "<br>" + cur.e.doc : ""}` : "";
+  doc.hidden = !doc.innerHTML;
+  P.ac.hidden = false;
+  const on = list.children[ac.at];
+  if (on) on.scrollIntoView({ block: "nearest" });
+  codeAcPlace(ta);
+}
+
+function codeAcPlace(ta) {
+  const c = ta._code;
+  if (!c.ac) return;
+  const { P } = c;
+  const v = ta.value, s = c.ac.from;
+  const sol = v.lastIndexOf("\n", s - 1) + 1;
+  const line = codeLineOf(v, s);
+  const cw = c.cw || (c.cw = codeCharWidth(P.hl));
+  const gutter = P.gl.parentElement.offsetWidth;
+  const padX = parseFloat(getComputedStyle(ta).paddingLeft) || 14;
+  const lh = c.lh || 19, pad = c.pad || 10;
+  let x = gutter + padX + codeCol(v.slice(sol, s)) * cw - ta.scrollLeft - 24;
+  let y = pad + line * lh - ta.scrollTop + 2;
+  const boxH = P.box.clientHeight, boxW = P.box.clientWidth;
+  const h = P.ac.offsetHeight;
+  if (y + h > boxH && y - lh - h - 4 > 0) y = y - lh - h - 4;
+  x = Math.max(4, Math.min(x, boxW - P.ac.offsetWidth - 4));
+  P.ac.style.left = x + "px";
+  P.ac.style.top = y + "px";
+}
+
+function codeCharWidth(pre) {
+  const span = document.createElement("span");
+  span.textContent = "x".repeat(100);
+  span.style.visibility = "hidden";
+  pre.appendChild(span);
+  const w = span.getBoundingClientRect().width / 100;
+  span.remove();
+  return w || 7.5;
+}
+
+function codeAcAccept(ta) {
+  const c = ta._code;
+  if (!c.ac) return;
+  const it = c.ac.items[c.ac.at];
+  const from = c.ac.from, to = ta.selectionStart;
+  const tail = /^\w*/.exec(ta.value.slice(to))[0];   // finishing a word mid-way replaces all of it
+  codeAcClose(ta);
+  if (it) { codeInsert(ta, it.n, from, to + tail.length); codeMaybeDedent(ta); }
+  codeStatus(ta);
+}
+
+function codeAcClose(ta) {
+  const c = ta._code;
+  if (!c || !c.ac) return;
+  c.ac = null;
+  c.P.ac.hidden = true;
+}
+
+// ---- native code ----
+
+// Where the `--!native` hot comment is, or null. Luau reads a hot comment only in
+// the header - the comments before the first token - so this walks whitespace,
+// line comments and --[[ block ]] comments from the top and stops at the first
+// token. Same rule as wants_native in spacesapi.luau and in barch's
+// compile_into (barch TODO 413), which is what makes the line the AOT switch.
+function luauNativeMarker(src) {
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { i++; continue; }
+    if (!src.startsWith("--", i)) return null;
+    const block = /^--\[(=*)\[/.exec(src.slice(i, i + 64));
+    if (block) {
+      const close = "]" + block[1] + "]";
+      const e = src.indexOf(close, i + block[0].length);
+      if (e < 0) return null;
+      i = e + close.length;
+      continue;
+    }
+    let eol = src.indexOf("\n", i);
+    if (eol < 0) eol = n;
+    if (/^--!native[ \t\r]*$/.test(src.slice(i, eol))) {
+      const sol = src.lastIndexOf("\n", i - 1) + 1;
+      return { start: /^[ \t]*$/.test(src.slice(sol, i)) ? sol : i, end: eol < n ? eol + 1 : eol };
+    }
+    i = eol;
+  }
+  return null;
+}
+
+// ---- errors ----
+
+// "ERR spaces:3: attempt to index nil" - the chunk is named after the space,
+// so that prefix is what marks a line of this body rather than of a module it
+// required. Anything with the shape is taken when the space name doesn't match.
+function codeErrorLine(msg) {
+  const text = String(msg || "");
+  const re = /(?:^|[\s"'(\[])([\w.\-]*):(\d+):\s*/g;
+  let mt, first = null;
+  while ((mt = re.exec(text))) {
+    const hit = { line: +mt[2], chunk: mt[1], msg: text.slice(mt.index + mt[0].length).trim() };
+    if (typeof current !== "undefined" && hit.chunk === (current || "")) return hit;
+    if (!first) first = hit;
+  }
+  return first;
+}
+
+function codeMarkError(msg) {
+  const ta = document.getElementById("ev");
+  if (!ta || !ta._code) return null;
+  const hit = codeErrorLine(msg);
+  if (!hit || hit.line < 1 || hit.line > ta.value.split("\n").length) { codeClearError(); return null; }
+  ta._code.errLine = hit.line;
+  ta._code.errMsg = hit.msg;
+  codeStatus(ta);
+  codeGoto(ta, hit.line, true);
+  return hit;
+}
+
+function codeClearError() {
+  const ta = document.getElementById("ev");
+  if (!ta || !ta._code || !ta._code.errLine) return;
+  ta._code.errLine = 0; ta._code.errMsg = "";
+  codeStatus(ta);
+}
+
+// caret to the start of a line's text, scrolled into the middle if it was out
+function codeGoto(ta, line, keepFocus) {
+  if (typeof ta === "number") { line = ta; ta = document.getElementById("ev"); }
+  if (!ta || !ta._code) return;
+  const v = ta.value;
+  let pos = 0;
+  for (let i = 1; i < line; i++) { const nl = v.indexOf("\n", pos); if (nl < 0) break; pos = nl + 1; }
+  pos += /^[ \t]*/.exec(v.slice(pos))[0].length;
+  const c = ta._code, lh = c.lh || 19, pad = c.pad || 10;
+  const y = pad + (line - 1) * lh;
+  if (y < ta.scrollTop || y + lh > ta.scrollTop + ta.clientHeight)
+    ta.scrollTop = Math.max(0, y - ta.clientHeight / 2);
+  if (!keepFocus || document.activeElement === ta || !ta.disabled) {
+    ta.focus({ preventScroll: true });
+    ta.setSelectionRange(pos, pos);
+  }
+  codeStatus(ta);
+}
+
+// an error message with its line reference made into a link to that line
+function codeErrorHtml(msg) {
+  return esc(msg).replace(/(^|[\s(\[])([\w.\-]*:(\d+)):/, (all, lead, ref, n) =>
+    `${lead}<a class="errline" onclick="codeGoto(${+n})" title="Go to line ${+n}">${ref}</a>:`);
 }
 </script>
 <script>
@@ -1507,6 +2675,10 @@ async function boot() {
   draw();
 }
 
+// `configuration` holds every space's settings and the server's own; SPACESAPI
+// refuses to drop it (space_rm), so it gets no minus to press
+const UNDROPPABLE = ["configuration"];
+
 function drawSpaces() {
   document.getElementById("spaces").innerHTML =
     `<div class="spaces-head">
@@ -1525,9 +2697,9 @@ function drawSpaces() {
         ${isAdmin && s.openable ? `<button class="ib" title="Export or import ${esc(s.name)}"
           aria-label="Export or import ${esc(s.name)}"
           onclick="openTransfer(event,'${esc(enc(s.name))}')">${ico("transfer")}</button>
-        <button class="ib" title="Delete ${esc(s.name)}"
+        ${UNDROPPABLE.includes(s.name) ? "" : `<button class="ib" title="Delete ${esc(s.name)}"
           aria-label="Delete ${esc(s.name)}"
-          onclick="dropSpace(event,'${esc(enc(s.name))}')">${ico("minus")}</button>` : ""}
+          onclick="dropSpace(event,'${esc(enc(s.name))}')">${ico("minus")}</button>`}` : ""}
       </a>`).join("");
 }
 
@@ -1715,8 +2887,8 @@ function editKey(key, value, canEdit) {
     <div class="row">
       <input type="file" id="ef">
       <span class="fill"></span>
-      <button class="primary" onclick="saveKey(${fresh ? "null" : `'${esc(enc(key))}'`})">Save</button>
-      ${fresh ? "" : `<button onclick="removeKey('${esc(enc(key))}')">Delete</button>`}
+      <button class="primary" id="key-save" onclick="saveKey(${fresh ? "null" : `'${esc(enc(key))}'`})">Save</button>
+      ${fresh ? "" : `<button id="key-del" onclick="removeKey('${esc(enc(key))}')">Delete</button>`}
     </div>
   </div>`;
 }
@@ -1725,34 +2897,46 @@ function editKey(key, value, canEdit) {
 // changed on a space that already has data can make it unloadable
 const careful = () => current === "configuration"
   ? "\n\nCAREFUL: this is the configuration space. A wrong value can stop a space from loading or change what the server runs." : "";
+const carefulNote = () => careful().trim();
 
+// Save writes and stays open, like the function editor: a write is undone by
+// writing again, so it needs no confirm. The configuration space is the
+// exception - a wrong value there can stop a space from loading - so Save
+// asks for a second click there instead of a dialog.
 async function saveKey(key) {
   key = key == null ? document.getElementById("ek").value.trim() : decodeURIComponent(key);
-  if (!key) { toast("a key name is required", "warn"); return; }
+  if (!key) { toast("a key name is required", "warn"); document.getElementById("ek")?.focus(); return; }
   const file = document.getElementById("ef").files[0];
   const body = file || document.getElementById("ev").value;
   if (file && file.size > 512000) { toast("a value is at most 512 kB; that file is " + bytes(file.size), "warn"); return; }
-  if (!confirm(`Set ${key} in ${current}?${careful()}`)) return;
-  if (await write("key_put", { key }, body)) { shut(); drawKeys(); }
+  if (careful() && !armed(document.getElementById("key-save"), "Really set?", carefulNote())) return;
+  if (await write("key_put", { key }, body)) {
+    toast(`Saved ${key}`, "ok");
+    document.getElementById("ef").value = "";
+    drawKeys();
+  }
 }
 
+// Delete asks with a second click, not a dialog
 async function removeKey(key) {
   key = decodeURIComponent(key);
-  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.${careful()}`)) return;
-  if (await write("key_rm", { key })) { shut(); drawKeys(); }
+  if (!armed(document.getElementById("key-del"), "Really delete?", careful() ? carefulNote() : null)) return;
+  if (await write("key_rm", { key })) { toast(`Deleted ${key}`, "ok"); shut(); drawKeys(); }
 }
 
+// the − on a row: the first click turns it red and says what the second does
 async function dropKey(ev, key) {
   ev.preventDefault();
   ev.stopPropagation();
   key = decodeURIComponent(key);
-  if (!confirm(`Delete ${key} from ${current}? This cannot be undone.${careful()}`)) return;
-  if (await write("key_rm", { key })) drawKeys();
+  if (!armed(ev.currentTarget, null, `Click − again to delete ${key}${careful() ? " — " + carefulNote() : ""}`)) return;
+  if (await write("key_rm", { key })) { toast(`Deleted ${key}`, "ok"); drawKeys(); }
 }
 
 function newKey() {
   show(`<div class="top"><h2>New key in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">${editKey(null, "", true)}</div>`);
+    <div class="valuebox" data-key="">${editKey(null, "", true)}</div>`);
+  document.getElementById("ek")?.focus();
 }
 
 async function uploadFiles(input) {
@@ -1813,10 +2997,11 @@ async function openValue(key) {
   if (!out) return;
   let body = out.value ?? "";
   try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {}
+  const editable = isAdmin && out.kind === "key";
   show(`<div class="top"><h2>${esc(key)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">
+    <div class="valuebox"${editable ? ` data-key="${esc(enc(key))}"` : ""}>
       <div class="meta">${esc(current)} · ${esc(out.kind)}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
-      ${isAdmin && out.kind === "key" ? editKey(key, out.value ?? "", !out.truncated) : `<pre>${esc(body)}</pre>`}
+      ${editable ? editKey(key, out.value ?? "", !out.truncated) : `<pre>${esc(body)}</pre>`}
     </div>`);
 }
 
@@ -1934,7 +3119,8 @@ async function openFile(ev, path) {
   } else if (out.text != null) {
     let body = out.text;
     if (type.includes("json")) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {} }
-    shown = `<pre>${esc(body)}</pre>`;
+    const luau = /luau|x-lua\b/.test(type) || ext === "luau" || ext === "lua";
+    shown = luau ? `<pre class="code-ro">${luauHighlight(body)}</pre>` : `<pre>${esc(body)}</pre>`;
   } else {
     shown = `<div class="meta">binary — first ${Math.min(512, out.size || 0)} bytes</div><pre>${esc(out.hex || "")}</pre>`;
   }
@@ -2058,7 +3244,8 @@ async function openNode(ev, path) {
   } else if (out.text != null) {
     let body = out.text;
     if (type.includes("json")) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {} }
-    shown = `<pre>${esc(body)}</pre>`;
+    const luau = /luau|x-lua\b/.test(type) || ext === "luau" || ext === "lua";
+    shown = luau ? `<pre class="code-ro">${luauHighlight(body)}</pre>` : `<pre>${esc(body)}</pre>`;
   } else if (out.hex != null) {
     shown = `<div class="meta">binary — first ${Math.min(512, out.size || 0)} bytes</div><pre>${esc(out.hex || "")}</pre>`;
   } else {
@@ -2432,7 +3619,7 @@ async function drawFunctions() {
     : `<table class="keys"><tbody>${rows.map(r => `
         <tr onclick="openFunction('${esc(enc(r.name))}')">
           <td class="k" title="${esc(r.name)}">${esc(r.name)}</td>
-          <td class="kind">${esc(r.kind || "luau")}</td>
+          <td class="kind">${esc(r.kind || "luau")}${r.native ? `<br><span class="native" title="compiled to native code (--!native)">native</span>` : ""}</td>
           <td class="sz">${r.size == null ? "" : bytes(r.size)}</td>
           <td class="v">${esc(r.source ?? "")}</td>
         </tr>`).join("")}</tbody></table>`;
@@ -2453,13 +3640,14 @@ function editFunction(name, source, canEdit) {
   const fresh = name == null;
   return `<div class="editor">
     ${fresh ? `<input id="ek" placeholder="function name" autocomplete="off">` : ""}
-    <textarea id="ev" class="fn-src" rows="16" spellcheck="false" ${canEdit ? "" : "disabled"}
-      placeholder="${canEdit ? "Luau source" : "too large to edit here"}">${esc(source ?? "")}</textarea>
+    ${codeEditor(source, canEdit ? `placeholder="Luau source"` : `disabled placeholder="too large to edit here"`)}
     <div class="row">
-      <input type="file" id="ef" accept=".luau,.lua,.txt">
+      <input type="file" id="ef" accept=".luau,.lua,.txt" onchange="loadFunctionFile(this)" title="Load a file into the editor">
       <span class="fill"></span>
-      <button class="primary" onclick="saveFunction(${fresh ? "null" : `'${esc(enc(name))}'`})">Save</button>
-      ${fresh ? "" : `<button onclick="removeFunction('${esc(enc(name))}')">Delete</button>`}
+      ${canEdit ? `<label class="aot" title="Compile to native code (SETF … AOT). Kept as a --!native line at the top of the source, so it lasts through restarts and git sync. Takes effect on Save.">
+        <input type="checkbox" id="fn-aot" onchange="toggleNative(this.checked)"${luauNativeMarker(source ?? "") ? " checked" : ""}> Native (AOT)</label>` : ""}
+      <button class="primary" id="fn-save" onclick="saveFunction(${fresh ? "null" : `'${esc(enc(name))}'`})">Save</button>
+      ${fresh ? "" : `<button id="fn-del" onclick="removeFunction('${esc(enc(name))}')">Delete</button>`}
     </div>
   </div>`;
 }
@@ -2486,20 +3674,59 @@ async function openFunction(name) {
                         "&name=" + encodeURIComponent(name)).catch(() => null);
   if (!out) return;
   if (out.error) { toast(out.error, "warn"); return; }
-  show(`<div class="top"><h2>${esc(out.name || name)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">
-      <div class="meta">${esc(current)} · ${esc(out.kind || "luau")}${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
-      ${isAdmin ? editFunction(out.name || name, out.source ?? "", !out.truncated) : `<pre>${esc(out.source ?? "")}</pre>`}
-      ${callBlock(esc(enc(out.name || name)), out.name || name)}
+  const shown = out.name || name;
+  show(`<div class="top"><h2>${esc(shown)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox" data-fn="${esc(enc(shown))}">
+      <div class="meta">${esc(current)} · ${esc(out.kind || "luau")}<span id="fn-native">${out.native ? " · native" : ""}</span>${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
+      ${isAdmin ? editFunction(shown, out.source ?? "", !out.truncated) : `<pre class="code-ro">${luauHighlight(out.source ?? "")}</pre>`}
+      ${callBlock(esc(enc(shown)), shown)}
     </div>`);
-  tabifyFunctionBody();
+  (callFunction._lastSaved ??= new Map()).set(shown, out.source ?? "");
+  tabifyFunctionBody(current + "/" + shown);
+  const ta = document.getElementById("ev");
+  if (ta && ta._code) { ta._code.saved = out.source ?? ""; codeStatus(ta); }
+}
+
+// what Save and Call run: SETF with the body in the editor. Answers the
+// server's reply; a refusal is shown by the caller, next to the code, rather
+// than as a toast that is gone before the line number is read.
+async function putFunction(name, body) {
+  const q = new URLSearchParams({ space: current, name });
+  const r = await fetch("/api/admin/function_put?" + q, { method: "POST", body });
+  return r.json().catch(() => ({ error: "not JSON — " + r.status }));
+}
+
+// the save went through: the editor is clean, any old error mark is stale
+function functionSaved(name, body) {
+  (callFunction._lastSaved ??= new Map()).set(name, body);
+  const ta = document.getElementById("ev");
+  if (ta && ta._code) {
+    ta._code.saved = body;
+    if (ta._code.name != null && ta._code.name.endsWith("/")) codeViews.delete(ta._code.name);
+    ta._code.name = current + "/" + name;
+    ta._code.base = body;
+    codeRemember(ta);
+    const shown = document.getElementById("fn-native");
+    if (shown) shown.textContent = luauNativeMarker(body) ? " · native" : "";
+    codeClearError();
+    codeStatus(ta);
+  }
+}
+
+// SETF refused the body: mark the line it names and say why under the editor
+function functionRefused(name, error) {
+  const out = document.getElementById("call-out");
+  const hit = codeMarkError(error);
+  if (out) out.innerHTML = `<span class="dim">${esc(current)}&gt; SETF ${esc(name)}</span>\n` +
+    `<span class="rerr">(error) ${codeErrorHtml(error)}</span>`;
+  toast(hit ? `${name} not saved: line ${hit.line}` : `${name} not saved`, "warn");
 }
 
 async function callFunction(name) {
   const fresh = name == null;
   if (fresh) name = (document.getElementById("ek")?.value || "").trim();
   else name = decodeURIComponent(name);
-  if (!name) { toast("name the function first", "warn"); return; }
+  if (!name) { toast("name the function first", "warn"); document.getElementById("ek")?.focus(); return; }
   const box = document.getElementById("call-args"), out = document.getElementById("call-out");
   if (!box || !out) return;
   // Save-before-Call (on by default, toggle in app settings): SETF the editor
@@ -2511,13 +3738,11 @@ async function callFunction(name) {
     if (ta && !ta.disabled) {
       const body = ta.value;
       if (typeof body === "string" && body.trim() && (fresh || body !== callFunction._lastSaved?.get(name))) {
-        // write() toasts on failure; quiet it here so a failed save is one
-        // yellow toast and the call is skipped, not two stacked dialogs
-        const saved = await write("function_put", { name }, body, true).catch(() => null);
-        if (!saved) return;                 // write() said why
-        toast(`Saved ${name}`, "ok");
-        (callFunction._lastSaved ??= new Map()).set(name, body);
-      } else if (fresh) {
+        const saved = await putFunction(name, body).catch(e => ({ error: String(e) }));
+        if (saved.error) { functionRefused(name, saved.error); return; }
+        functionSaved(name, body);
+        drawFunctions();
+      } else if (fresh && !body.trim()) {
         toast("source is required", "warn");
         return;
       }
@@ -2532,106 +3757,170 @@ async function callFunction(name) {
     { method: "POST", body: JSON.stringify({ args: ["CALLF", name, ...args] }) });
   const res = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
   if (!res.ok) {
-    // yellow toast for a failed call; the red inline line keeps the detail
-    toast(`Call to ${name} failed`, "warn");
+    // the red line keeps the detail and links to the line it names; the
+    // editor marks that line too, so a toast would only repeat it
     out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
-      `<span class="rerr">(error) ${esc(res.error || "failed")}</span>`;
+      `<span class="rerr">(error) ${codeErrorHtml(res.error || "failed")}</span>`;
+    if (!codeMarkError(res.error)) toast(`Call to ${name} failed`, "warn");
     return;
   }
+  codeClearError();
   out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` + renderReply(res.reply, "");
 }
 
-// Tab inside the function body inserts indentation instead of moving focus.
-// Shift+Tab removes one level; Esc leaves the textarea. The unit is spaces
-// (tabWidth(): 2, 4 or 8, default 4, from app settings) so rendering matches
-// insertion whatever the browser default of 8 would do to a real tab.
-function tabifyFunctionBody() {
+// Wires the editor in an open function dialog: highlighting, the gutter,
+// completion, Enter and Tab (see the Luau editor script above). `key` is what
+// the caret position is remembered under between openings.
+function tabifyFunctionBody(key) {
   const ta = document.getElementById("ev");
-  if (!ta || ta.disabled || ta.dataset.tabify) { applyTabWidth(); return; }
-  ta.dataset.tabify = "1";
   applyTabWidth();
-  ta.addEventListener("keydown", e => {
-    if (e.key === "Tab") {
-      e.preventDefault();
-      insertFunctionTab(ta, e.shiftKey);
-    } else if (e.key === "Escape") {
-      ta.blur();
-    }
-  });
+  if (!ta || !ta.closest(".code")) return;
+  codeAttach(ta, key ?? null);
+  const aot = document.getElementById("fn-aot");
+  if (aot) {
+    const sync = () => { aot.checked = !!luauNativeMarker(ta.value); };
+    ta.addEventListener("input", sync);
+    sync();                                   // a restored draft may differ
+  }
+  const name = document.getElementById("ek");
+  (name && !name.value ? name : ta).focus({ preventScroll: true });
 }
 
 function tabUnit() {
   return " ".repeat(tabWidth());
 }
 
+// Tab indents: to the next tab stop at the caret, or every selected line by one
+// unit. Shift+Tab takes one unit (or a tab) off each line the selection
+// touches. The unit is spaces (tabWidth(): 2, 4 or 8, from app settings) so
+// rendering matches insertion whatever the browser would do to a real tab.
+// Whole lines are replaced through codeInsert so one Ctrl+Z undoes it.
 function insertFunctionTab(ta, outdent) {
   const unit = tabUnit();
-  const start = ta.selectionStart ?? ta.value.length;
+  const v = ta.value;
+  const start = ta.selectionStart ?? v.length;
   const end = ta.selectionEnd ?? start;
-  if (outdent) {
-    // remove one unit (spaces) or one tab at the start of each selected line
-    const before = ta.value.slice(0, start);
-    const sel = ta.value.slice(start, end);
-    const after = ta.value.slice(end);
-    const sol = before.lastIndexOf("\n") + 1;
-    const head = before.slice(sol);
-    const lines = (head + sel).split("\n");
-    const fixed = lines.map(l => {
-      if (l.startsWith(unit)) return l.slice(unit.length);
-      if (l.startsWith("\t")) return l.slice(1);
-      return l.replace(/^ {1,8}/, m => m.length >= unit.length ? m.slice(unit.length) : "");
-    });
-    const joined = fixed.join("\n");
-    ta.value = before.slice(0, sol) + joined + after;
-    const moved = joined.length - (head + sel).length;
-    ta.selectionStart = start + (fixed[0].length - lines[0].length);
-    ta.selectionEnd = end + moved;
+  if (!outdent && start === end) {
+    const sol = v.lastIndexOf("\n", start - 1) + 1;
+    const col = codeCol(v.slice(sol, start));
+    codeInsert(ta, " ".repeat(unit.length - (col % unit.length)), start, end);
     return;
   }
-  if (start !== end) {
-    // indent every selected line by one unit
-    const before = ta.value.slice(0, start);
-    const sel = ta.value.slice(start, end);
-    const after = ta.value.slice(end);
-    const sol = before.lastIndexOf("\n") + 1;
-    const joined = (before.slice(sol) + sel).split("\n").map(l => unit + l).join("\n");
-    ta.value = before.slice(0, sol) + joined + after;
-    ta.selectionStart = start + unit.length;
-    ta.selectionEnd = start + joined.length - before.slice(sol).length;
-    return;
+  const sol = v.lastIndexOf("\n", start - 1) + 1;
+  // a selection that ends at the start of a line does not take that line in
+  const last = end > start && v[end - 1] === "\n" ? end - 1 : end;
+  const eol = v.indexOf("\n", last) < 0 ? v.length : v.indexOf("\n", last);
+  const lines = v.slice(sol, eol).split("\n");
+  const fixed = lines.map(l => {
+    if (!outdent) return l.trim() ? unit + l : l;
+    if (l.startsWith(unit)) return l.slice(unit.length);
+    if (l.startsWith("\t")) return l.slice(1);
+    return l.replace(/^ +/, m => m.slice(Math.min(m.length, unit.length)));
+  });
+  const joined = fixed.join("\n");
+  if (joined === lines.join("\n")) return;
+  const firstShift = fixed[0].length - lines[0].length;
+  codeInsert(ta, joined, sol, eol);
+  if (start === end) {
+    const at = Math.max(sol, start + firstShift);
+    ta.setSelectionRange(at, at);
+  } else {
+    ta.setSelectionRange(Math.max(sol, start + firstShift), end + (joined.length - (eol - sol)));
   }
-  // no selection: insert one unit at the caret
-  ta.setRangeText(unit, start, end, "end");
 }
 
+// The Native (AOT) toggle adds or takes away the `--!native` line at the top of
+// the body - the source is the record, see luauNativeMarker - as one undoable
+// edit, keeping the caret on the text it was on. It takes effect on Save.
+function toggleNative(on) {
+  const ta = document.getElementById("ev");
+  if (!ta || ta.disabled) return;
+  const m = luauNativeMarker(ta.value);
+  if (!!m === on) return;
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  if (on) {
+    const line = "--!native\n";
+    codeInsert(ta, line, 0, 0);
+    ta.setSelectionRange(s + line.length, e + line.length);
+  } else {
+    const len = m.end - m.start;
+    codeInsert(ta, "", m.start, m.end);
+    const fix = p => p >= m.end ? p - len : p > m.start ? m.start : p;
+    ta.setSelectionRange(fix(s), fix(e));
+  }
+  codeStatus(ta);
+  toast(on ? "Native on — Save to compile it" : "Native off — Save to go back to the interpreter");
+}
+
+// a file picked under the editor is loaded into it, not sent behind its back
+function loadFunctionFile(input) {
+  const f = input.files[0];
+  input.value = "";
+  if (!f) return;
+  if (f.size > 512000) { toast("a function is at most 512 kB; that file is " + bytes(f.size), "warn"); return; }
+  f.text().then(text => {
+    const ta = document.getElementById("ev");
+    if (!ta || ta.disabled) return;
+    ta.focus();
+    codeInsert(ta, text, 0, ta.value.length);
+    ta.setSelectionRange(0, 0);
+    ta.scrollTop = 0;
+    toast(`Loaded ${f.name} — Save to store it`);
+  });
+}
+
+// Save: SETF and stay in the editor. No confirm - this is the loop of editing
+// and running a function, and the stored copy is a Ctrl+Z away in the editor
+// until the dialog closes. The configuration space still asks, because a
+// function stored there can change what the server runs.
 async function saveFunction(name) {
   name = name == null ? document.getElementById("ek").value.trim() : decodeURIComponent(name);
-  if (!name) { toast("a function name is required", "warn"); return; }
-  const file = document.getElementById("ef").files[0];
-  const body = file || document.getElementById("ev").value;
-  if (file && file.size > 512000) { toast("a value is at most 512 kB; that file is " + bytes(file.size), "warn"); return; }
-  if (typeof body === "string" && !body.trim()) { toast("source is required", "warn"); return; }
-  if (!confirm(`SETF ${name} in ${current}? Every connection reloads it.${careful()}`)) return;
-  // quiet: success is a green toast, a failure is write()'s own yellow one
-  if (await write("function_put", { name }, body, true).catch(() => null)) {
-    (callFunction._lastSaved ??= new Map()).set(name, typeof body === "string" ? body : "");
-    toast(`Saved ${name}`, "ok");
-    shut(); drawFunctions();
-  }
+  if (!name) { toast("a function name is required", "warn"); document.getElementById("ek")?.focus(); return; }
+  const ta = document.getElementById("ev");
+  if (!ta || ta.disabled) return;
+  const body = ta.value;
+  if (!body.trim()) { toast("source is required", "warn"); return; }
+  if (careful() && !armed(document.getElementById("fn-save"), "Really save?", carefulNote())) return;
+  const out = await putFunction(name, body).catch(e => ({ error: String(e) }));
+  if (out.error) { functionRefused(name, out.error); return; }
+  functionSaved(name, body);
+  const cons = document.getElementById("call-out");
+  if (cons) cons.innerHTML = `<span class="dim">${esc(current)}&gt; SETF ${esc(name)}</span>\nOK`;
+  toast(`Saved ${name}`, "ok");
+  drawFunctions();
 }
 
+// Delete asks with a second click on "Really delete?", not with a dialog
 async function removeFunction(name) {
+  if (!armed(document.getElementById("fn-del"), "Really delete?", careful() ? carefulNote() : null)) return;
   name = decodeURIComponent(name);
-  if (!confirm(`REMF ${name} from ${current}? This cannot be undone.${careful()}`)) return;
-  if (await write("function_rm", { name })) { shut(); drawFunctions(); }
+  if (await write("function_rm", { name })) { toast(`Deleted ${name}`, "ok"); shut(); drawFunctions(); }
 }
 
 function newFunction() {
   const src = "function call()\n    return \"ok\"\nend\n";
   show(`<div class="top"><h2>New function in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
-  tabifyFunctionBody();
+    <div class="valuebox" data-fn="">${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
+  const ta = document.getElementById("ev");
+  // a new function's draft is kept under "space/" until it is saved
+  tabifyFunctionBody(current + "/");
+  if (ta && ta._code) ta._code.saved = "";      // nothing is stored yet
+  codeStatus(ta);
 }
+
+// Ctrl+S saves and Ctrl+Enter calls while a function dialog is open, wherever
+// the focus is - the editor, the name box, the parameter box, or nowhere
+// after Esc - so the browser's own Save page never gets the key.
+document.addEventListener("keydown", e => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const kb = document.querySelector("#veil.on .valuebox[data-key]");
+  if (kb && (e.key === "s" || e.key === "S")) { e.preventDefault(); saveKey(kb.dataset.key || null); return; }
+  const vb = document.querySelector("#veil.on .valuebox[data-fn]");
+  if (!vb) return;
+  const fn = vb.dataset.fn ? vb.dataset.fn : null;
+  if (e.key === "s" || e.key === "S") { e.preventDefault(); saveFunction(fn); }
+  else if (e.key === "Enter") { e.preventDefault(); callFunction(fn); }
+});
 
 // ---- RESP console (admins) --------------------------------------------------
 //
@@ -3126,6 +4415,29 @@ function toast(msg, kind) {
   t.className = "notice small" + (kind === "ok" ? " ok" : kind === "warn" ? " warn" : "");
   t.textContent = msg; t.hidden = false;
   clearTimeout(t._h); t._h = setTimeout(() => { t.hidden = true; }, 2500);
+}
+
+// Two clicks instead of a confirm(): the first arms the button for four
+// seconds - relabelled (when `label` is given) and turned red, with `note` in a
+// toast - and only a click while it is armed answers true. A shortcut that
+// arrives while armed counts as the second click too.
+function armed(btn, label, note) {
+  if (!btn) return true;
+  if (btn.dataset.armed) { disarm(btn); return true; }
+  btn.dataset.armed = "1";
+  btn._before = btn.innerHTML;
+  if (label != null) btn.textContent = label;
+  btn.classList.add("warn", "armed");
+  if (note) toast(note, "warn");
+  btn._arm = setTimeout(() => disarm(btn), 4000);
+  return false;
+}
+
+function disarm(btn) {
+  clearTimeout(btn._arm);
+  delete btn.dataset.armed;
+  if (btn._before != null) btn.innerHTML = btn._before;
+  btn.classList.remove("warn", "armed");
 }
 
 function show(html) {

@@ -52,6 +52,30 @@ local function current(req)
     return nil
 end
 
+-- Luau's `--!native` hot comment in a function's header - the comments before
+-- the first token, which is the only place Luau reads one - asks for native
+-- code. A barchd with barch TODO 413 reads it from the source on every compile,
+-- so it lasts through restarts and git sync; SETF ... AOT is passed as well so
+-- an older barchd honours it too, until that server restarts.
+local function wants_native(src)
+    local i = 1
+    while true do
+        local _, e = string.find(src, "^%s+", i)
+        if e then i = e + 1 end
+        if string.sub(src, i, i + 1) ~= "--" then return false end
+        local level = string.match(src, "^%-%-%[(=*)%[", i)
+        if level then
+            local _, close = string.find(src, "]" .. level .. "]", i, true)
+            if not close then return false end
+            i = close + 1
+        else
+            local line = string.match(src, "^%-%-([^\n]*)", i)
+            if string.match(line, "^!native%s*$") then return true end
+            i = i + 2 + #line
+        end
+    end
+end
+
 local function send(res, body, code)
     res.code = code or 200
     res:header("Content-Type", "application/json")
@@ -287,8 +311,9 @@ end
 --
 -- The stored functions in a space. They sit in a different region of the tree
 -- from ordinary keys, so the Keys tab never sees them: KEYSF walks that span,
--- then GETF fills in the size and a short preview. KEYSF is not asynchronous,
--- so it can run from a script (KEYS cannot).
+-- then GETF fills in the size, a short preview, and `native` when the source
+-- opens with `--!native` (see wants_native). KEYSF is not asynchronous, so it
+-- can run from a script (KEYS cannot).
 local function as_list(v)
     if v == nil then return {} end
     if type(v) == "string" then return { v } end
@@ -320,6 +345,7 @@ local function functions(req, res, query)
         local row = { name = name, kind = "luau" }
         if get_why == nil and type(raw) == "string" then
             row.size = #raw
+            row.native = wants_native(raw)
             local preview = string.gsub(raw, "%s+", " ")
             preview = string.match(preview, "^%s*(.-)%s*$") or preview
             row.source = #preview > 240 and (string.sub(preview, 1, 240) .. "…") or preview
@@ -344,6 +370,7 @@ local function fn(req, res, query)
     local cut = #src > 64000
     return ok(res, {
         name = query.name, kind = "luau", size = #src, truncated = cut,
+        native = wants_native(src),
         source = cut and string.sub(src, 1, 64000) or src,
     })
 end
@@ -833,7 +860,8 @@ end
 --   space_rm?name               KSPACE DROP name; not the default, configuration, or this space
 --   key_put?space&key           set a key to the body (a value is at most 512 kB)
 --   key_rm?space&key            delete a key
---   function_put?space&name     SETF name to the body, with RELOAD
+--   function_put?space&name     SETF name to the body, with RELOAD (and AOT when the
+--                               body opens with `--!native`)
 --   function_rm?space&name      REMF name, with RELOAD
 --   file_put?space&path&type    write the body as a file
 --   file_mv?space&path&to       rename a file
@@ -989,7 +1017,12 @@ local function post(req, res, params, query)
             return fail(res, "a value is at most " .. MAX_VALUE .. " bytes; that is " .. #body, 413)
         end
         if body == "" then return fail(res, "source is required") end
-        local _, why = space_call(sp, "SETF", name, body, "RELOAD")
+        local _, why
+        if wants_native(body) then
+            _, why = space_call(sp, "SETF", name, body, "RELOAD", "AOT")
+        else
+            _, why = space_call(sp, "SETF", name, body, "RELOAD")
+        end
         if why ~= nil then return fail(res, why, 400) end
         return ok(res, { ok = true, size = #body })
     end
