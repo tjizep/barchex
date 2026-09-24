@@ -19,6 +19,8 @@ s3/
   s3.luau          →  function S3         (S3 client, file source, CALLF S3 …)
   sigv4.luau       →  function SIGV4      (SHA-256, HMAC and AWS SigV4 in Luau)
   backup.luau      →  function BACKUP     (a key space to a bucket and back)
+watchdog/
+  watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
 ```
 
 USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. With no admin
@@ -152,6 +154,46 @@ that space if it's still in a transaction (not ROLLBACK, which would take back
 every write since the BEGIN), and DROP the backup LIST shows as unfinished. An
 abandoned multipart upload stays in the bucket until a lifecycle rule with
 `AbortIncompleteMultipartUpload` clears it.
+
+WATCHDOG keeps an eye on barch's error counters (`INFO ERRORS`, and
+`foreign_errors` from `INFO FOREIGN`) and sends word when one starts climbing,
+when they're all quiet again, and when barchd restarts. A counter is alerting
+when the last `window` holds at least `min_count` of its errors, at more than
+`factor` times its rate over the `baseline` before that; bursts that keep
+coming become the baseline. It sends at most one alert per counter per
+`cooldown`. What a mail server or webhook didn't take is tried again on the
+next tick, through that one only.
+
+```
+USE configuration
+SET mail.server   smtp://smtp.example.com:587     # see barch's docs for mail.*
+SET mail.from     "barch <barch@example.com>"
+SET watchdog.to   ops@example.com, oncall@example.com
+SET watchdog.webhook https://hooks.slack.com/services/...   # and/or instead of mail
+
+watchdog.WATCHDOG INSTALL        # a cron entry, configuration:cron/jobs/watchdog
+watchdog.WATCHDOG TEST           # a test message to every sink
+watchdog.WATCHDOG STATUS         # each counter's window, rate and baseline
+```
+
+| setting | default | |
+|---|---|---|
+| `watchdog.every` | `1m` | the tick, for INSTALL |
+| `watchdog.window`, `watchdog.baseline` | `5m`, `1h` | |
+| `watchdog.factor`, `watchdog.min_count` | `3`, `5` | |
+| `watchdog.cooldown` | `30m` | |
+| `watchdog.restart` | `1` | `0` stops the restart message |
+| `watchdog.webhook_format` | `json` | `text` and `content`, which Slack, Mattermost and Discord read, and the parts on their own; `plain` sends the text with a `Title` header, for ntfy |
+| `watchdog.webhook_auth` | | an `Authorization` header |
+| `watchdog.counters` | all but `net_errors` | comma separated |
+| `watchdog.name` | `barchd:<port>` | what the messages call this server |
+
+`net_errors` isn't watched by default: barch 0.5.8 counts a client closing
+its connection after a command as one. The webhook's `Authorization` can't be
+a `…password` key, since scripts can't read those, so anyone who can read
+`configuration` can see it. The cron user needs `outbound`. After a restart
+barch 0.5.8 doesn't load the `watchdog` space until something touches it, and
+until then cron can't call into it: `watchdog:DBSIZE` wakes it up.
 
 ```
 CONFIG SET functions_dir /path/to/checkouts
