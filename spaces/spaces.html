@@ -1377,6 +1377,25 @@ table.cfg td.act .ib { width: 30px; height: 30px; }
 .editor button.warn { color: var(--flag); border-color: var(--flag); }
 .editor label.aot { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
 .editor label.aot input { margin: 0; accent-color: var(--l1); }
+/* the function's own settings, beside the editor behind the gear next to Save */
+.editor .fn-body { display: flex; gap: 12px; align-items: flex-start; }
+.editor .fn-code { flex: 1; min-width: 0; }
+.editor .fn-side { flex: none; width: 230px; box-sizing: border-box; padding: 10px 12px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 4px; }
+.editor .fn-side h5 { margin: 0 0 6px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.editor .fn-side label.lim { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--ink-2); white-space: nowrap; }
+.editor .fn-side label.lim input { width: 0; flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; padding: 3px 6px; }
+.editor .fn-side .sub { font-size: 11.5px; line-height: 1.4; color: var(--ink-3); }
+.editor .fn-side .sub.bad { color: var(--flag); }
+.editor .fn-side code { font-family: var(--mono); font-size: 11px; }
+.editor .gear#fn-gear { position: relative; }
+.editor .gear#fn-gear[aria-expanded="true"] { color: var(--l1); border-color: var(--l1); }
+.editor .gear#fn-gear.set::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--l1); }
+@media (max-width: 760px) {
+  .editor .fn-body { flex-direction: column; align-items: stretch; }
+  .editor .fn-side { width: auto; }
+}
 table.keys td.kind .native { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--l1); }
 .editor button.primary.warn { color: #fff; background: var(--flag); }
 .cons-out a.errline { color: inherit; text-decoration: underline dotted; cursor: pointer; }
@@ -2498,6 +2517,50 @@ function codeAcClose(ta) {
   if (!c || !c.ac) return;
   c.ac = null;
   c.P.ac.hidden = true;
+}
+
+// ---- the --@barch header ----
+
+// The function's own limits, `--@barch {"deadline_ms": 5000, "slice_insns": 200000}`,
+// from the comments before the first token - the walk barch's read_function_meta
+// makes (barch TODO 434). Answers null when there is none, or
+// { start, end, obj, bad, block }: the line's range (with its newline), the
+// parsed object, `bad` when it isn't a JSON object, and `block` for the
+// --[[@barch ... ]] form, which the panel shows but leaves to the source.
+function luauBarchHeader(src) {
+  const n = src.length;
+  let i = 0;
+  const parse = (json, start, end, block) => {
+    let obj = null;
+    try { obj = JSON.parse(json); } catch (e) {}
+    const bad = !obj || typeof obj !== "object" || Array.isArray(obj);
+    return { start, end, obj: bad ? {} : obj, bad, block };
+  };
+  while (i < n) {
+    const c = src[i];
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { i++; continue; }
+    if (!src.startsWith("--", i)) return null;
+    const block = /^--\[(=*)\[/.exec(src.slice(i, i + 64));
+    if (block) {
+      const close = "]" + block[1] + "]";
+      const e = src.indexOf(close, i + block[0].length);
+      if (e < 0) return null;
+      const body = src.slice(i + block[0].length, e);
+      const at = /^\s*@barch/.exec(body);
+      if (at) return parse(body.slice(at[0].length), i, e + close.length, true);
+      i = e + close.length;
+      continue;
+    }
+    let eol = src.indexOf("\n", i);
+    if (eol < 0) eol = n;
+    if (src.startsWith("--@barch", i)) {
+      const sol = src.lastIndexOf("\n", i - 1) + 1;
+      return parse(src.slice(i + 8, eol), /^[ \t]*$/.test(src.slice(sol, i)) ? sol : i,
+                   eol < n ? eol + 1 : eol, false);
+    }
+    i = eol;
+  }
+  return null;
 }
 
 // ---- native code ----
@@ -3636,16 +3699,42 @@ async function loadFunctions() {
   return api("functions?" + q).catch(() => null);
 }
 
+// The settings a function carries in its own source: native code and its
+// --@barch limits. A side panel beside the editor, opened by the gear next to
+// Save, so the editor stays uncluttered; whether it is open is remembered.
+function fnSide(source) {
+  const open = appSetting("fnSide", "0") === "1";
+  return `<aside class="fn-side" id="fn-side"${open ? "" : " hidden"} aria-label="Function settings">
+    <h5>Function settings</h5>
+    <label class="aot" title="Compile to native code (SETF … AOT). Kept as a --!native line at the top of the source, so it lasts through restarts and git sync.">
+      <input type="checkbox" id="fn-aot" onchange="toggleNative(this.checked)"${luauNativeMarker(source ?? "") ? " checked" : ""}> Native (AOT)</label>
+    <div class="sub">Compiled to machine code on Save.</div>
+    <label class="lim">Deadline
+      <input type="number" id="fn-deadline" min="1" step="1" inputmode="numeric" placeholder="default"
+             onchange="setFnLimit('deadline_ms', this)"> ms</label>
+    <div class="sub" id="fn-deadline-hint">Running time. Waiting on the network doesn't count; the wall ceiling, a multiple of this, does.</div>
+    <label class="lim">Slice
+      <input type="number" id="fn-slice" min="1" step="1" inputmode="numeric" placeholder="default"
+             onchange="setFnLimit('slice_insns', this)"> insns</label>
+    <div class="sub" id="fn-slice-hint">How many instructions run before the call gives its worker back.</div>
+    <div class="sub bad" id="fn-hdr-note" hidden></div>
+    <div class="sub">Kept in the source as <code>--@barch {…}</code> and applied on Save. Empty means the space's default.</div>
+  </aside>`;
+}
+
 function editFunction(name, source, canEdit) {
   const fresh = name == null;
   return `<div class="editor">
     ${fresh ? `<input id="ek" placeholder="function name" autocomplete="off">` : ""}
-    ${codeEditor(source, canEdit ? `placeholder="Luau source"` : `disabled placeholder="too large to edit here"`)}
+    <div class="fn-body">
+      <div class="fn-code">${codeEditor(source, canEdit ? `placeholder="Luau source"` : `disabled placeholder="too large to edit here"`)}</div>
+      ${canEdit ? fnSide(source) : ""}
+    </div>
     <div class="row">
       <input type="file" id="ef" accept=".luau,.lua,.txt" onchange="loadFunctionFile(this)" title="Load a file into the editor">
       <span class="fill"></span>
-      ${canEdit ? `<label class="aot" title="Compile to native code (SETF … AOT). Kept as a --!native line at the top of the source, so it lasts through restarts and git sync. Takes effect on Save.">
-        <input type="checkbox" id="fn-aot" onchange="toggleNative(this.checked)"${luauNativeMarker(source ?? "") ? " checked" : ""}> Native (AOT)</label>` : ""}
+      ${canEdit ? `<button class="gear" id="fn-gear" title="Function settings: native code, deadline, slice" aria-label="Function settings"
+              aria-controls="fn-side" aria-expanded="${appSetting("fnSide", "0") === "1"}" onclick="toggleFnSide()">${ico("gear")}</button>` : ""}
       <button class="primary" id="fn-save" onclick="saveFunction(${fresh ? "null" : `'${esc(enc(name))}'`})">Save</button>
       ${fresh ? "" : `<button id="fn-del" onclick="removeFunction('${esc(enc(name))}')">Delete</button>`}
     </div>
@@ -3776,11 +3865,10 @@ function tabifyFunctionBody(key) {
   applyTabWidth();
   if (!ta || !ta.closest(".code")) return;
   codeAttach(ta, key ?? null);
-  const aot = document.getElementById("fn-aot");
-  if (aot) {
-    const sync = () => { aot.checked = !!luauNativeMarker(ta.value); };
-    ta.addEventListener("input", sync);
-    sync();                                   // a restored draft may differ
+  if (document.getElementById("fn-side")) {
+    ta.addEventListener("input", () => fnSideSync(ta));
+    fnSideSync(ta);                           // a restored draft may differ
+    if (!document.getElementById("fn-side").hidden) fnSideDefaults();
   }
   const name = document.getElementById("ek");
   (name && !name.value ? name : ta).focus({ preventScroll: true });
@@ -3827,6 +3915,101 @@ function insertFunctionTab(ta, outdent) {
   } else {
     ta.setSelectionRange(Math.max(sol, start + firstShift), end + (joined.length - (eol - sol)));
   }
+}
+
+// the panel follows the source: the Native box, the two limits, a note when the
+// header can't be edited here, and a dot on the gear when anything is set
+function fnSideSync(ta) {
+  const src = ta.value;
+  const native = !!luauNativeMarker(src);
+  const h = luauBarchHeader(src);
+  const aot = document.getElementById("fn-aot");
+  if (aot) aot.checked = native;
+  const note = document.getElementById("fn-hdr-note");
+  const locked = !!h && (h.bad || h.block);
+  for (const [id, field] of [["fn-deadline", "deadline_ms"], ["fn-slice", "slice_insns"]]) {
+    const box = document.getElementById(id);
+    if (!box) continue;
+    box.disabled = locked;
+    // not while it's being typed in; its change event writes the source
+    if (document.activeElement !== box) box.value = h && !h.bad && h.obj[field] != null ? String(h.obj[field]) : "";
+  }
+  if (note) {
+    note.hidden = !locked;
+    note.textContent = !locked ? "" : h.bad
+      ? "The --@barch line isn't a JSON object; SETF will refuse it. Fix it in the source."
+      : "The limits are in a --[[@barch … ]] block; edit them there.";
+  }
+  const gear = document.getElementById("fn-gear");
+  if (gear) gear.classList.toggle("set", native || (!!h && !h.bad && Object.keys(h.obj).length > 0));
+}
+
+function toggleFnSide() {
+  const side = document.getElementById("fn-side"), gear = document.getElementById("fn-gear");
+  if (!side) return;
+  side.hidden = !side.hidden;
+  setAppSetting("fnSide", side.hidden ? "0" : "1");
+  if (gear) gear.setAttribute("aria-expanded", String(!side.hidden));
+  if (!side.hidden) fnSideDefaults();
+}
+
+// what an empty box means, and how far a value may go: the space's own
+// deadline and slice, and the server's caps. Asked each time the panel opens,
+// since the space may change under it
+async function fnSideDefaults() {
+  const ask = async args => {
+    const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
+      { method: "POST", body: JSON.stringify({ args }) }).then(r => r.json()).catch(() => null);
+    if (!r || !r.ok || !r.reply) return null;
+    const x = r.reply.t === "arr" ? r.reply.v?.[1] : r.reply;
+    return x && x.v != null && x.t !== "err" ? String(x.v) : null;
+  };
+  const [dl, sl, dmax, smax, wall] = await Promise.all([
+    ask(["KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE"]), ask(["KSPACE", "OPTION", "GET", "FUNCTION_SLICE"]),
+    ask(["CONFIG", "GET", "function_deadline_max_ms"]), ask(["CONFIG", "GET", "function_slice_max_insns"]),
+    ask(["CONFIG", "GET", "function_wall_factor"])]);
+  const num = v => v != null && /^\d+$/.test(v) ? Number(v).toLocaleString() : null;
+  const d = document.getElementById("fn-deadline"), s = document.getElementById("fn-slice");
+  if (d && num(dl)) d.placeholder = num(dl);
+  if (s && num(sl)) s.placeholder = num(sl);
+  const dh = document.getElementById("fn-deadline-hint"), sh = document.getElementById("fn-slice-hint");
+  if (dh && (num(dl) || num(dmax))) dh.textContent = [
+    num(dl) && `${esc(current)} gives ${num(dl)} ms`, num(dmax) && `at most ${num(dmax)}`,
+  ].filter(Boolean).join(", ") + `. Running time only; waiting on the network doesn't count. The whole call stops at ${num(wall) ? num(wall) + "×" : "a multiple of"} this.`;
+  if (sh && (num(sl) || num(smax))) sh.textContent = [
+    num(sl) && `${esc(current)} gives ${num(sl)}`, num(smax) && `at most ${num(smax)}`,
+  ].filter(Boolean).join(", ") + ". Instructions before the call gives its worker back.";
+}
+
+// a limit box changed: write the --@barch line to match, as one undoable edit
+// that keeps any other fields in it, and drop the line when nothing is left
+function setFnLimit(field, box) {
+  const ta = document.getElementById("ev");
+  if (!ta || ta.disabled) return;
+  const raw = box.value.trim();
+  const h = luauBarchHeader(ta.value);
+  if (raw !== "" && !/^[1-9]\d*$/.test(raw)) {
+    toast("a whole number above 0, or empty for the default", "warn");
+    // the sync leaves a focused box alone, so put the source's value back here
+    box.value = h && !h.bad && h.obj[field] != null ? String(h.obj[field]) : "";
+    return;
+  }
+  if (h && (h.bad || h.block)) { fnSideSync(ta); return; }
+  const obj = { ...(h ? h.obj : {}) };
+  if (raw === "") delete obj[field]; else obj[field] = Number(raw);
+  const keys = Object.keys(obj);
+  const line = keys.length ? "--@barch " + JSON.stringify(obj).replace(/":/g, '": ').replace(/,"/g, ', "') + "\n" : "";
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const start = h ? h.start : 0, end = h ? h.end : 0;
+  if (line === ta.value.slice(start, end)) return;
+  codeInsert(ta, line, start, end);
+  const shift = line.length - (end - start);
+  const fix = p => p >= end ? p + shift : p > start ? start : p;
+  ta.setSelectionRange(fix(s), fix(e));
+  codeStatus(ta);
+  fnSideSync(ta);
+  const what = field === "deadline_ms" ? "Deadline" : "Slice";
+  toast(raw === "" ? `${what} back to the default — Save to apply` : `${what} ${Number(raw).toLocaleString()} — Save to apply`);
 }
 
 // The Native (AOT) toggle adds or takes away the `--!native` line at the top of
