@@ -1,8 +1,9 @@
 # barchex
 
-Extensions for barch, as a git repository `FUNCTIONS SYNC` can install.
+Extensions for barch, packaged as a git repository that `FUNCTIONS SYNC` can
+install.
 
-A top-level folder is a key space of that name. Do not set
+A top-level folder becomes a key space with that name. Do not set
 `git/repositories/barchex/space` — that would dump every folder into one
 space and wipe whatever functions were already there.
 
@@ -23,32 +24,33 @@ watchdog/
   watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
 ```
 
-USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. With no admin
-yet, the viewer treats you as a local admin, and the first account to
-register — or the first existing account to sign on — becomes admin.
+USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. Until an admin
+exists, the viewer treats you as a local admin. The first account to register
+— or the first existing account to sign on — becomes admin.
 It does not use a `users` key space.
 
-VECTORS is the `examples/hnsw` index with nk vectors instead of words.
-`vectors.SET <name> <buffer>` stores a point, the vector as ONE argument:
+VECTORS is the `examples/hnsw` index with nk vectors in place of words.
+`vectors.SET <name> <buffer>` stores a point; pass the vector as ONE argument:
 a packed f32 buffer (dim*4 bytes, e.g. Python `struct.pack('<384f', *vec)`).
-`vectors.CLOSEST <buffer> [k]` answers the nearest name, or name/distance
-pairs with k — one arg per component is NOT accepted (the colon form
+`vectors.CLOSEST <buffer> [k]` returns the nearest name, or name/distance
+pairs when k is given. Do NOT pass one argument per component (the colon form
 `vectors:SET` is parsed by the builtin SET first, which treats a third arg
 as an EX/NX/GET option and refuses it before the function is reached).
-Distance is cosine, switchable to `euclidean` with TUNE and back without a
-rebuild; TUNE also sets M/efConstruction/efSearch/heuristic, PARAMS reports
-them. Writes go through the dotted form in the space (`USE vectors` first;
-the colon form writes a plain key). The console's command list
-(`spaces/commands.json`) is shared; add the four VECTORS commands there
+Distance defaults to cosine. TUNE can switch it to `euclidean` and back
+without a rebuild; TUNE also sets M/efConstruction/efSearch/heuristic, and
+PARAMS reports them. Write through the dotted form in the space (`USE vectors`
+first; the colon form writes a plain key). The console shares its command list
+(`spaces/commands.json`); add the four VECTORS commands there
 if the dropdown should offer them.
 
-S3 works with AWS and anything that speaks its API (MinIO, R2, B2, Wasabi).
-The function sandbox has no hashing and no clock, so SIGV4 brings SHA-256 and
-HMAC in plain Luau, and reads the time off a key's expiry. `s3.SIGV4` (the
-dotted name is the command, from any space) checks the signer against the
-example requests in AWS's SigV4 documentation.
-Settings are keys in `configuration`, and `s3.<profile>.<name>` overrides
-`s3.<name>` for `require("s3.S3").client("<profile>")`:
+S3 works with AWS and any service that speaks its API (MinIO, R2, B2, Wasabi).
+The function sandbox does not provide hashing or a clock, so SIGV4 implements
+SHA-256 and HMAC in plain Luau and gets the time from a key's expiry.
+`s3.SIGV4` (the dotted name is the command and works from any space) checks
+the signer against the example requests in AWS's SigV4 documentation.
+Settings are keys in `configuration`. For
+`require("s3.S3").client("<profile>")`, `s3.<profile>.<name>` overrides
+`s3.<name>`:
 
 ```
 USE configuration
@@ -59,10 +61,11 @@ SET s3.secret_key  ...
 SET s3.path_style  1          # default 0 on amazonaws.com, 1 anywhere else
 ```
 
-The secret can't be a `…password` key, because scripts can't read those and
-this one has to sign. So anyone who can read `configuration` can see it.
+The secret cannot be a `…password` key: scripts cannot read those, and this
+secret must sign requests. Anyone who can read `configuration` can therefore
+see it.
 
-From a stored function, inside the handler rather than at the top:
+From a stored function, require it inside the handler rather than at the top:
 
 ```lua
 local s3 = require("s3.S3")
@@ -75,16 +78,16 @@ local up = s3.upload("bucket", "big/key")            -- multipart: up:part(body)
 
 `s3.S3 LS bucket [prefix]`, `GET`, `STAT`, `PUT`, `DEL`, `URL`, `BUCKETS`
 and `CHECK` do the same from a RESP connection (or `CALLF S3 …` in the `s3`
-space); calling out needs the `outbound` ACL category. They don't work from
-the viewer's Call box or Console yet: those run CALLF from inside an HTTP
-handler, and barch refuses a nested CALLF whose function waits on the network
-("cannot call 'CALLF', it blocks"). A file source isn't affected, because
-barch calls it directly.
+space). Calling out to the network requires the `outbound` ACL category.
+These commands do not work from the viewer's Call box or Console yet: those
+run CALLF from inside an HTTP handler, and barch refuses a nested CALLF whose
+function waits on the network ("cannot call 'CALLF', it blocks"). A file
+source is not affected because barch calls it directly.
 
-A space's file store can read through to a bucket: a missing file is fetched
-from it the first time it's asked for, and it's an ordinary stored file after
-that. Set the options before the space is first loaded (barch reads them when
-it loads a space), then add the two small functions to it:
+A space's file store can fall through to a bucket: a missing file is fetched
+the first time it is requested and becomes an ordinary stored file afterward.
+Set the options before the space is first loaded (barch reads them when it
+loads a space), then add these two small functions to it:
 
 ```
 USE configuration
@@ -98,20 +101,12 @@ SETF S3SOURCE "function call(path) return require('s3.S3').source(path) end"
 SETF S3LIST   "function call(dir) return require('s3.S3').listing(dir) end"
 ```
 
-The listing offers a bucket's objects one level at a time. A sub-folder shows
-up once something in it has been fetched, because barch lists a source's names
-as files. The viewer's Files tab shows what has been fetched.
+The listing offers a bucket's objects one level at a time. A sub-folder appears
+once something in it has been fetched, because barch lists a source's names as
+files. The viewer's Files tab shows what has been fetched.
 
-Known barch issue (0.5.8): a string a stored function returns loses its first
-byte if that byte is `$`. barch keeps a leading `$` on RESP bulk strings as a
-marker and strips it when reading one back, and a Luau string that starts with
-`$` is taken for a marked one. Through a file source that means an object whose
-content starts with `$` is stored a byte short, and a name starting with `$` is
-listed without it. Fetch those through `s3.get` in your own code until barch
-is fixed.
-
-`s3.BACKUP` copies a whole key space to a bucket with barch's streaming save,
-and puts it back with the streaming load:
+`s3.BACKUP` copies a whole key space to a bucket with barch's streaming save
+and restores it with the streaming load:
 
 ```
 s3.BACKUP SAVE orders my-bucket/nightly          # answers the name, e.g. 20260924T060703Z
@@ -121,48 +116,48 @@ s3.BACKUP DROP orders my-bucket/nightly 20260924T060703Z
 s3.BACKUP @backup SAVE ...                       # s3.backup.* settings
 ```
 
-A backup is `nightly/orders/<name>/shard-0000` … one object per shard, and
-`manifest.json`, which is written last. A save is one moment: with no
-transaction open, BACKUP does BEGIN, streams every shard to the bucket, and
-COMMITs. It commits on a failure too, because a ROLLBACK would take back other
-clients' writes as well. Writes carry on while it runs; barch keeps the
-BEGIN-time pages copy-on-write until the COMMIT. Run it inside your own BEGIN to
-save that moment, and the COMMIT stays yours. A failed save removes what it
-wrote and aborts its upload.
+A backup is `nightly/orders/<name>/shard-0000` … one object per shard, plus
+`manifest.json`, which is written last. A save captures one moment: if no
+transaction is open, BACKUP starts one, streams every shard to the bucket, and
+commits. It commits after a failure too, because a ROLLBACK would also undo
+other clients' writes. Writes continue while it runs; barch keeps the pages
+from the BEGIN point copy-on-write until the commit. Run it inside your own
+BEGIN to save that moment, and the commit remains yours. A failed save removes
+what it wrote and aborts its upload.
 
-A shard bigger than `s3.part_size` (default 8 MB, at least 5 MB) goes up in
-parts, so a save holds about one part in memory. A load holds a shard at a
-time, since barch collects a shard whole before replacing it. Before it touches
-the space, LOAD checks that the shard count matches and that every shard's
-object is there at the size the manifest says. It is refused inside a
-transaction, and on a range-sharded space. SAVE needs read rights in the
-space, LOAD write rights, and both need `outbound`.
+A shard larger than `s3.part_size` (default 8 MB, at least 5 MB) is uploaded in
+parts, so a save holds about one part in memory. A load holds only one shard at
+a time, because barch collects a shard in full before replacing it. Before it
+touches the space, LOAD checks that the shard count matches and that every
+shard object exists at the size specified by the manifest. LOAD is refused
+inside a transaction and on a range-sharded space. SAVE needs read rights in
+the space, LOAD needs write rights, and both need `outbound`.
 
-BACKUP's `--@barch {"deadline_ms": 30000}` header gives a run 30 s of running
-time, barch's default `function_deadline_max_ms`; waiting on S3 doesn't count.
-The whole run, waits included, stops at `function_wall_factor` times that, 300 s
-by default. The caps of the space the connection is in (`USE`) apply, so for a
-bigger space raise `<space>.function_deadline_max_ms` and the header, or the
-wall factor.
+BACKUP's `--@barch {"deadline_ms": 30000}` header gives the function 30 s of
+running time, barch's default `function_deadline_max_ms`; waiting on S3 does
+not count. The entire run, including waits, is limited to
+`function_wall_factor` times that value, 300 s by default. The limits of the
+space the connection is in (`USE`) apply, so for a larger space raise
+`<space>.function_deadline_max_ms` and the header, or raise the wall factor.
 
-A run stopped at the ceiling ends with `FUNCTION timeout`. Stopped during an
-upload, as it nearly always is, the save still commits, but it can't remove
-what it wrote, since every request after the ceiling fails at once. Stopped
-while Luau is running, the timeout can't be caught and the space is left in its
-transaction, with copy-on-write pages growing. So after a timeout: COMMIT in
-that space if it's still in a transaction (not ROLLBACK, which would take back
-every write since the BEGIN), and DROP the backup LIST shows as unfinished. An
-abandoned multipart upload stays in the bucket until a lifecycle rule with
-`AbortIncompleteMultipartUpload` clears it.
+A run stopped at the ceiling ends with `FUNCTION timeout`. If it stops during
+an upload, as it almost always does, the save still commits but cannot remove
+what it wrote, because every request after the ceiling fails immediately. If
+it stops while Luau is running, the timeout cannot be caught and the space is
+left in its transaction, so copy-on-write pages keep growing. After a timeout,
+COMMIT in that space if it is still in a transaction. Do not ROLLBACK: that
+would undo every write since the BEGIN. Then DROP the backup that LIST shows
+as unfinished. An abandoned multipart upload remains in the bucket until a
+lifecycle rule with `AbortIncompleteMultipartUpload` clears it.
 
-WATCHDOG keeps an eye on barch's error counters (`INFO ERRORS`, and
-`foreign_errors` from `INFO FOREIGN`) and sends word when one starts climbing,
-when they're all quiet again, and when barchd restarts. A counter is alerting
-when the last `window` holds at least `min_count` of its errors, at more than
-`factor` times its rate over the `baseline` before that; bursts that keep
-coming become the baseline. It sends at most one alert per counter per
-`cooldown`. What a mail server or webhook didn't take is tried again on the
-next tick, through that one only.
+WATCHDOG monitors barch's error counters (`INFO ERRORS` and `foreign_errors`
+from `INFO FOREIGN`) and sends an alert when one starts climbing, when all of
+them become quiet again, and when barchd restarts. A counter triggers an alert
+when the last `window` contains at least `min_count` errors at more than
+`factor` times the rate during the preceding `baseline`; bursts that continue
+become the baseline. It sends at most one alert per counter per `cooldown`.
+If a mail server or webhook rejects a message, WATCHDOG retries it on the next
+tick through that sink only.
 
 ```
 USE configuration
@@ -182,18 +177,18 @@ watchdog.WATCHDOG STATUS         # each counter's window, rate and baseline
 | `watchdog.window`, `watchdog.baseline` | `5m`, `1h` | |
 | `watchdog.factor`, `watchdog.min_count` | `3`, `5` | |
 | `watchdog.cooldown` | `30m` | |
-| `watchdog.restart` | `1` | `0` stops the restart message |
-| `watchdog.webhook_format` | `json` | `text` and `content`, which Slack, Mattermost and Discord read, and the parts on their own; `plain` sends the text with a `Title` header, for ntfy |
-| `watchdog.webhook_auth` | | an `Authorization` header |
-| `watchdog.counters` | all but `net_errors` | comma separated |
-| `watchdog.name` | `barchd:<port>` | what the messages call this server |
+| `watchdog.restart` | `1` | `0` disables restart messages |
+| `watchdog.webhook_format` | `json` | `text` and `content`, which Slack, Mattermost, and Discord read, plus the fields individually; `plain` sends the text with a `Title` header for ntfy |
+| `watchdog.webhook_auth` | | an `Authorization` header to send |
+| `watchdog.counters` | all but `net_errors` | comma-separated list |
+| `watchdog.name` | `barchd:<port>` | name used for this server in messages |
 
-`net_errors` isn't watched by default: barch 0.5.8 counts a client closing
-its connection after a command as one. The webhook's `Authorization` can't be
-a `…password` key, since scripts can't read those, so anyone who can read
-`configuration` can see it. The cron user needs `outbound`. After a restart
-barch 0.5.8 doesn't load the `watchdog` space until something touches it, and
-until then cron can't call into it: `watchdog:DBSIZE` wakes it up.
+`net_errors` is not watched by default: barch 0.5.8 counts a client closing
+its connection after a command as one. The webhook's `Authorization` value
+cannot be a `…password` key, since scripts cannot read those. Anyone who can
+read `configuration` can therefore see it. The cron user needs `outbound`.
+After a restart, barch 0.5.8 does not load the `watchdog` space until something
+touches it, so cron cannot call into it until `watchdog:DBSIZE` wakes it up.
 
 ```
 CONFIG SET functions_dir /path/to/checkouts
@@ -211,18 +206,18 @@ USE spaces
 KEYSF
 ```
 
-`as = keys` is required: `as = fs` would put the Luau in the file store and
+`as = keys` is required: `as = fs` would put the Luau in the file store, where
 it would never become a function.
 
-`SPACESUI` only answers if HTTP is started in the `spaces` space. The HTTP
-user also needs the rights the page's own buttons ask of it: `SETUSER` states
-the whole rule, and `+dangerous` is what lets Import and Export through
+`SPACESUI` only answers when HTTP is started in the `spaces` space. The HTTP
+user also needs the rights requested by the page's buttons: `SETUSER` states
+the complete rule, and `+dangerous` lets Import and Export through
 (`IMPORT` carries the `dangerous` category; `EXPORT` does not).
 
 ```
 ACL SETUSER web on +read +write +data +keys +function +config +dangerous
 ```
 
-`+admin` is not a grantable right — `admin` is a preset name, and the command
-requirements that say `admin` are ignored by `cats2vec` — so a `SETUSER` that
-includes it fails with `ACL category not found`.
+`+admin` is not a grantable right — `admin` is a preset name, and command
+requirements that say `admin` are ignored by `cats2vec`. A `SETUSER` that
+includes it therefore fails with `ACL category not found`.
