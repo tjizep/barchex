@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess
-import time
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from .helpers import connect, free_port, wait_for_tcp
 
 redis = pytest.importorskip("redis")
 
@@ -17,11 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _barchd() -> Path | None:
     configured = os.environ.get("BARCHD")
+    which = shutil.which("barchd")
     candidates = [
         Path(configured) if configured else None,
         ROOT / ".." / "barch" / "cmake-build-release" / "barchd",
         ROOT / ".." / "barch" / "cmake-build-relwithdebinfo" / "barchd",
-        Path(shutil.which("barchd")) if shutil.which("barchd") else None,
+        Path(which) if which else None,
     ]
     for candidate in candidates:
         if candidate is not None and candidate.is_file() and os.access(candidate, os.X_OK):
@@ -29,18 +33,16 @@ def _barchd() -> Path | None:
     return None
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _wait_for_server(process: subprocess.Popen, port: int) -> None:
+    import time
 
-
-def _wait_for_server(process: subprocess.Popen[bytes], port: int) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"barchd exited before listening (status {process.returncode})")
         try:
+            import socket
+
             with socket.create_connection(("127.0.0.1", port), timeout=0.25):
                 return
         except OSError:
@@ -49,31 +51,30 @@ def _wait_for_server(process: subprocess.Popen[bytes], port: int) -> None:
     raise RuntimeError("barchd did not listen within 30 seconds")
 
 
-@pytest.fixture(scope="session")
-def barchd(tmp_path_factory):
+@dataclass
+class Server:
+    port: int
+    client: "redis.Redis"
+
+
+@contextmanager
+def _spawn_barchd():
     binary = _barchd()
     if binary is None:
         pytest.skip("barchd is required; set BARCHD to a built barchd executable")
 
-    data = tmp_path_factory.mktemp("barch-data")
-    port = _free_port()
+    data = tempfile.mkdtemp(prefix="barchex-data-")
+    port = free_port()
     process = subprocess.Popen(
-        [str(binary), "--port", str(port), "--bind", "127.0.0.1", "--dir", str(data)],
+        [str(binary), "--port", str(port), "--bind", "127.0.0.1", "--dir", data],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
     )
     try:
         _wait_for_server(process, port)
-        client = redis.Redis(
-            host="127.0.0.1",
-            port=port,
-            db=0,
-            protocol=2,
-            decode_responses=True,
-            socket_timeout=10,
-        )
+        client = connect(port)
         client.ping()
-        yield client
+        yield Server(port, client)
     finally:
         if process.poll() is None:
             process.terminate()
@@ -82,13 +83,29 @@ def barchd(tmp_path_factory):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        shutil.rmtree(data, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def server():
+    with _spawn_barchd() as spawned:
+        yield spawned
 
 
 @pytest.fixture
-def client(barchd):
-    barchd.execute_command("FLUSHDB")
-    barchd.execute_command("USE", "default")
-    return barchd
+def fresh_server():
+    with _spawn_barchd() as spawned:
+        yield spawned
+
+
+@pytest.fixture
+def client(server):
+    server.client.execute_command("USE", "default")
+    server.client.execute_command("FLUSHDB")
+    server.client.execute_command("USE", "configuration")
+    server.client.execute_command("FLUSHDB")
+    server.client.execute_command("USE", "default")
+    return server.client
 
 
 def source(name: str) -> str:
@@ -104,3 +121,53 @@ def set_configuration(client, values: dict[str, str]) -> None:
     client.execute_command("USE", "configuration")
     for key, value in values.items():
         client.execute_command("SET", key, value)
+
+
+WEB_ACL = ["on", "+read", "+write", "+data", "+keys", "+function", "+config", "+dangerous"]
+
+
+@pytest.fixture
+def spaces_http(server):
+    client = server.client
+    port = free_port()
+    client.execute_command("ACL", "SETUSER", "web", *WEB_ACL)
+    client.execute_command("USE", "spaces")
+    client.execute_command("FLUSHDB")
+    install(client, "spaces", "USERS", "spaces/users.luau")
+    install(client, "spaces", "SPACESUI", "spaces/spacesui.luau")
+    install(client, "spaces", "SPACESAPI", "spaces/spacesapi.luau")
+    client.execute_command("SET", "spaces.html", source("spaces/spaces.html"))
+    client.execute_command("SET", "commands.json", source("spaces/commands.json"))
+    conf = f'''
+function call() return "http" end
+function transport()
+    return {{
+        kind = "http",
+        port = {port},
+        bind = "127.0.0.1",
+        user = "web",
+        keys = {{"USERS", "SPACESUI", "SPACESAPI"}},
+    }}
+end
+'''
+    client.execute_command("SETF", "HTTPCONF", conf)
+    client.execute_command("HTTP", "START", "HTTPCONF", str(port), "127.0.0.1")
+    wait_for_tcp(port)
+    try:
+        yield port
+    finally:
+        try:
+            client.execute_command("HTTP", "STOP")
+        except Exception:
+            pass
+
+
+__all__ = [
+    "Server",
+    "client",
+    "server",
+    "spaces_http",
+    "source",
+    "install",
+    "set_configuration",
+]
