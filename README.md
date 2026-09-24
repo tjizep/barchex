@@ -18,6 +18,7 @@ vectors/
 s3/
   s3.luau          →  function S3         (S3 client, file source, CALLF S3 …)
   sigv4.luau       →  function SIGV4      (SHA-256, HMAC and AWS SigV4 in Luau)
+  backup.luau      →  function BACKUP     (a key space to a bucket and back)
 ```
 
 USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. With no admin
@@ -67,6 +68,7 @@ local body, why = s3.get("bucket", "path/key")     -- nil and why.status 404 if 
 s3.put("bucket", "path/key", body, "text/plain")
 local page = s3.list("bucket", { prefix = "path/", delimiter = "/" })
 local url = s3.presign("bucket", "path/key", 3600)
+local up = s3.upload("bucket", "big/key")            -- multipart: up:part(body) ... up:finish()
 ```
 
 `s3.S3 LS bucket [prefix]`, `GET`, `STAT`, `PUT`, `DEL`, `URL`, `BUCKETS`
@@ -105,6 +107,44 @@ marker and strips it when reading one back, and a Luau string that starts with
 content starts with `$` is stored a byte short, and a name starting with `$` is
 listed without it. Fetch those through `s3.get` in your own code until barch
 is fixed.
+
+`s3.BACKUP` copies a whole key space to a bucket with barch's streaming save,
+and puts it back with the streaming load:
+
+```
+s3.BACKUP SAVE orders my-bucket/nightly          # answers the name, e.g. 20260924T060703Z
+s3.BACKUP LIST orders my-bucket/nightly          # oldest first; "(unfinished)" has no manifest
+s3.BACKUP LOAD orders my-bucket/nightly          # the latest complete one, or name one
+s3.BACKUP DROP orders my-bucket/nightly 20260924T060703Z
+s3.BACKUP @backup SAVE ...                       # s3.backup.* settings
+```
+
+A backup is `nightly/orders/<name>/shard-0000` … one object per shard, and
+`manifest.json`, which is written last. A save is one moment: with no
+transaction open, BACKUP does BEGIN, streams every shard to the bucket, and
+COMMITs. It commits on a failure too, because a ROLLBACK would take back other
+clients' writes as well. Writes carry on while it runs; barch keeps the
+BEGIN-time pages copy-on-write until the COMMIT. Run it inside your own BEGIN to
+save that moment, and the COMMIT stays yours. A failed save removes what it
+wrote and aborts its upload.
+
+A shard bigger than `s3.part_size` (default 8 MB, at least 5 MB) goes up in
+parts, so a save holds about one part in memory. A load holds a shard at a
+time, since barch collects a shard whole before replacing it. Before it touches
+the space, LOAD checks that the shard count matches and that every shard's
+object is there at the size the manifest says. It is refused inside a
+transaction, and on a range-sharded space. SAVE needs read rights in the
+space, LOAD write rights, and both need `outbound`.
+
+The whole run is one function call, bounded by the deadline of the space the
+connection is in (`USE`), not the `s3` space. `KSPACE OPTION GET
+FUNCTION_DEADLINE` shows it; set `<space>.function_deadline_ms` in
+configuration before that space is opened to cover the biggest backup. A save
+that runs past it ends with `FUNCTION timeout`, which BACKUP can't catch, so it
+can't tidy up. The space is left in its transaction, with copy-on-write pages
+growing, and the bucket holds a backup with no manifest. COMMIT in that space
+(not ROLLBACK, which would take back every write since the BEGIN), then DROP
+the name LIST shows as unfinished.
 
 ```
 CONFIG SET functions_dir /path/to/checkouts

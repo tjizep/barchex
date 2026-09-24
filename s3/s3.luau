@@ -6,6 +6,7 @@
 --   local etag = s3.put("bucket", "k", body, "text/plain")
 --   local page = s3.list("bucket", { prefix = "photos/", delimiter = "/" })
 --   local url  = s3.presign("bucket", "k", 3600)
+--   local up   = s3.upload("bucket", "k")   up:part(body) ... up:finish()  (multipart)
 --   local other = s3.client("backup")        -- a second set of settings
 --
 -- Every call answers nil and a reason on failure rather than raising, the way
@@ -35,6 +36,9 @@
 --                   s3.source.<space>.profile  backup     (optional)
 --   in <space>:     SETF S3SOURCE "function call(path) return require('s3.S3').source(path) end"
 --                   SETF S3LIST   "function call(dir) return require('s3.S3').listing(dir) end"
+--
+-- Backups of a whole key space are s3.BACKUP (backup.luau); s3.part_size sets
+-- the size of its upload parts.
 --
 -- A network call counts against the calling space's function_deadline_ms, one
 -- second by default; raise <space>.function_deadline_ms for spaces that use S3.
@@ -220,6 +224,63 @@ function Client:put(bucket: string, key: string, body: string, content_type: str
     return etag and (string.gsub(etag, '"', "")) or true
 end
 
+-- a multipart upload, for an object too big for one PUT or not all in hand yet:
+--   local up = c:upload(bucket, key)   up:part(body) ...   up:finish() or up:abort()
+-- Every part but the last has to be at least 5 MB, and there are at most 10000.
+-- An upload that is neither finished nor aborted is kept, and billed, by S3
+-- until a lifecycle rule clears it.
+local Upload = {}
+Upload.__index = Upload
+
+function Client:upload(bucket: string, key: string, content_type: string?)
+    local h = { ["content-type"] = content_type or "application/octet-stream" }
+    local r, why = request(self.s, "POST", bucket, key, { uploads = "" }, h)
+    if not r then return nil, why end
+    local id = tag(r.body or "", "UploadId")
+    if not id then
+        return nil, { status = r.status, error = "s3: no UploadId in the answer to starting an upload" }
+    end
+    return setmetatable({ s = self.s, bucket = bucket, key = key, id = id, etags = {} }, Upload)
+end
+
+-- sends the next part; answers its number
+function Upload:part(body: string)
+    local n = #self.etags + 1
+    local q = { partNumber = tostring(n), uploadId = self.id }
+    local r, why = request(self.s, "PUT", self.bucket, self.key, q, nil, body)
+    if not r then return nil, why end
+    self.etags[n] = header(r, "etag") or ""
+    return n
+end
+
+-- joins the parts into the object; answers its etag
+function Upload:finish()
+    local parts = {}
+    for n, etag in self.etags do
+        table.insert(parts, "<Part><PartNumber>" .. n .. "</PartNumber><ETag>" .. etag .. "</ETag></Part>")
+    end
+    local body = "<CompleteMultipartUpload>" .. table.concat(parts) .. "</CompleteMultipartUpload>"
+    local r, why = request(self.s, "POST", self.bucket, self.key, { uploadId = self.id },
+        { ["content-type"] = "application/xml" }, body)
+    if not r then return nil, why end
+    -- S3 can answer 200 and still fail the join, with an <Error> in the body
+    local xml = r.body or ""
+    if string.find(xml, "<Error>", 1, true) then
+        local code, message = tag(xml, "Code"), tag(xml, "Message")
+        return nil, { status = r.status, code = code, message = message,
+                      error = "s3: " .. (code or "") .. (message and (": " .. message) or "") }
+    end
+    local etag = tag(xml, "ETag")
+    return etag and (string.gsub(etag, '"', "")) or true
+end
+
+-- throws the parts away
+function Upload:abort()
+    local r, why = request(self.s, "DELETE", self.bucket, self.key, { uploadId = self.id })
+    if not r then return nil, why end
+    return true
+end
+
 function Client:remove(bucket: string, key: string)
     local r, why = request(self.s, "DELETE", bucket, key)
     if not r then return nil, why end
@@ -298,6 +359,7 @@ function get(bucket, key, opts) return default():get(bucket, key, opts) end
 function stat(bucket, key) return default():stat(bucket, key) end
 function put(bucket, key, body, content_type) return default():put(bucket, key, body, content_type) end
 function remove(bucket, key) return default():remove(bucket, key) end
+function upload(bucket, key, content_type) return default():upload(bucket, key, content_type) end
 function list(bucket, opts) return default():list(bucket, opts) end
 function buckets() return default():buckets() end
 function create_bucket(bucket) return default():create_bucket(bucket) end
