@@ -1,3 +1,4 @@
+--@barch {"deadline_ms": 30000}
 -- Backups of a whole key space to S3, and restores from them, through barch's
 -- streaming save and load (barch.space.NAME:save / :load).
 --
@@ -36,16 +37,22 @@
 -- multipart upload, a part at a time, so a save holds about one part in memory.
 -- A load holds a shard, because barch collects a shard whole before replacing it.
 --
--- The whole save or load is one function call, bounded by the function deadline of
--- the space the connection is in (USE), not this one: KSPACE OPTION GET
--- FUNCTION_DEADLINE shows it, and <space>.function_deadline_ms in configuration
--- sets it before that space is opened. A save that runs past it ends with FUNCTION
--- timeout, which no pcall catches, so BACKUP can't tidy up: the space is left in
--- its transaction, with barch keeping pages copy-on-write until someone ends it,
--- and the bucket holds a backup with no manifest. COMMIT in that space (not
--- ROLLBACK, which would take back every write since the BEGIN), then DROP the
--- unfinished one LIST shows. Saving needs read rights in the space, loading write
--- rights.
+-- The --@barch header at the top gives a save or load 30 s of running time,
+-- barch's default function_deadline_max_ms; waiting on S3 doesn't count. The whole
+-- run, waits included, stops at function_wall_factor times that, 300 s by default.
+-- The caps of the space the connection is in (USE) apply, so for a bigger space
+-- raise <space>.function_deadline_max_ms and the header, or the wall factor.
+--
+-- A run stopped at the ceiling ends with FUNCTION timeout. Stopped during an
+-- upload, as it nearly always is, the save still COMMITs, but it can't remove what
+-- it wrote, since every request after the ceiling fails at once. Stopped while
+-- Luau is running, the timeout can't be caught and the space is left in its
+-- transaction, with pages copy-on-write until someone ends it. So after a timeout:
+-- COMMIT in that space if it's still in a transaction (not ROLLBACK, which would
+-- take back every write since the BEGIN), and DROP the unfinished backup LIST
+-- shows. An abandoned multipart upload stays in the bucket; a lifecycle rule with
+-- AbortIncompleteMultipartUpload clears those. Saving needs read rights in the
+-- space, loading write rights.
 
 local FORMAT = 1
 local MB = 1024 * 1024

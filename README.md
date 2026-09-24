@@ -136,15 +136,22 @@ object is there at the size the manifest says. It is refused inside a
 transaction, and on a range-sharded space. SAVE needs read rights in the
 space, LOAD write rights, and both need `outbound`.
 
-The whole run is one function call, bounded by the deadline of the space the
-connection is in (`USE`), not the `s3` space. `KSPACE OPTION GET
-FUNCTION_DEADLINE` shows it; set `<space>.function_deadline_ms` in
-configuration before that space is opened to cover the biggest backup. A save
-that runs past it ends with `FUNCTION timeout`, which BACKUP can't catch, so it
-can't tidy up. The space is left in its transaction, with copy-on-write pages
-growing, and the bucket holds a backup with no manifest. COMMIT in that space
-(not ROLLBACK, which would take back every write since the BEGIN), then DROP
-the name LIST shows as unfinished.
+BACKUP's `--@barch {"deadline_ms": 30000}` header gives a run 30 s of running
+time, barch's default `function_deadline_max_ms`; waiting on S3 doesn't count.
+The whole run, waits included, stops at `function_wall_factor` times that, 300 s
+by default. The caps of the space the connection is in (`USE`) apply, so for a
+bigger space raise `<space>.function_deadline_max_ms` and the header, or the
+wall factor.
+
+A run stopped at the ceiling ends with `FUNCTION timeout`. Stopped during an
+upload, as it nearly always is, the save still commits, but it can't remove
+what it wrote, since every request after the ceiling fails at once. Stopped
+while Luau is running, the timeout can't be caught and the space is left in its
+transaction, with copy-on-write pages growing. So after a timeout: COMMIT in
+that space if it's still in a transaction (not ROLLBACK, which would take back
+every write since the BEGIN), and DROP the backup LIST shows as unfinished. An
+abandoned multipart upload stays in the bucket until a lifecycle rule with
+`AbortIncompleteMultipartUpload` clears it.
 
 ```
 CONFIG SET functions_dir /path/to/checkouts
