@@ -155,6 +155,61 @@ def test_backup_refuses_a_corrupt_restore_before_touching_the_space(client):
         assert {key: client.get(key) for key in client.keys("*")} == original
 
 
+def test_backup_carries_the_dictionary_of_a_compressed_space(client, fresh_server):
+    with fake_s3() as server:
+        _configure(client, server.server_address[1])
+        _install_s3(client)
+        set_configuration(client, {"orders.shards": "4"})
+        client.execute_command("CONFIG", "SET", "compression", "zstd")
+        try:
+            client.execute_command("USE", "orders")
+            client.execute_command("FLUSHDB")
+            # zstd's trainer refuses one repeated sample, so the samples vary
+            left, n = 512000, 0
+            while left > 0:
+                chunk = f"sample {n} ".encode() + bytes([(n * 7 + i) % 251 + 1 for i in range(30000)])
+                left = client.execute_command("TRAIN", chunk)
+                n += 1
+                assert n < 60, "the dictionary never trained"
+
+            original = {}
+            for i in range(300):
+                key, value = f"order:{i:04d}", f"repeat {i} " * 40
+                client.execute_command("SET", key, value)
+                original[key] = value
+                assert client.execute_command("COMPRESS", key) == 1, key
+
+            client.execute_command("USE", "s3")
+            name = client.execute_command("CALLF", "BACKUP", "SAVE", "orders", "my-bucket/nightly")
+            assert name and isinstance(name, str) and "T" in name, name
+            assert ("my-bucket", f"nightly/orders/{name}/dictionary.bin") in server.state.objects
+
+            # A server that never held the dictionary restores the compressed values.
+            other = fresh_server.client
+            other.execute_command("USE", "configuration")
+            other.execute_command("SET", "orders.shards", "4")
+            other.execute_command("CONFIG", "SET", "compression", "zstd")
+            _configure(other, server.server_address[1])
+            _install_s3(other)
+            other.execute_command("USE", "orders")
+            other.execute_command("FLUSHDB")
+            other.execute_command("USE", "s3")
+            restored = other.execute_command("CALLF", "BACKUP", "LOAD", "orders", "my-bucket/nightly", name)
+            assert restored.startswith("OK " + name), restored
+
+            other.execute_command("USE", "orders")
+            assert {key: other.get(key) for key in other.keys("*")} == original
+
+            # With compression off, the dictionary cannot be set, so the restore
+            # is refused before any shard lands.
+            client.execute_command("CONFIG", "SET", "compression", "none")
+            client.execute_command("USE", "s3")
+            reply = client.execute_command("CALLF", "BACKUP", "LOAD", "orders", "my-bucket/nightly", name)
+            assert "compression is off here" in reply, reply
+        finally:
+            client.execute_command("CONFIG", "SET", "compression", "none")
+
+
 def test_backup_restore_rejects_a_differently_sharded_server(client, fresh_server):
     with fake_s3() as server:
         _configure(client, server.server_address[1])

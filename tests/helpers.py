@@ -40,13 +40,13 @@ def wait_for_tcp(port: int, host: str = "127.0.0.1", timeout: float = 15.0) -> N
     raise RuntimeError(f"nothing accepted a connection on {host}:{port} in {timeout:g}s")
 
 
-def connect(port: int) -> redis.Redis:
+def connect(port: int, decode_responses: bool = True) -> redis.Redis:
     return redis.Redis(
         host="127.0.0.1",
         port=port,
         db=0,
         protocol=2,
-        decode_responses=True,
+        decode_responses=decode_responses,
         socket_timeout=30,
     )
 

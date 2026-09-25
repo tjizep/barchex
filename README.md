@@ -117,7 +117,8 @@ s3.BACKUP @backup SAVE ...                       # s3.backup.* settings
 ```
 
 A backup is `nightly/orders/<name>/shard-0000` … one object per shard, plus
-`manifest.json`, which is written last. A save captures one moment: if no
+`dictionary.bin` when the space has a zstd dictionary, plus `manifest.json`,
+which is written last. A save captures one moment: if no
 transaction is open, BACKUP starts one, streams every shard to the bucket, and
 commits. It commits after a failure too, because a ROLLBACK would also undo
 other clients' writes. Writes continue while it runs; barch keeps the pages
@@ -125,11 +126,21 @@ from the BEGIN point copy-on-write until the commit. Run it inside your own
 BEGIN to save that moment, and the commit remains yours. A failed save removes
 what it wrote and aborts its upload.
 
+When the space is compressed, the backup carries its zstd dictionary in
+`dictionary.bin`. barch stores a compressed value as bytes that name the
+dictionary they were made with, so a restore into a space without that
+dictionary cannot read them. LOAD sets the backup's dictionary on the space
+before it replaces the shards, so the values read back even on a server that
+never held it. Setting a dictionary is refused when the space already has a
+different one, so restore a compressed backup into a fresh or cleared space, or
+into one whose dictionary is the same.
+
 A shard larger than `s3.part_size` (default 8 MB, at least 5 MB) is uploaded in
 parts, so a save holds about one part in memory. A load holds only one shard at
 a time, because barch collects a shard in full before replacing it. Before it
 touches the space, LOAD checks that the shard count matches and that every
-shard object exists at the size specified by the manifest. LOAD is refused
+shard object exists at the size specified by the manifest, and checks the
+dictionary the same way when the backup carries one. LOAD is refused
 inside a transaction and on a range-sharded space. SAVE needs read rights in
 the space, LOAD needs write rights, and both need `outbound`.
 

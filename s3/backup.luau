@@ -25,12 +25,22 @@
 -- A load is refused inside a transaction, and replaces the space a shard at a time.
 -- Before it starts, the shard count is compared with the space's and every shard's
 -- object is checked to be there at the size the manifest says, so a mismatch stops
--- it with the space untouched.
+-- it with the space untouched. When the backup carries a dictionary, LOAD checks it
+-- the same way and sets it on the space before the shards.
 --
 -- In the bucket a backup is
 --
 --   <prefix><space>/<name>/shard-0000        one object per shard, as barch streamed it
+--   <prefix><space>/<name>/dictionary.bin    the space's zstd dictionary, when it has one
 --   <prefix><space>/<name>/manifest.json     written last: no manifest, no backup
+--
+-- A compressed key space carries its dictionary too. barch stores a compressed
+-- value as zstd bytes that name the dictionary they were made with, so a restore
+-- into a space that does not already hold that dictionary cannot read them. The
+-- manifest names dictionary.bin and LOAD sets it on the space before the shards,
+-- which is why a backup taken with compression on restores its values even on a
+-- server that has never seen the dictionary. A space with compression off, or on
+-- but not yet trained, has no dictionary and no dictionary.bin.
 --
 -- <name> is the UTC time the save started, 20260924T081500Z. A shard bigger than
 -- s3.part_size (in configuration, default 8 MB, at least 5 MB) goes up as a
@@ -54,8 +64,9 @@
 -- AbortIncompleteMultipartUpload clears those. Saving needs read rights in the
 -- space, loading write rights.
 
-local FORMAT = 1
+local FORMAT = 2
 local MB = 1024 * 1024
+local DICT = "dictionary.bin"
 
 local function s3() return require("s3.S3") end
 
@@ -189,6 +200,7 @@ function save(space: string, bucket: string, prefix: string?, opts)
     local base = base_of(prefix, space, name)
 
     local shards = {}      -- manifest entries, in shard order
+    local dictionary = nil -- the manifest's dictionary entry, when the space has one
     local written = {}     -- keys to remove if this fails
     local cur = nil        -- the shard being sent: {shard, key, pieces, held, bytes, blocks, up}
 
@@ -224,6 +236,17 @@ function save(space: string, bucket: string, prefix: string?, opts)
     local owned = not in_transaction(sp)
     if owned then sp:call("BEGIN") end
     local ok, err = pcall(function()
+        -- the dictionary goes up before the shards it decodes, and before the
+        -- manifest that names it
+        local d = sp:getDictionary()
+        if d then
+            local bytes = buffer.tostring(d)
+            local key = base .. DICT
+            local put, why = c:put(bucket, key, bytes, "application/octet-stream")
+            if not put then error(why_of(why)) end
+            table.insert(written, key)
+            dictionary = { key = DICT, bytes = #bytes }
+        end
         blocks = sp:save(function(buf, block, shard)
             if cur == nil or cur.shard ~= shard then
                 close_shard()
@@ -251,6 +274,7 @@ function save(space: string, bucket: string, prefix: string?, opts)
         local manifest = simdjson.encode({
             format = FORMAT, space = space, name = name, started = started,
             shard_count = count, shards = shards, bytes = total, blocks = blocks,
+            dictionary = dictionary,
         })
         local put, why = c:put(bucket, base .. "manifest.json", manifest, "application/json")
         if not put then error(why_of(why)) end
@@ -303,12 +327,35 @@ function load(space: string, bucket: string, prefix: string?, name: string?, opt
         end
         by[e.shard] = e
     end
+    if m.dictionary then
+        local info, bad = c:stat(bucket, base .. m.dictionary.key)
+        if not info then return nil, { error = "s3: " .. base .. m.dictionary.key .. ": " .. why_of(bad) } end
+        if info.size ~= m.dictionary.bytes then
+            return nil, { error = string.format("s3: %s%s is %s bytes, the manifest says %d",
+                base, m.dictionary.key, tostring(info.size), m.dictionary.bytes) }
+        end
+    end
     local sp = barch.space[space]
     if m.shard_count and m.shard_count > 0 then
         local have = shard_count(sp)
         if have ~= m.shard_count then
             return nil, { error = string.format("s3: backup %s has %d shards and %s has %d;"
                 .. " a restore needs the same number", name, m.shard_count, space, have) }
+        end
+    end
+    -- the dictionary has to be on the space before the shards land, since their
+    -- compressed values name it; setting it is the only step that changes the
+    -- space before the load, and it is refused when the space has another
+    if m.dictionary then
+        local body, bad = c:get(bucket, base .. m.dictionary.key)
+        if body == nil then return nil, { error = "s3: " .. base .. m.dictionary.key .. ": " .. why_of(bad) } end
+        local took, result = pcall(function() return sp:setDictionary(body) end)
+        if not took then
+            return nil, { error = "s3: " .. name .. " carries a dictionary the space "
+                .. space .. " won't take: " .. why_of(result) }
+        end
+        if not result then
+            return nil, { error = "s3: " .. name .. " carries a dictionary, but compression is off here" }
         end
     end
     local chunk = part_size()
