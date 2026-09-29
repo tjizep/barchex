@@ -4295,7 +4295,8 @@ async function drawFunctions() {
       <input id="fnmatch" placeholder="name glob, e.g. SHOP* or *API" value="${esc(fnMatch)}" autocomplete="off">
       <button onclick="applyFnMatch()">Filter</button>
       ${fnMatch ? `<button onclick="fnMatch='';drawFunctions()">Clear</button>` : ""}
-      ${isAdmin ? `<button onclick="newFunction()">${ico("code")} New function</button>` : ""}
+      ${isAdmin ? `<button onclick="newFunction()">${ico("code")} New function</button>
+        <button onclick="addService()">${ico("plug")} Add a service…</button>` : ""}
     </div>
     <div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
   document.getElementById("fnmatch").addEventListener("keydown", e => { if (e.key === "Enter") applyFnMatch(); });
@@ -4316,6 +4317,8 @@ async function drawFunctions() {
           <td class="kind">${esc(r.kind || "luau")}${r.native ? `<br><span class="native" title="compiled to native code (--!native)">native</span>` : ""}</td>
           <td class="sz">${r.size == null ? "" : bytes(r.size)}</td>
           <td class="v">${esc(r.source ?? "")}</td>
+          ${isAdmin ? `<td class="act"><button class="ib" title="Delete ${esc(r.name)}" aria-label="Delete ${esc(r.name)}"
+            onclick="dropFunction(event,'${esc(enc(r.name))}')">${ico("minus")}</button></td>` : ""}
         </tr>`).join("")}</tbody></table>`;
   markOpen();
 }
@@ -4732,21 +4735,227 @@ async function saveFunction(name) {
 }
 
 // Delete asks with a second click on "Really delete?", not with a dialog
+// the − on a row: the first click turns it red and says what the second does.
+// An open tab of that function closes with it, whatever it held.
+async function dropFunction(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  name = decodeURIComponent(name);
+  if (!armed(ev.currentTarget, null, `Click − again to delete ${name}${careful() ? " — " + carefulNote() : ""}`)) return;
+  if (!await write("function_rm", { name })) return;
+  const d = docs.find(x => x.id === docId("fn", name));
+  if (d) closeDoc(d, true);
+  toast(`Deleted ${name}`, "ok");
+  drawFunctions();
+}
+
 async function removeFunction(name) {
   if (!armed(document.getElementById("fn-del"), "Really delete?", careful() ? carefulNote() : null)) return;
   name = decodeURIComponent(name);
   if (await write("function_rm", { name })) { toast(`Deleted ${name}`, "ok"); shut(); drawFunctions(); }
 }
 
-function newFunction() {
-  const src = "function call()\n    return \"ok\"\nend\n";
-  show(`<div class="top"><h2>New function in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox" data-fn="">${aiBar()}${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
+// A new function's document. `opt` fills it from a service template: the
+// source, a suggested name and the space it belongs in.
+function newFunction(opt) {
+  opt = opt || {};
+  if (opt.space && opt.space !== current) pickSpace(null, opt.space);
+  const src = opt.src || "function call()\n    return \"ok\"\nend\n";
+  const title = opt.title ? `New ${opt.title} in ${current}` : `New function in ${current}`;
+  show(`<div class="top"><h2>${esc(title)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox" data-fn="">${aiBar()}${editFunction(null, src, true)}${callBlock(null, null)}</div>`,
+    { id: "doc:" + current + ":" + title + ":" + (++docSeq) });
+  if (opt.name) {
+    const ek = document.getElementById("ek");
+    ek.value = opt.name;
+    ek.defaultValue = "";              // a suggestion, still unsaved
+  }
   const ta = document.getElementById("ev");
   // a new function's draft is kept under "space/" until it is saved
   tabifyFunctionBody(current + "/");
   if (ta && ta._code) ta._code.saved = "";      // nothing is stored yet
   codeStatus(ta);
+}
+
+// ---- service templates ---------------------------------------------------------
+//
+// A function becomes a service by defining service() (transport() is the older
+// name and still works). Each kind wants different fields and lives in a
+// different place, so "Add a service…" opens a new function with a template for
+// the kind that says, in its own comments, how it is started. Queue and cron
+// declarations belong in the `configuration` space under queues/ and cron/jobs/,
+// so those templates open there; the rest open in the space that is selected.
+
+const SERVICE_KINDS = [
+  { kind: "resource", label: "HTTP route", note: "a Luau handler behind a URL", icon: "link",
+    name: "HELLOAPI", src: sp => `-- An HTTP route. Mount it by listing HELLOAPI in the keys of this space's
+-- kind = "http" service, then start that service with HTTP START.
+function call()
+    return "HELLOAPI"
+end
+
+local function get(req, res)
+    local who = req:param("name") or "world"
+    res:header("Content-Type", "application/json")
+    res.body = simdjson.encode({ hello = who, keys = barch.store.size() })
+end
+
+local function post(req, res)
+    local doc = simdjson.parse(req.body)
+    barch.store.setJson("hello:" .. tostring(doc.name), doc)
+    res.code = 201
+end
+
+function service()
+    return {
+        kind = "resource",
+        route = "/hello",
+        methods = { GET = get, POST = post },
+        send = "application/json",
+    }
+end
+` },
+  { kind: "http", label: "HTTP server", note: "listens on a port and mounts routes", icon: "plug",
+    name: "HTTPCONF", src: sp => `-- An HTTP server for the ${sp} space. List the route functions it serves
+-- in keys, then start it with HTTP START HTTPCONF, or with the HTTP starter
+-- template (Add a service…), which is a Call away.
+function call()
+    return "http"
+end
+
+function service()
+    return {
+        kind = "http",
+        port = 8080,
+        bind = "127.0.0.1",
+        user = "web",                 -- the ACL user requests run as
+        keys = { "HELLOAPI" },        -- kind = "resource" or "files" functions in ${sp}
+        -- ssl = { cert = "/path/cert.pem", key = "/path/key.pem" },
+    }
+end
+` },
+  { kind: "start", label: "HTTP starter", note: "starts the HTTP server when you press Call", icon: "play",
+    name: "STARTHTTP", src: sp => `-- Starts ${sp}'s HTTP server: press Call. Call with stop or status for the
+-- other two. HTTPCONF is the kind = "http" function with the port and routes.
+-- To bring the server back after a restart, add a cron job that calls
+-- STARTHTTP every minute; it leaves a running server alone.
+local CONFIG = "HTTPCONF"
+
+function call(action)
+    action = string.lower(action or "start")
+    if action == "stop" then
+        barch.call("HTTP", "STOP")
+        return "stopped"
+    end
+    local status = barch.call("HTTP", "STATUS")
+    if status ~= "stopped" or action == "status" then
+        return status                 -- running: what it serves
+    end
+    return barch.call("HTTP", "START", CONFIG)
+end
+` },
+  { kind: "files", label: "Static files", note: "serves the file store over HTTP", icon: "folder",
+    name: "STATIC", src: sp => `-- Serves ${sp}'s file store under /static/*. Mount it by listing STATIC in
+-- the keys of the kind = "http" service.
+function call()
+    return "STATIC"
+end
+
+function service()
+    return {
+        kind = "files",
+        route = "/static/*",          -- the part after * is the path under root
+        root = "/",
+        index = "index.html",         -- what a folder URL serves
+        -- space = "images",          -- another space's file store
+        -- source = true,             -- fetch a missing file through fs_source
+        -- cors = "*",
+    }
+end
+` },
+  { kind: "resp", label: "RESP commands", note: "new commands for redis clients", icon: "terminal",
+    name: "COUNTER", src: sp => `-- New RESP commands, named after the space: ${sp}.INCR <key> [by] and
+-- ${sp}.PEEK <key>. FUNCTIONS COMMANDS lists them. Return {err = "..."} to
+-- reply with an error.
+function call()
+    return "COUNTER"
+end
+
+local function incr(key, by)
+    if key == nil or key == "" then return { err = "${sp}.INCR <key> [by]" } end
+    local n = (tonumber(barch.store.get(key)) or 0) + (tonumber(by) or 1)
+    barch.store.set(key, tostring(n))
+    return n
+end
+
+local function peek(key)
+    return tonumber(barch.store.get(key)) or 0
+end
+
+function service()
+    return {
+        kind = "resp",
+        methods = { INCR = incr, PEEK = peek },
+        categories = { INCR = { "write", "data" }, PEEK = { "read" } },
+    }
+end
+` },
+  { kind: "queue", label: "Queue consumer", note: "delivers messages to a function", icon: "package",
+    name: "queues/work", space: "configuration", src: sp => `-- A queue declaration. It lives in the configuration space as queues/<name>.
+-- Publish with QUEUE PUSH work <message> or barch.queue("work", message);
+-- QUEUE STATUS shows how it is doing. Before it runs:
+--   CONFIG SET queue_dir /var/lib/barch/queues    (or set dir below)
+--   ACL SETUSER worker on +read +write +data +function
+-- Each message is handed to the function named by call, in space:
+--
+--   -- stored in ${sp} as TAKE
+--   function call(message, sequence, attempts)
+--       -- returning normally acknowledges; an error retries it
+--   end
+function service()
+    return {
+        kind = "queue",
+        name = "work",
+        space = "${sp}",
+        call = "TAKE",
+        user = "worker",              -- the ACL user the handler runs as
+        max_attempts = 5,             -- then the message goes to work.queue.dead
+        durability = "each",          -- "each", "none" or a size such as "512kb"
+        -- dir = "/var/lib/barch/queues",   -- instead of the server's queue_dir
+        enabled = true,
+    }
+end
+` },
+  { kind: "cron", label: "Cron job", note: "calls a function on a schedule", icon: "sparkles",
+    name: "cron/jobs/compact", space: "configuration", src: sp => `-- A cron declaration. It lives in the configuration space as cron/jobs/<name>.
+-- Set exactly one of every or cron. Schedules run in UTC; FUNCTIONS CRON
+-- lists the jobs and their last error. Before it runs:
+--   ACL SETUSER scheduler on +read +write +data +function
+--   a function COMPACT in ${sp} for it to call
+function service()
+    return {
+        kind = "cron",
+        space = "${sp}",
+        call = "COMPACT",             -- a stored function in ${sp}
+        user = "scheduler",           -- the ACL user it runs as
+        args = {},                    -- strings passed to call
+        every = "5m",                 -- or cron = "0 3 * * *"
+        overlap = "skip",             -- "skip" or "allow" while one is still running
+        enabled = true,
+    }
+end
+` },
+];
+
+function addService() {
+  const home = current === "configuration" ? (spaces.find(x => x.openable && x.name !== "configuration") || {}).name || "default" : current;
+  qiOpen({
+    placeholder: "Pick a service kind",
+    hint: `A new function with a service() template. Queue and cron open in configuration; the others in ${current}.`,
+    list: text => SERVICE_KINDS.filter(k => !text || (k.label + " " + k.kind + " " + k.note).toLowerCase().includes(text.toLowerCase()))
+      .map(k => ({ icon: k.icon, label: k.label, note: `${k.kind} · ${k.note}`,
+        run: () => { setView("functions"); newFunction({ src: k.src(home), name: k.name, space: k.space, title: k.label }); } })),
+  });
 }
 
 // ---- asking a model about a function -----------------------------------------
@@ -4871,7 +5080,7 @@ function aiApiReference() {
 
 function aiSystem() {
   return `You help an admin write stored functions for barch, a key-value server, in Luau.
-A function is Luau source stored with SETF under a name. \`function call(...)\` is the entry point that CALLF runs; its arguments are the CALLF parameters, as strings. An optional \`function transport()\` returns a table that serves the function over HTTP or RESP (kind = "resource" | "resp" | "files" | "queue" | "cron", with a route and methods). A first line \`--!native\` compiles the function to native code. A comment in the header (before the first line of code) sets its limits, and its body must be a JSON object with quoted field names, for example \`--@barch {"deadline_ms": 5000, "slice_insns": 200000}\` or the same JSON in a \`--[[@barch ... ]]\` block. Both fields are optional whole numbers above 0; Lua table syntax such as \`{deadline_ms = 5000}\` is refused.
+A function is Luau source stored with SETF under a name. \`function call(...)\` is the entry point that CALLF runs; its arguments are the CALLF parameters, as strings. An optional \`function service()\` (older name: \`transport()\`) returns a table that makes the function a service: kind = "resource" (an HTTP route with route and methods = {GET = fn(req, res)}), "files" (the file store over HTTP), "http" (a server with port, bind, user and keys listing the routes), "resp" (methods called as <space>.<METHOD>, with categories), "queue" or "cron" (declarations stored in the configuration space under queues/ and cron/jobs/, naming space, call and user). Queue handlers receive (message, sequence, attempts) as separate arguments. A first line \`--!native\` compiles the function to native code. A comment in the header (before the first line of code) sets its limits, and its body must be a JSON object with quoted field names, for example \`--@barch {"deadline_ms": 5000, "slice_insns": 200000}\` or the same JSON in a \`--[[@barch ... ]]\` block. Both fields are optional whole numbers above 0; Lua table syntax such as \`{deadline_ms = 5000}\` is refused.
 
 Answer briefly and concretely. When you change or write code, give the complete updated source in a single \`\`\`luau block, so it can replace the editor's content as a whole. Use only the barch API listed below and standard Luau; say so when something cannot be done with it.
 
@@ -6023,6 +6232,7 @@ function paletteItems(text) {
   const acts = [
     isAdmin && ["key", "New key", () => { setView("keys"); newKey(); }],
     isAdmin && ["code", "New function", () => { setView("functions"); newFunction(); }],
+    isAdmin && ["plug", "Add a service…", () => addService()],
     isAdmin && ["plus", "New space", () => newSpace()],
     isAdmin && ["terminal", "Toggle console", () => toggleDock()],
     ["sliders", "Server configuration", () => openServer()],

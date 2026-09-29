@@ -39,6 +39,14 @@ front and writes them as settings, so the space loads with them. Long calls
 from the viewer run inside `SPACESAPI` in the `spaces` space, so raise the
 deadline of `spaces` when Call reports `FUNCTION timeout`.
 
+**Add a service…** in the Code view opens a new function with a `service()`
+template for an HTTP route, an HTTP server, an HTTP starter, static files,
+RESP commands, a queue consumer or a cron job. The comments in each template
+say where it is stored and how to start it; queue and cron templates open in
+`configuration`. The HTTP starter runs `HTTP START` for the space when you
+press Call, and a cron job can call it every minute to bring the server back
+after a restart.
+
 The function editor has a prompt bar for asking a model about the function
 or for describing a change. Paste an OpenRouter API key into the bar, or into
 App settings, to turn it on. The browser sends the question straight to
@@ -102,10 +110,20 @@ local up = s3.upload("bucket", "big/key")            -- multipart: up:part(body)
 `s3.S3 LS bucket [prefix]`, `GET`, `STAT`, `PUT`, `DEL`, `URL`, `BUCKETS`
 and `CHECK` do the same from a RESP connection (or `CALLF S3 …` in the `s3`
 space). Calling out to the network requires the `outbound` ACL category.
-These commands do not work from the viewer's Call box or Console yet: those
-run CALLF from inside an HTTP handler, and barch refuses a nested CALLF whose
-function waits on the network ("cannot call 'CALLF', it blocks"). A file
-source is not affected because barch calls it directly.
+From the viewer, select the `s3` space and use the `CALLF S3 …` form in the
+Call box or the console; the console does not accept the dotted `s3.S3`
+command. The viewer calls out as its HTTP user, so that user needs
+`outbound` too. `ACL SETUSER` states the complete rule, so add it to the
+rule the HTTP user already has:
+
+```
+ACL SETUSER web on +read +write +data +keys +function +config +dangerous +outbound
+```
+
+Without it, a call fails with `http.request needs the outbound category`.
+Older barch builds refuse these calls from the viewer with "cannot call
+'CALLF', it blocks"; a build that runs a nested CALLF inline runs them. A
+file source is not affected because barch calls it directly.
 
 A space's file store can fall through to a bucket: a missing file is fetched
 the first time it is requested and becomes an ordinary stored file afterward.
