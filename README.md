@@ -29,6 +29,29 @@ exists, the viewer treats you as a local admin. The first account to register
 — or the first existing account to sign on — becomes admin.
 It does not use a `users` key space.
 
+The gear beside a space's name opens its settings. The function limits
+(`function_deadline_ms`, `function_deadline_max_ms`, `function_slice_insns`
+and `function_slice_max_insns`) each have a dropdown, and the page shows the
+value the space runs with now. A change is saved as `<space>.<setting>` in the
+`configuration` space and takes effect the next time the space loads, which
+means after a server restart. **New space** asks for the deadline and slice up
+front and writes them as settings, so the space loads with them. Long calls
+from the viewer run inside `SPACESAPI` in the `spaces` space, so raise the
+deadline of `spaces` when Call reports `FUNCTION timeout`.
+
+The function editor has a prompt bar for asking a model about the function
+or for describing a change. Paste an OpenRouter API key into the bar, or into
+App settings, to turn it on. The browser sends the question straight to
+`openrouter.ai`, together with the context ticked under the bar: the source
+in the editor, the last Call output, and the first 20 keys of the space with
+a short preview of each. Leave the key sample unticked when the space holds
+data that should stay on the server. The key is stored in the browser's
+`localStorage`, and barch never receives it. Choose the model in App settings;
+the default is the newest Claude Sonnet that OpenRouter lists. **Apply to
+editor** replaces the editor's content with the answer's code block. The
+stored function changes when you press Save, or Call while Save before Call
+is on (the default).
+
 VECTORS is the `examples/hnsw` index with nk vectors in place of words.
 `vectors.SET <name> <buffer>` stores a point; pass the vector as ONE argument:
 a packed f32 buffer (dim*4 bytes, e.g. Python `struct.pack('<384f', *vec)`).

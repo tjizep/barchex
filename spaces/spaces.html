@@ -1727,6 +1727,67 @@ button.kt:hover { border-color: currentColor; background: var(--panel); }
   .wb-status .st-i:nth-child(n+3):not(:last-child) { display: none; }
 }
 
+/* the prompt bar above the function editor */
+.ai { margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); }
+.ai-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px; }
+.ai-ico { color: var(--l2); padding: 5px 2px 0 4px; flex: none; }
+.ai-ico .ico { width: 17px; height: 17px; }
+.ai-row textarea { flex: 1; min-width: 0; resize: none; min-height: 34px; max-height: 180px; padding: 6px 10px;
+  font-size: 13.5px; line-height: 1.45; background: var(--panel); }
+.ai-row button { height: 34px; min-height: 0; padding: 0 16px; flex: none; }
+.ai-setup { align-items: center; flex-wrap: wrap; }
+.ai-setup .ai-note { flex: 1 1 260px; font-size: 12.5px; color: var(--ink-2); }
+.ai-keyin { display: flex; gap: 6px; flex: 0 1 320px; min-width: 220px; }
+.ai-keyin input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 12px; }
+.ai-keyin button { height: 32px; padding: 0 12px; }
+.doc .valuebox:has(.ai) .code { height: calc(100dvh - 450px); }
+.wb.docked .doc .valuebox:has(.ai) .code { height: calc(100dvh - 450px - var(--dockh)); }
+.ai-ctx { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 10px 8px 38px;
+  font-size: 11.5px; color: var(--ink-3); }
+.ai-ctx label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+.ai-ctx input { margin: 0; accent-color: var(--l1); }
+.ai-ctx .ai-lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.ai-model { font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
+.ai-link { border: 0; background: none; padding: 0; min-height: 0; color: var(--l1); font-size: 11.5px; }
+.ai-link:hover { background: none; text-decoration: underline; }
+.ai-out { max-height: 46vh; overflow: auto; border-top: 1px solid var(--line); padding: 4px 12px 10px; background: var(--panel);
+  border-radius: 0 0 var(--r-sm) var(--r-sm); }
+.ai-turn + .ai-turn { border-top: 1px dashed var(--line); }
+.ai-q { margin: 10px 0 6px; font-weight: 600; font-size: 13px; color: var(--ink); }
+.ai-q::before { content: "› "; color: var(--l2); }
+.ai-a { font-size: 13.5px; color: var(--ink-2); }
+.ai-a p { margin: 6px 0; }
+.ai-a code { font-family: var(--mono); font-size: 12px; padding: 0 4px; border-radius: 3px; background: var(--line-2); color: var(--ink); }
+.ai-a .dim { color: var(--ink-3); }
+.ai-code { margin: 8px 0; }
+.ai-code pre { margin: 0; background: #10151c; color: #dbe3ec; border-radius: var(--r-sm); padding: 10px 12px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.5; overflow: auto; max-height: 40vh; white-space: pre; }
+.ai-acts { display: flex; gap: 8px; margin-top: 6px; }
+.ai-acts button { padding: 5px 12px; font-size: 12.5px; min-height: 0; }
+.ai-err { color: var(--flag); }
+.ai-wait { display: inline-block; color: var(--ink-3); animation: aiPulse 1s ease-in-out infinite; }
+@keyframes aiPulse { 50% { opacity: .3; } }
+.appsettings .asrow input { flex: 0 1 300px; min-width: 0; font-family: var(--mono); font-size: 12.5px; padding: 6px 10px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); }
+
+/* a space's settings: one row per limit, a dropdown and what runs now */
+.spacecfg h4 { font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink-3); margin: 6px 0 10px; }
+.spacecfg .limits { display: grid; gap: 8px; max-width: 560px; }
+.lim-row { display: grid; grid-template-columns: 150px minmax(0, 220px) auto; gap: 12px; align-items: center; }
+.lim-name { font-size: 13px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 4px; cursor: help; }
+.lim-name .tip { display: inline-flex; color: var(--ink-3); opacity: .6; }
+.lim-name .tip .ico { width: 12px; height: 12px; }
+.lim-row select, .lim-row input { height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 12.5px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); min-width: 0; }
+.lim-row.pending select { border-color: var(--l2); box-shadow: 0 0 0 2px var(--l2-soft); }
+.lim-now, .lim-val { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.lim-foot { margin-top: 12px; font-size: 12px; color: var(--ink-3); }
+.lim-foot .pend { color: var(--l2); }
+.lim-foot .ico { width: 12px; height: 12px; }
+.spacecfg .row { margin-top: 14px; }
+@media (max-width: 560px) { .lim-row { grid-template-columns: 1fr; gap: 4px; } }
+
 </style>
 </head>
 <body>
@@ -1883,8 +1944,27 @@ function openAppSettings() {
           : "default"}</span>
         <button onclick="resetEditorHeight()"${editorHeight() || valueHeight() ? "" : " disabled"}>Reset</button>
       </div>
+      <div class="asrow">
+        <label for="as-aikey">OpenRouter key</label>
+        <input type="password" id="as-aikey" autocomplete="off" spellcheck="false" placeholder="sk-or-…"
+               value="${esc(aiKey())}" onchange="aiSaveKey(this.value)">
+        <button onclick="document.getElementById('as-aikey').value='';aiSaveKey('')"${aiKey() ? "" : " disabled"}>Forget</button>
+      </div>
+      <div class="asrow">
+        <label for="as-aimodel">Model</label>
+        <input id="as-aimodel" list="ai-models" autocomplete="off" spellcheck="false" value="${esc(aiModel())}"
+               onchange="setAppSetting('aiModel', this.value.trim()); toast('Model = ' + aiModel())">
+        <datalist id="ai-models"></datalist>
+      </div>
+      <div class="ashint">The prompt bar above the function editor asks this model through
+        <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a>. The browser sends the question and
+        the ticked context straight to openrouter.ai; the key stays in this browser and is not sent to barch.</div>
       <div class="ashint">Tab width applies to the function editor: how wide tabs render, how many spaces the Tab key inserts, and how far Enter indents after a line that opens a block. Save before Call SETFs the editor body first when Call is pressed, so the call runs what you see. Editor height is kept when you drag the bar under the function editor or the value box; the two are kept apart. Stored in this browser only.</div>
     </div></div>`, { space: null, id: "app-settings", icon: "gear" });
+  aiLoadModels().then(() => {
+    const box = document.getElementById("as-aimodel");
+    if (box && !appSetting("aiModel", "")) box.value = aiModel();
+  });
 }
 
 // the function editor's height, as the user last dragged it: px, or 0 for
@@ -2036,7 +2116,8 @@ const LUAU_TYPES = (() => {
     set: fn("barch.store.set(k, v)", "Writes a key. <code>set(k, nil)</code> removes it."),
     remove: fn("barch.store.remove(k)", "Removes a key."),
     exists: fn("barch.store.exists(k)", "Whether the key is there."),
-    count: fn("barch.store.count()", "How many keys the space holds."),
+    count: fn("barch.store.count(lo, hi)", "How many keys are in [lo, hi). Both bounds are required; use <code>size()</code> for the whole space."),
+    size: fn("barch.store.size()", "How many keys the space holds."),
     getJson: fn("barch.store.getJson(k)", "The value parsed as JSON. nil when missing, or nil and the parser's reason when it isn't JSON."),
     setJson: fn("barch.store.setJson(k, t)", "Stores t as JSON. Raises when it can't be encoded. <code>setJson(k, nil)</code> removes."),
     parseJson: fn("barch.store.parseJson(k, name, …)", "Only the named top-level fields, one value per name. Cheaper than getJson on a big document."),
@@ -2059,7 +2140,7 @@ const LUAU_TYPES = (() => {
     set: m("sp:set(k, v)", "Writes a key. The same as <code>sp[k] = v</code>."),
     remove: m("sp:remove(k)", "Removes a key."),
     exists: m("sp:exists(k)", "Whether the key is there."),
-    count: m("sp:count()", "How many keys the space holds."),
+    count: m("sp:count(lo, hi)", "How many keys are in [lo, hi). Both bounds are required; use <code>sp:size()</code> for the whole space."),
     size: m("sp:size()", "How many keys the space holds."),
     fetch: m("sp:fetch(k)", "Like get, but fills from the space's foreign source on a miss."),
     getJson: m("sp:getJson(k)", "The value parsed as JSON. nil when missing, or nil and the reason."),
@@ -3063,9 +3144,19 @@ const bytes = n => n == null ? "" :
   (n / 1048576).toFixed(1) + " MB";
 const num = n => (n ?? 0).toLocaleString();
 
+// A reply from /api/admin/*. SPACESAPI answers in JSON; when the route itself
+// fails (its deadline ran out, say) barch answers with the reason as plain text
+// and a 500, and that text is the error to show.
+async function replyOf(r) {
+  const text = await r.text().catch(() => "");
+  try { return JSON.parse(text); } catch (e) {}
+  const why = text.trim().slice(0, 400);
+  return { error: why ? `${why} (HTTP ${r.status})` : `HTTP ${r.status}, no reply body` };
+}
+
 async function api(path) {
   const r = await fetch("/api/admin/" + path);
-  const out = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  const out = await replyOf(r);
   if (r.status === 401) { openAuth(); throw new Error("unauthorized"); }
   return out;
 }
@@ -3163,24 +3254,6 @@ function drawSpaces() {
           aria-label="Delete ${esc(s.name)}"
           onclick="dropSpace(event,'${esc(enc(s.name))}')">${ico("minus")}</button>`}` : ""}
       </a>`).join("");
-}
-
-async function newSpace(ev) {
-  if (ev) ev.preventDefault();
-  const name = ((await ask("Name of the new key space", "", "Letters, digits and underscores. Enter creates it, Esc cancels.")) || "").trim();
-  if (!name) return;
-  if (!/^[A-Za-z0-9_]+$/.test(name))
-    return toast("a space name is letters, digits and underscores", "warn");
-  if (await write("space_add", { name })) {
-    const out = await api("spaces").catch(() => null);
-    if (out) spaces = out.spaces || [];
-    current = name;
-    resetPlace();
-    drawSpaces();
-    docsFollowSpace();
-    draw();
-    drawStatus();
-  }
 }
 
 async function dropSpace(ev, name) {
@@ -3484,7 +3557,7 @@ function applyPrefix() {
 async function write(op, params, body, quiet) {
   const q = new URLSearchParams({ space: current, ...params });
   const r = await fetch("/api/admin/" + op + "?" + q, { method: "POST", body: body ?? "" });
-  const out = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  const out = await replyOf(r);
   if (out.error && !(quiet && (out.exists || out.notempty))) { toast(out.error, "warn"); return null; }
   return out;
 }
@@ -4265,19 +4338,20 @@ function fnSide(source) {
   const open = appSetting("fnSide", "0") === "1";
   return `<aside class="fn-side" id="fn-side"${open ? "" : " hidden"} aria-label="Function settings">
     <h5>Function settings</h5>
-    <label class="aot" title="Compile to native code (SETF … AOT). Kept as a --!native line at the top of the source, so it lasts through restarts and git sync.">
+    <label class="aot" title="Compile to native code on Save. Kept as a --!native line at the top of the source.">
       <input type="checkbox" id="fn-aot" onchange="toggleNative(this.checked)"${luauNativeMarker(source ?? "") ? " checked" : ""}> Native (AOT)</label>
-    <div class="sub">Compiled to machine code on Save.</div>
-    <label class="lim">Deadline
-      <input type="number" id="fn-deadline" min="1" step="1" inputmode="numeric" placeholder="default"
+    <label class="lim" title="Running time this function gets. Empty uses the space's deadline.">Deadline
+      <input id="fn-deadline" list="fn-deadline-opts" inputmode="numeric" placeholder="default" autocomplete="off"
              onchange="setFnLimit('deadline_ms', this)"> ms</label>
-    <div class="sub" id="fn-deadline-hint">Running time. Waiting on the network doesn't count; the wall ceiling, a multiple of this, does.</div>
-    <label class="lim">Slice
-      <input type="number" id="fn-slice" min="1" step="1" inputmode="numeric" placeholder="default"
+    <datalist id="fn-deadline-opts"></datalist>
+    <div class="sub" id="fn-deadline-hint"></div>
+    <label class="lim" title="Instructions before the call gives its worker back. Empty uses the space's slice.">Slice
+      <input id="fn-slice" list="fn-slice-opts" inputmode="numeric" placeholder="default" autocomplete="off"
              onchange="setFnLimit('slice_insns', this)"> insns</label>
-    <div class="sub" id="fn-slice-hint">How many instructions run before the call gives its worker back.</div>
+    <datalist id="fn-slice-opts"></datalist>
+    <div class="sub" id="fn-slice-hint"></div>
     <div class="sub bad" id="fn-hdr-note" hidden></div>
-    <div class="sub">Kept in the source as <code>--@barch {…}</code> and applied on Save. Empty means the space's default.</div>
+    <div class="sub"><a href="#" onclick="event.preventDefault();openSpaceConfig()">Space limits</a> · applied on Save</div>
   </aside>`;
 }
 
@@ -4326,6 +4400,7 @@ async function openFunction(name) {
   show(`<div class="top"><h2>${esc(shown)}</h2><button onclick="shut()">Close</button></div>
     <div class="valuebox" data-fn="${esc(enc(shown))}">
       <div class="meta">${esc(current)} · ${esc(out.kind || "luau")}<span id="fn-native">${out.native ? " · native" : ""}</span>${out.size != null ? " · " + bytes(out.size) : ""}${out.truncated ? " · truncated" : ""}</div>
+      ${isAdmin && !out.truncated ? aiBar() : ""}
       ${isAdmin ? editFunction(shown, out.source ?? "", !out.truncated) : `<pre class="code-ro">${luauHighlight(out.source ?? "")}</pre>`}
       ${callBlock(esc(enc(shown)), shown)}
     </div>`, { id: docId("fn", shown), icon: "code" });
@@ -4341,7 +4416,7 @@ async function openFunction(name) {
 async function putFunction(name, body) {
   const q = new URLSearchParams({ space: current, name });
   const r = await fetch("/api/admin/function_put?" + q, { method: "POST", body });
-  return r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  return replyOf(r);
 }
 
 // the save went through: the editor is clean, any old error mark is stale
@@ -4381,6 +4456,15 @@ function functionRefused(name, error) {
   toast(hit ? `${name} not saved: line ${hit.line}` : `${name} not saved`, "warn");
 }
 
+// A call that outlives the viewer's own request: the function runs inside the
+// SPACESAPI route in the `spaces` space, so that space's deadline is the limit.
+// The function's writes are in; only its reply is lost.
+function blocksHint(error) {
+  if (!(/timeout/i.test(error || "") && /\(HTTP 5\d\d\)$/.test(error || ""))) return "";
+  return `\n<span class="dim">The viewer stopped waiting; the function may still have finished.</span> ` +
+    `<a href="#" onclick="event.preventDefault();openSpaceConfig('spaces')">Raise the viewer's deadline</a>`;
+}
+
 async function callFunction(name) {
   const fresh = name == null;
   if (fresh) name = (document.getElementById("ek")?.value || "").trim();
@@ -4414,12 +4498,12 @@ async function callFunction(name) {
   out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n…`;
   const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
     { method: "POST", body: JSON.stringify({ args: ["CALLF", name, ...args] }) });
-  const res = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  const res = await replyOf(r);
   if (!res.ok) {
     // the red line keeps the detail and links to the line it names; the
     // editor marks that line too, so a toast would only repeat it
     out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
-      `<span class="rerr">(error) ${codeErrorHtml(res.error || "failed")}</span>`;
+      `<span class="rerr">(error) ${codeErrorHtml(res.error || "failed")}</span>${blocksHint(res.error)}`;
     if (!codeMarkError(res.error)) toast(`Call to ${name} failed`, "warn");
     return;
   }
@@ -4543,12 +4627,16 @@ async function fnSideDefaults() {
   if (d && num(dl)) d.placeholder = num(dl);
   if (s && num(sl)) s.placeholder = num(sl);
   const dh = document.getElementById("fn-deadline-hint"), sh = document.getElementById("fn-slice-hint");
-  if (dh && (num(dl) || num(dmax))) dh.textContent = [
-    num(dl) && `${esc(current)} gives ${num(dl)} ms`, num(dmax) && `at most ${num(dmax)}`,
-  ].filter(Boolean).join(", ") + `. Running time only; waiting on the network doesn't count. The whole call stops at ${num(wall) ? num(wall) + "×" : "a multiple of"} this.`;
-  if (sh && (num(sl) || num(smax))) sh.textContent = [
-    num(sl) && `${esc(current)} gives ${num(sl)}`, num(smax) && `at most ${num(smax)}`,
-  ].filter(Boolean).join(", ") + ". Instructions before the call gives its worker back.";
+  if (dh && dl) dh.textContent = `space ${fmtLimit(dl, "ms")}${dmax ? ` · cap ${fmtLimit(dmax, "ms")}` : ""}`;
+  if (sh && sl) sh.textContent = `space ${fmtLimit(sl, "insns")}${smax ? ` · cap ${fmtLimit(smax, "insns")}` : ""}`;
+  // the choices: round values up to the cap; a header over the cap is refused on Save
+  const opts = (id, presets, cap, unit) => {
+    const box = document.getElementById(id);
+    if (box) box.innerHTML = presets.filter(v => !cap || v <= Number(cap))
+      .map(v => `<option value="${v}">${fmtLimit(v, unit)}</option>`).join("");
+  };
+  opts("fn-deadline-opts", [1000, 5000, 10000, 30000, 60000, 120000, 300000], dmax, "ms");
+  opts("fn-slice-opts", [200000, 1000000, 5000000, 10000000, 50000000], smax, "insns");
 }
 
 // a limit box changed: write the --@barch line to match, as one undoable edit
@@ -4653,12 +4741,309 @@ async function removeFunction(name) {
 function newFunction() {
   const src = "function call()\n    return \"ok\"\nend\n";
   show(`<div class="top"><h2>New function in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox" data-fn="">${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
+    <div class="valuebox" data-fn="">${aiBar()}${editFunction(null, src, true)}${callBlock(null, null)}</div>`);
   const ta = document.getElementById("ev");
   // a new function's draft is kept under "space/" until it is saved
   tabifyFunctionBody(current + "/");
   if (ta && ta._code) ta._code.saved = "";      // nothing is stored yet
   codeStatus(ta);
+}
+
+// ---- asking a model about a function -----------------------------------------
+//
+// A prompt bar above the function editor sends the question to OpenRouter's
+// chat completions API, together with the context ticked under it: the source
+// in the editor, the last Call output, and a sample of keys from the space. The
+// browser calls OpenRouter directly with the key the user gives it, so the key
+// is kept in this browser only (localStorage, like the other app settings) and
+// barch never sees it. A code block in the answer can be put into the editor;
+// nothing is saved until Save.
+
+const AI_URL = "https://openrouter.ai/api/v1/chat/completions";
+const AI_MODELS_URL = "https://openrouter.ai/api/v1/models";
+const AI_FALLBACK_MODEL = "anthropic/claude-sonnet-5";
+let aiModels = null;                     // OpenRouter's model ids, newest first, once asked for
+
+const aiKey = () => appSetting("aiKey", "");
+const aiModel = () => appSetting("aiModel", "") || aiDefaultModel();
+
+// the newest Claude Sonnet OpenRouter lists, when the list has been read
+function aiDefaultModel() {
+  const sonnet = (aiModels || []).find(m => /^anthropic\/claude-sonnet[^:]*$/.test(m.id));
+  return sonnet ? sonnet.id : AI_FALLBACK_MODEL;
+}
+
+async function aiLoadModels() {
+  if (aiModels) return aiModels;
+  try {
+    const r = await fetch(AI_MODELS_URL);
+    const j = await r.json();
+    aiModels = (j.data || []).map(m => ({ id: m.id, name: m.name || m.id, created: m.created || 0 }))
+      .sort((a, b) => b.created - a.created);
+  } catch (e) { aiModels = []; }
+  const list = document.getElementById("ai-models");
+  if (list) list.innerHTML = aiModels.map(m => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("");
+  return aiModels;
+}
+
+function aiBar() {
+  const key = aiKey();
+  const ctx = (id, label, on, title) =>
+    `<label title="${esc(title)}"><input type="checkbox" id="${id}"${on ? " checked" : ""}> ${esc(label)}</label>`;
+  return `<div class="ai" id="ai">
+    ${key ? `<div class="ai-row">
+      <span class="ai-ico">${ico("sparkles")}</span>
+      <textarea id="ai-q" rows="1" spellcheck="true" placeholder="Ask about this function, or describe a change to make"
+        aria-label="Question for the model"></textarea>
+      <button class="primary" id="ai-go" onclick="aiAsk()">Ask</button>
+    </div>
+    <div class="ai-ctx">
+      <span class="ai-lbl">Sends</span>
+      ${ctx("ai-c-src", "source", appSetting("aiCtxSrc", "1") === "1", "The source in the editor, as it is now")}
+      ${ctx("ai-c-out", "last output", appSetting("aiCtxOut", "1") === "1", "What the last Call or Save printed below the editor")}
+      ${ctx("ai-c-keys", `20 keys from ${current}`, appSetting("aiCtxKeys", "0") === "1", "The first 20 keys of this space with a short value preview. This sends your data to the model.")}
+      <span class="fill"></span>
+      <span class="ai-model" title="Change the model in App settings">${esc(aiModel())} · openrouter.ai</span>
+      <button class="ai-link" onclick="openAppSettings()">settings</button>
+    </div>` : `<div class="ai-row ai-setup">
+      <span class="ai-ico">${ico("sparkles")}</span>
+      <span class="ai-note">Ask a model about this function. Paste an
+        <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter API key</a> to turn it on; it is kept in this browser only.</span>
+      <span class="ai-keyin"><input type="password" id="ai-key-in" placeholder="sk-or-…" autocomplete="off" spellcheck="false"
+        aria-label="OpenRouter API key" onkeydown="if(event.key==='Enter')aiSaveKey(this.value)">
+      <button onclick="aiSaveKey(document.getElementById('ai-key-in').value)">Use key</button></span>
+    </div>`}
+    <div class="ai-out" id="ai-out" hidden aria-live="polite"></div>
+  </div>`;
+}
+
+function aiSaveKey(v, quiet) {
+  v = String(v || "").trim();
+  setAppSetting("aiKey", v);
+  if (!quiet) toast(v ? "OpenRouter key saved in this browser" : "OpenRouter key removed", "ok");
+  // every function document redraws its bar, the one on screen and the parked ones
+  for (const d of docs) {
+    const bar = d.node.querySelector("#ai");
+    if (!bar) continue;
+    const out = bar.querySelector("#ai-out"), kept = out && !out.hidden ? out.innerHTML : "";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = aiBar();
+    const fresh = tmp.firstElementChild;
+    if (kept) { const o = fresh.querySelector("#ai-out"); o.innerHTML = kept; o.hidden = false; }
+    fresh._chat = bar._chat;
+    bar.replaceWith(fresh);
+    aiWire(fresh);
+  }
+  document.getElementById("ai-q")?.focus();
+}
+
+// the prompt grows with what is typed, and Ctrl+Enter asks from inside it
+function aiWire(bar) {
+  const q = bar && bar.querySelector("#ai-q");
+  if (!q || q._wired) return;
+  q._wired = true;
+  const fit = () => { q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight, 180) + "px"; };
+  q.addEventListener("input", fit);
+  q.addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); aiAsk(); }
+  });
+  for (const [id, set] of [["ai-c-src", "aiCtxSrc"], ["ai-c-out", "aiCtxOut"], ["ai-c-keys", "aiCtxKeys"]]) {
+    const box = bar.querySelector("#" + id);
+    if (box) box.addEventListener("change", () => setAppSetting(set, box.checked ? "1" : "0"));
+  }
+}
+new MutationObserver(() => aiWire(document.querySelector("#panel #ai")))
+  .observe(document.getElementById("panel"), { childList: true });
+
+// What barch offers a function, out of the editor's own completion list, as
+// plain lines: the model writes against the API this server has, not a guess.
+function aiApiReference() {
+  const plain = h => String(h || "").replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const lines = [];
+  for (const [type, t] of Object.entries(LUAU_TYPES)) {
+    for (const e of Object.values(t.members || {})) {
+      if (!e.sig || /^(string|table|math|os|utf8|bit32|buffer|coroutine|debug)\./.test(e.sig)) continue;
+      lines.push(`${e.sig} — ${plain(e.doc)}`);
+    }
+  }
+  return [...new Set(lines)].join("\n");
+}
+
+function aiSystem() {
+  return `You help an admin write stored functions for barch, a key-value server, in Luau.
+A function is Luau source stored with SETF under a name. \`function call(...)\` is the entry point that CALLF runs; its arguments are the CALLF parameters, as strings. An optional \`function transport()\` returns a table that serves the function over HTTP or RESP (kind = "resource" | "resp" | "files" | "queue" | "cron", with a route and methods). A first line \`--!native\` compiles the function to native code. A comment in the header (before the first line of code) sets its limits, and its body must be a JSON object with quoted field names, for example \`--@barch {"deadline_ms": 5000, "slice_insns": 200000}\` or the same JSON in a \`--[[@barch ... ]]\` block. Both fields are optional whole numbers above 0; Lua table syntax such as \`{deadline_ms = 5000}\` is refused.
+
+Answer briefly and concretely. When you change or write code, give the complete updated source in a single \`\`\`luau block, so it can replace the editor's content as a whole. Use only the barch API listed below and standard Luau; say so when something cannot be done with it.
+
+The barch API available to a function:
+${aiApiReference()}`;
+}
+
+async function aiContext() {
+  const name = (document.getElementById("ek")?.value || document.querySelector("#panel .valuebox[data-fn]")?.dataset.fn || "");
+  const parts = [`Space: ${current}`, `Function: ${decodeURIComponent(name) || "(new, not saved yet)"}`];
+  if (document.getElementById("ai-c-src")?.checked) {
+    const src = document.getElementById("ev")?.value ?? "";
+    parts.push("Source in the editor:\n```luau\n" + src.slice(0, 60000) + "\n```");
+  }
+  if (document.getElementById("ai-c-out")?.checked) {
+    // the box starts with a one-line note; only what a Call or Save printed counts
+    const box = document.getElementById("call-out");
+    const idle = box && box.childElementCount === 1 && box.firstElementChild.classList.contains("dim")
+      && box.textContent === box.firstElementChild.textContent;
+    const out = idle ? "" : (box?.textContent || "").trim();
+    if (out) parts.push("Last output below the editor:\n```\n" + out.slice(0, 6000) + "\n```");
+  }
+  if (document.getElementById("ai-c-keys")?.checked) {
+    const q = new URLSearchParams({ space: current, limit: 20 });
+    const out = await api("keys?" + q).catch(() => null);
+    const rows = (out && out.keys) || [];
+    if (rows.length) parts.push(`First ${rows.length} keys of ${current} (value previews):\n` +
+      rows.map(r => `${r.key} [${r.kind}] ${String(r.value ?? "").slice(0, 160)}`).join("\n"));
+  }
+  return parts.join("\n\n");
+}
+
+// The answer, drawn as it arrives: prose as paragraphs, fenced code as
+// highlighted blocks with the buttons that put it into the editor.
+function aiRender(text, done) {
+  const blocks = [];
+  const html = text.split(/```/).map((chunk, i) => {
+    if (i % 2 === 0) {
+      return chunk.trim() ? chunk.trim().split(/\n{2,}/).map(p =>
+        `<p>${esc(p).replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>")}</p>`).join("") : "";
+    }
+    const nl = chunk.indexOf("\n");
+    const lang = nl < 0 ? "" : chunk.slice(0, nl).trim().toLowerCase();
+    const code = (nl < 0 ? chunk : chunk.slice(nl + 1)).replace(/\n$/, "");
+    const n = blocks.push(code) - 1;
+    const luau = !lang || lang === "luau" || lang === "lua";
+    return `<div class="ai-code">
+      <pre class="code-ro">${luau ? luauHighlight(code) : esc(code)}</pre>
+      ${done && luau ? `<div class="ai-acts">
+        <button class="primary" onclick="aiApply(${n}, this)">Apply to editor</button>
+        <button onclick="aiCopy(${n}, this)">Copy</button></div>` : ""}</div>`;
+  }).join("");
+  return { html, blocks };
+}
+
+async function aiAsk() {
+  const bar = document.querySelector("#panel #ai");
+  const q = document.getElementById("ai-q"), go = document.getElementById("ai-go"), out = document.getElementById("ai-out");
+  if (!bar || !q) return;
+  if (bar._abort) { bar._abort.abort(); return; }      // the button is Stop while an answer streams
+  const question = q.value.trim();
+  if (!question) { q.focus(); return; }
+  const key = aiKey();
+  if (!key) return toast("add an OpenRouter key first", "warn");
+  bar._chat = bar._chat || [];
+  const context = await aiContext();
+  // earlier turns go back as they were asked, without their context: the
+  // editor has moved on since, and this turn's context says what it is now
+  const messages = [{ role: "system", content: aiSystem() },
+    ...bar._chat.flatMap(t => [{ role: "user", content: t.q }, { role: "assistant", content: t.a }]),
+    { role: "user", content: context + "\n\nQuestion: " + question }];
+  const turn = document.createElement("div");
+  turn.className = "ai-turn";
+  turn.innerHTML = `<div class="ai-q">${esc(question)}</div><div class="ai-a"><span class="ai-wait">…</span></div>`;
+  out.hidden = false;
+  out.appendChild(turn);
+  const a = turn.querySelector(".ai-a");
+  q.value = ""; q.style.height = "";
+  const ctl = new AbortController();
+  bar._abort = ctl;
+  go.textContent = "Stop";
+  let text = "", paint = 0;
+  const draw = done => {
+    const r = aiRender(text, done);
+    a.innerHTML = r.html || (done ? `<p class="dim">(no answer)</p>` : `<span class="ai-wait">…</span>`);
+    a._blocks = r.blocks;
+    out.scrollTop = out.scrollHeight;
+  };
+  try {
+    const r = await fetch(AI_URL, {
+      method: "POST", signal: ctl.signal,
+      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json",
+        "HTTP-Referer": location.origin, "X-Title": "Barch spaces" },
+      body: JSON.stringify({ model: aiModel(), messages, stream: true }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      const why = (j.error && (j.error.message || j.error)) || r.statusText;
+      throw new Error(r.status === 401 ? "OpenRouter refused the key (401). Check it in App settings." : `${r.status}: ${why}`);
+    }
+    // server-sent events: `data: {json}` lines, `: comment` keep-alives, `data: [DONE]`
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        try {
+          const j = JSON.parse(data);
+          if (j.error) throw new Error(j.error.message || "the model reported an error");
+          text += (j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content) || "";
+        } catch (e) { if (e.message && !/JSON/.test(e.message)) throw e; }
+      }
+      if (!paint) paint = requestAnimationFrame(() => { paint = 0; draw(false); });
+    }
+    cancelAnimationFrame(paint);
+    draw(true);
+    bar._chat.push({ q: question, a: text });
+    if (bar._chat.length > 8) bar._chat.shift();
+  } catch (e) {
+    cancelAnimationFrame(paint);
+    if (e.name === "AbortError") { draw(true); a.insertAdjacentHTML("beforeend", `<p class="dim">(stopped)</p>`); }
+    else a.innerHTML = `<p class="ai-err">${esc(e.message || String(e))}</p>`;
+  } finally {
+    bar._abort = null;
+    go.textContent = "Ask";
+  }
+}
+
+// Put a proposed source into the editor through the browser's own editing, so
+// Ctrl+Z takes it back out; Undo apply does the same from the button.
+function aiApply(n, btn) {
+  const a = btn && btn.closest(".ai-a");
+  const code = a && a._blocks ? a._blocks[n] : null;
+  const ta = document.getElementById("ev");
+  if (code == null || !ta || ta.disabled) return;
+  const before = ta.value;
+  aiReplace(ta, code);
+  const acts = btn.closest(".ai-acts");
+  acts.querySelector(".ai-undo")?.remove();
+  const undo = document.createElement("button");
+  undo.className = "ai-undo";
+  undo.textContent = "Undo apply";
+  undo.onclick = () => { aiReplace(ta, before); undo.remove(); toast("Editor put back as it was"); };
+  acts.appendChild(undo);
+  toast("In the editor, not saved yet — Save or Call to store it");
+}
+
+function aiReplace(ta, text) {
+  ta.focus({ preventScroll: true });
+  ta.select();
+  if (ta._code) ta._code.quiet = true;
+  const ok = document.execCommand && document.execCommand("insertText", false, text);
+  if (!ok || ta.value !== text) { ta.value = text; ta.dispatchEvent(new Event("input", { bubbles: true })); }
+  if (ta._code) ta._code.quiet = false;
+  ta.setSelectionRange(0, 0);
+  ta.scrollTop = 0;
+  if (ta._code) { ta._code.paint(); codeStatus(ta); }
+  drawDocTabs();
+}
+
+function aiCopy(n, btn) {
+  const a = btn && btn.closest(".ai-a");
+  const code = a && a._blocks ? a._blocks[n] : "";
+  navigator.clipboard?.writeText(code).then(() => toast("Copied"), () => toast("could not copy", "warn"));
 }
 
 // Ctrl+S saves and Ctrl+Enter calls while a function dialog is open, wherever
@@ -4802,9 +5187,9 @@ async function runCommand(line) {
   out.scrollTop = out.scrollHeight;
   const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
     { method: "POST", body: JSON.stringify({ args: [c.name, ...args] }) });
-  const res = await r.json().catch(() => ({ error: "not JSON — " + r.status }));
+  const res = await replyOf(r);
   ent.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
-    (res.ok ? renderReply(res.reply, "") : `<span class="rerr">(error) ${esc(res.error || "failed")}</span>`);
+    (res.ok ? renderReply(res.reply, "") : `<span class="rerr">(error) ${esc(res.error || "failed")}</span>${c.name === "CALLF" ? blocksHint(res.error) : ""}`);
   out.scrollTop = out.scrollHeight;
   consHistory = [{ cmd: c.name, args: argLine, space: current },
     ...consHistory.filter(h => !(h.cmd === c.name && h.args === argLine && h.space === current))].slice(0, 12);
@@ -4906,25 +5291,155 @@ async function openServer() {
       </tr>`).join("")}</tbody></table>`;
 }
 
-// The gear beside the count: what is set for this one space. They are keys in the
-// `configuration` space named <space>.<option>; here they are shown as <option>, and what
-// is not set runs on the server defaults. Read only - to change one, open the
-// `configuration` space and edit the key, carefully: shards cannot change once a space
-// has data, and fs_source names code the server runs.
-async function openSpaceConfig() {
+// ---- a space's own settings ---------------------------------------------------
+//
+// A space's settings are keys named <space>.<option> in the `configuration` space.
+// The function limits get a dropdown each: the server default, a few round
+// values, and whatever is set now. barch reads them when the space loads, so a
+// change is marked as waiting for the next load; the other settings are listed
+// as they are and are edited in the `configuration` space itself.
+
+const LIMITS = [
+  { key: "function_deadline_ms", label: "Deadline", unit: "ms", server: "function_deadline_ms", cap: "function_deadline_max_ms",
+    presets: [1000, 5000, 10000, 30000, 60000, 120000, 300000],
+    tip: "Running time a stored function gets. Time spent waiting on the network doesn't count." },
+  { key: "function_deadline_max_ms", label: "Deadline cap", unit: "ms", server: "function_deadline_max_ms",
+    presets: [30000, 60000, 120000, 300000, 600000],
+    tip: "The most a function may ask for in its own --@barch header." },
+  { key: "function_slice_insns", label: "Slice", unit: "insns", server: "function_slice_insns", cap: "function_slice_max_insns",
+    presets: [200000, 1000000, 5000000, 10000000],
+    tip: "Instructions a function runs before it gives its worker back to others." },
+  { key: "function_slice_max_insns", label: "Slice cap", unit: "insns", server: "function_slice_max_insns",
+    presets: [10000000, 50000000, 100000000],
+    tip: "The most a function may ask for in its own --@barch header." },
+];
+
+const fmtLimit = (n, unit) => {
+  n = Number(n);
+  if (unit === "ms") return n % 60000 === 0 && n >= 60000 ? `${n / 60000} min` : n % 1000 === 0 ? `${n / 1000} s` : `${n.toLocaleString()} ms`;
+  return n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : n.toLocaleString();
+};
+
+// the server's own values for the four limits, from the global settings
+function serverLimits(out) {
+  const g = {};
+  for (const x of (out && out.global) || []) g[x.name] = x.value;
+  return g;
+}
+
+// one dropdown: "server default (1 s)", the presets, and the value set now
+function limitSelect(L, set, server, capNow, id) {
+  const vals = new Set(L.presets);
+  if (set) vals.add(Number(set));
+  const opts = [...vals].sort((a, b) => a - b);
+  return `<select id="${id}" data-key="${L.key}">
+    <option value=""${set ? "" : " selected"}>default · ${server ? fmtLimit(server, L.unit) : "server"}</option>
+    ${opts.map(v => `<option value="${v}"${String(v) === String(set) ? " selected" : ""}${capNow && v > capNow ? " disabled" : ""}>${fmtLimit(v, L.unit)}${capNow && v > capNow ? " · over cap" : ""}</option>`).join("")}
+  </select>`;
+}
+
+async function openSpaceConfig(space) {
+  space = space || current;
   const out = await api("config").catch(() => null);
   if (!out) return;
-  const mine = (out.spaces || {})[current] || {};
-  const keys = Object.keys(mine).sort();
-  show(`<div class="top"><h2>${esc(current)} configuration</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">
-      ${keys.length
-        ? `<table class="keys"><tbody>${keys.map(k => `
-            <tr><td class="k" title="${esc(k)}">${esc(k)}</td><td class="v">${esc(mine[k])}</td></tr>`).join("")}</tbody></table>`
-        : `<div class="empty" style="padding:20px 0">Nothing is set for this space; it runs on the server defaults.</div>`}
-      <div class="meta" style="margin-top:12px">Read only. These are the keys named <code>${esc(current)}.&lt;option&gt;</code> in the
-        <b>configuration</b> space, which can be edited there like any other space.</div>
-    </div>`, { icon: "gear" });
+  const mine = (out.spaces || {})[space] || {};
+  const server = serverLimits(out);
+  const other = Object.keys(mine).filter(k => !LIMITS.some(L => L.key === k)).sort();
+  const capOf = L => L.cap ? Number(mine[L.cap] || server[L.cap]) || 0 : 0;
+  const node = show(`<div class="top"><h2>${esc(space)} configuration</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox spacecfg" data-space="${esc(space)}">
+      <h4>Function limits</h4>
+      <div class="limits">${LIMITS.map((L, i) => `
+        <label class="lim-row" title="${esc(L.tip)}">
+          <span class="lim-name">${esc(L.label)} <i class="tip">${ico("more")}</i></span>
+          ${isAdmin ? limitSelect(L, mine[L.key], server[L.server], capOf(L), "lim" + i)
+            : `<span class="lim-val">${mine[L.key] ? fmtLimit(mine[L.key], L.unit) : "default · " + fmtLimit(server[L.server] || 0, L.unit)}</span>`}
+          <span class="lim-now" id="lim-now${i}"></span>
+        </label>`).join("")}
+      </div>
+      <div class="lim-foot" id="lim-foot">Saved as <code>${esc(space)}.&lt;setting&gt;</code> in <b>configuration</b>. Takes effect when ${esc(space)} next loads.</div>
+      ${other.length ? `<h4>Other settings</h4>
+        <table class="keys"><tbody>${other.map(k => `
+          <tr><td class="k" title="${esc(k)}">${esc(k)}</td><td class="v">${esc(mine[k])}</td></tr>`).join("")}</tbody></table>
+        <div class="lim-foot"><a href="#" onclick="event.preventDefault();pickSpace(null,'configuration');keyPrefix='${esc(space)}.';setView('keys')">Edit in configuration</a></div>` : ""}
+    </div>`, { space, id: "space-config:" + space, icon: "gear" });
+  node.querySelectorAll(".limits select").forEach(sel => sel.addEventListener("change", () => setSpaceLimit(space, sel)));
+  spaceLimitsNow(space, node);
+}
+
+// what the space runs with at this moment, beside each dropdown
+async function spaceLimitsNow(space, node) {
+  const ask = async args => {
+    const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space }),
+      { method: "POST", body: JSON.stringify({ args }) }).then(replyOf).catch(() => null);
+    const x = r && r.ok && r.reply ? (r.reply.t === "arr" ? r.reply.v?.[1] : r.reply) : null;
+    return x && x.v != null && x.t !== "err" ? String(x.v) : null;
+  };
+  const [dl, sl] = await Promise.all([ask(["KSPACE", "OPTION", "GET", "FUNCTION_DEADLINE"]), ask(["KSPACE", "OPTION", "GET", "FUNCTION_SLICE"])]);
+  const put = (i, v, unit) => { const el = node.querySelector("#lim-now" + i); if (el && v) el.textContent = "now " + fmtLimit(v, unit); };
+  put(0, dl, "ms"); put(2, sl, "insns");
+}
+
+async function setSpaceLimit(space, sel) {
+  const key = space + "." + sel.dataset.key;
+  const v = sel.value;
+  const ok = v ? await write("key_put", { space: "configuration", key }, v) : await write("key_rm", { space: "configuration", key }, null, true);
+  if (!ok && v) return;
+  sel.closest(".lim-row").classList.add("pending");
+  const foot = document.getElementById("lim-foot");
+  if (foot) foot.innerHTML = `<b class="pend">Saved</b> — ${esc(space)} picks it up when it next loads (a server restart).`;
+  toast(`${key} = ${v ? fmtLimit(v, sel.dataset.key.endsWith("_ms") ? "ms" : "insns") : "server default"}`, "ok");
+}
+
+// ---- a new space ----------------------------------------------------------------
+//
+// A small form rather than a prompt: the name, and the deadline and slice it
+// starts with. The two limits are written as settings before the space is made,
+// so it loads with them and they are there to find and raise later.
+async function newSpace(ev) {
+  if (ev) ev.preventDefault();
+  const out = await api("config").catch(() => null);
+  const server = serverLimits(out);
+  const dl = LIMITS[0], sl = LIMITS[2];
+  const pick = (L, id, dflt) => `<select id="${id}">${[...new Set([...L.presets, Number(dflt) || 0])].filter(Boolean).sort((a, b) => a - b)
+    .map(v => `<option value="${v}"${v === Number(dflt) ? " selected" : ""}>${fmtLimit(v, L.unit)}${v === Number(dflt) ? " · server default" : ""}</option>`).join("")}</select>`;
+  show(`<div class="top"><h2>New key space</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox spacecfg">
+      <div class="limits">
+        <label class="lim-row"><span class="lim-name">Name</span>
+          <input id="ns-name" placeholder="letters, digits, _" autocomplete="off" spellcheck="false"></label>
+        <label class="lim-row" title="${esc(dl.tip)}"><span class="lim-name">Function deadline <i class="tip">${ico("more")}</i></span>${pick(dl, "ns-deadline", server[dl.server] || 1000)}</label>
+        <label class="lim-row" title="${esc(sl.tip)}"><span class="lim-name">Function slice <i class="tip">${ico("more")}</i></span>${pick(sl, "ns-slice", server[sl.server] || 1000000)}</label>
+      </div>
+      <div class="row"><button class="primary" onclick="createSpace()">Create</button></div>
+      <div class="lim-foot">Change these later with the ${ico("gear")} next to the space's name.</div>
+    </div>`, { space: null, id: "new-space", icon: "plus" });
+  const name = document.getElementById("ns-name");
+  name.focus();
+  name.addEventListener("keydown", e => { if (e.key === "Enter") createSpace(); });
+}
+
+async function createSpace() {
+  const name = (document.getElementById("ns-name")?.value || "").trim();
+  if (!name) return document.getElementById("ns-name")?.focus();
+  if (!/^[A-Za-z0-9_]+$/.test(name)) return toast("a space name is letters, digits and underscores", "warn");
+  if (spaces.some(s => s.name === name)) return toast(`${name} already exists`, "warn");
+  // the limits first: the space reads them when it is built
+  for (const [id, opt] of [["ns-deadline", "function_deadline_ms"], ["ns-slice", "function_slice_insns"]]) {
+    const v = document.getElementById(id)?.value;
+    if (v && !await write("key_put", { space: "configuration", key: name + "." + opt }, v)) return;
+  }
+  if (!await write("space_add", { name })) return;
+  shut();
+  const out = await api("spaces").catch(() => null);
+  if (out) spaces = out.spaces || [];
+  current = name;
+  resetPlace();
+  drawSpaces();
+  docsFollowSpace();
+  draw();
+  drawStatus();
+  toast(`Created ${name}`, "ok");
 }
 
 async function setConfig(name, n, host) {
@@ -5224,7 +5739,7 @@ let activeDoc = null, docSeq = 0;
 
 // unsaved: a value or a source that differs from what was loaded or saved
 function docDirty(d) {
-  return [...d.node.querySelectorAll("textarea:not([disabled]), #ek, #nleaf-name")]
+  return [...d.node.querySelectorAll("textarea:not([disabled]):not(#ai-q), #ek, #nleaf-name")]
     .some(el => el.value !== el.defaultValue);
 }
 
