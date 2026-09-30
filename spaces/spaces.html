@@ -3648,6 +3648,53 @@ async function uploadFiles(input) {
   drawFiles();
 }
 
+// A file typed here rather than uploaded, into the folder the list is in. The
+// type comes from the extension when it is a text kind, so a .json or .md
+// reads back as one; anything else is stored as text/plain.
+function newFile() {
+  const dir = fsPath;
+  const node = show(`<div class="top"><h2>New file in ${esc(current)}</h2><button onclick="shut()">Close</button></div>
+    <div class="valuebox" data-newfile="${esc(enc(dir))}">
+      <div class="meta">in <code>${esc(dir)}</code></div>
+      <div class="editor">
+        <input id="ek" placeholder="name, e.g. notes.md" autocomplete="off" spellcheck="false">
+        <textarea id="nf-body" rows="14" spellcheck="false" placeholder="content"></textarea>
+        <div class="row">
+          <span class="fill"></span>
+          <button class="primary" id="nf-save" onclick="saveNewFile()">Create</button>
+        </div>
+      </div>
+    </div>`, { id: "new-file:" + current + ":" + (++docSeq), icon: "file" });
+  const name = node.querySelector("#ek");
+  name.focus();
+  name.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); node.querySelector("#nf-body").focus(); } });
+}
+
+async function saveNewFile() {
+  const box = document.querySelector("#panel .valuebox[data-newfile]");
+  if (!box) return;
+  const dir = decodeURIComponent(box.dataset.newfile);
+  const name = (document.getElementById("ek").value || "").trim();
+  if (!name) { toast("a file name is required", "warn"); document.getElementById("ek").focus(); return; }
+  if (name.includes("/")) { toast("a name has no slashes in it — the folder is where it goes", "warn"); return; }
+  const body = document.getElementById("nf-body").value;
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  let type = EXT_TYPES[ext] || "text/plain";
+  if (RAW_IMAGES.includes(type)) type = "text/plain";
+  const path = (dir === "/" ? "" : dir) + "/" + name;
+  // the name is taken only if it is free; if it is not, ask before replacing
+  let out = await write("file_put", { path, type }, body, true);
+  if (out && out.exists) {
+    if (!armed(document.getElementById("nf-save"), "Replace?", `${path} already exists — click Replace? to overwrite it`)) return;
+    out = await write("file_put", { path, type, overwrite: "1" }, body);
+  }
+  if (!out) return;
+  toast(`Saved ${path}`, "ok");
+  shut();
+  if (fsPath === dir) drawFiles();
+  openFile({ stopPropagation() {} }, enc(path));
+}
+
 async function newFolder() {
   const name = await ask("New folder name (inside " + fsPath + ")");
   if (!name) return;
@@ -3712,7 +3759,8 @@ async function drawFiles() {
       ${fsMatch ? `<button onclick="fsMatch='';drawFiles()">Clear</button>` : ""}
     </div>
     ${isAdmin ? `<div class="filter"><label class="upload">Upload files here <input type="file" multiple onchange="uploadFiles(this)"></label>
-        <span class="fill"></span><button onclick="newFolder()">${ico("folder")} New folder</button></div>` : ""}
+        <span class="fill"></span><button onclick="newFile()">${ico("file")} New file</button>
+        <button onclick="newFolder()">${ico("folder")} New folder</button></div>` : ""}
     <div class="slider" id="slider" hidden>
       <button onclick="fsSlideBy(-1)" aria-label="Previous page">${ico("back")}</button>
       <input type="range" id="slide" min="0" max="0" value="0" step="1" aria-label="Position in the folder"
@@ -5260,6 +5308,7 @@ function aiCopy(n, btn) {
 // after Esc - so the browser's own Save page never gets the key.
 document.addEventListener("keydown", e => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  if ((e.key === "s" || e.key === "S") && document.querySelector("#panel .valuebox[data-newfile]")) { e.preventDefault(); saveNewFile(); return; }
   const kb = document.querySelector("#panel .valuebox[data-key]");
   if (kb && (e.key === "s" || e.key === "S")) { e.preventDefault(); saveKey(kb.dataset.key || null); return; }
   const vb = document.querySelector("#panel .valuebox[data-fn]");

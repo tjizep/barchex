@@ -174,17 +174,22 @@ local function open(name)
     return sp, nil
 end
 
+-- Whether a space has a file store. Older barch builds write an `fs:layout`
+-- key with the first file; newer ones don't, so a single `fs:n:` name record
+-- (a file or a folder) answers too. ";" is the byte after ":".
+local function has_file_store(sp)
+    if sp:get("fs:layout") ~= nil then return true end
+    return #sp:range("fs:n:", "fs:n;", 1) > 0
+end
+
 -- GET /api/admin/spaces - every space, its size, and what it is configured as.
 local function spaces(req, res)
     local settings = settings_by_space()
     local out = space_list()
     for _, s in ipairs(out) do
         s.settings = settings[s.name] or {}
-        -- a space with a file store has a layout key, which is a cheaper question
-        -- than "does it have any files"
         if s.openable then
-            local sp = barch.space[s.name]
-            s.files = sp:get("fs:layout") ~= nil
+            s.files = has_file_store(barch.space[s.name])
         end
     end
     return ok(res, { spaces = out })
@@ -410,7 +415,7 @@ local FS_BATCH = 2000
 local function files(req, res, query)
     local sp, err = open(query.space)
     if sp == nil then return fail(res, err, 404) end
-    if sp:get("fs:layout") == nil then
+    if not has_file_store(sp) then
         return ok(res, { space = query.space, path = "/", files = false, entries = {} })
     end
     local path = query.path or "/"
