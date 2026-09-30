@@ -47,8 +47,20 @@ say where it is stored and how to start it; queue and cron templates open in
 press Call, and a cron job can call it every minute to bring the server back
 after a restart.
 
-The function editor has a prompt bar for asking a model about the function
-or for describing a change. Paste an OpenRouter API key into the bar, or into
+In the Files view, text files open in an editor with **Save**, and `.luau`
+files get the Luau editor and a **Run** box. A `.luau` file is a module that
+a stored function loads with `require(":/path/file.luau")`; Run does that
+through `RUNLUAU`, a small function it stores in the space the first time,
+and calls the file's `call()` with the arguments. The file is read fresh on
+each run, and errors point at the file's own lines. The gear beside Save sets
+**Native**, **Deadline** and **Slice** as header lines in the file. barch
+compiles a required file natively when it has `--!native`, but takes a call's
+deadline and slice from the function that is called, so Run copies the file's
+`--@barch` line onto `RUNLUAU` before it calls it. A function that requires
+the file runs with its own limits.
+
+The function editor and the `.luau` file editor have a prompt bar for asking
+a model about the code or for describing a change. Paste an OpenRouter API key into the bar, or into
 App settings, to turn it on. The browser sends the question straight to
 `openrouter.ai`, together with the context ticked under the bar: the source
 in the editor, the last Call output, and the first 20 keys of the space with

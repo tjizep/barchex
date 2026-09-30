@@ -1616,7 +1616,7 @@ button.kt:hover { border-color: currentColor; background: var(--panel); }
 .doc .valuebox { padding: 14px 18px 22px; }
 .doc .valuebox pre { max-height: none; }
 .doc .filepic img { max-height: calc(100dvh - 220px); }
-.doc .editor textarea#ev:not(.fn-src) { height: 42vh; min-height: 80px; }
+.doc .editor textarea#ev:not(.fn-src) { height: 42vh; min-height: 80px; font-family: var(--mono); font-size: 12.5px; }
 .editor textarea#ev:not(.fn-src) { resize: none; display: block; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .hgrip {
   height: 8px; cursor: row-resize; touch-action: none; position: relative;
@@ -1640,6 +1640,8 @@ button.kt:hover { border-color: currentColor; background: var(--panel); }
 .wb.docked .doc .code { height: calc(100dvh - 360px - var(--dockh)); }
 .doc .auth-card, .doc .appsettings, .doc .linker { max-width: 720px; }
 .doc input[type=file] { max-width: 100%; min-width: 0; }
+.wb-explorer .upload { flex-wrap: wrap; max-width: 100%; min-width: 0; }
+.wb-explorer .upload input[type=file] { max-width: 100%; min-width: 0; }
 
 /* the console, docked */
 .wb-dock {
@@ -1741,6 +1743,10 @@ button.kt:hover { border-color: currentColor; background: var(--panel); }
 .ai-keyin input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 12px; }
 .ai-keyin button { height: 32px; padding: 0 12px; }
 .doc .valuebox:has(.ai) .code { height: calc(100dvh - 450px); }
+.doc .valuebox[data-file] .code { height: calc(100dvh - 470px); }
+.wb.docked .doc .valuebox[data-file] .code { height: calc(100dvh - 470px - var(--dockh)); }
+.doc .valuebox[data-file]:has(.ai) .code { height: calc(100dvh - 540px); }
+.wb.docked .doc .valuebox[data-file]:has(.ai) .code { height: calc(100dvh - 540px - var(--dockh)); }
 .wb.docked .doc .valuebox:has(.ai) .code { height: calc(100dvh - 450px - var(--dockh)); }
 .ai-ctx { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 10px 8px 38px;
   font-size: 11.5px; color: var(--ink-3); }
@@ -1861,6 +1867,7 @@ Object.assign(ICONS, {
   exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   graph: '<circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="m10.6 7.2-3.9 9.4"/><path d="m13.4 7.2 3.9 9.4"/><path d="M7.5 19h9"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.8-1.7"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   transfer: '<path d="M4 8h13"/><path d="m13 4 4 4-4 4"/><path d="M20 16H7"/><path d="m11 12-4 4 4 4"/>'
 });
 const ico = n => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ICONS.tag}</svg>`;
@@ -3303,6 +3310,12 @@ document.getElementById("tabs").onclick = ev => {
   setView(a.dataset.tab);
 };
 
+// Each draw of the list takes a number. A reply that comes back after another
+// draw has started (the view or the space changed meanwhile) is for a list
+// that is no longer on screen, and is dropped rather than written into it.
+let drawSeq = 0;
+const stale = n => n !== drawSeq;
+
 function draw() {
   if (tab === "keys") return drawKeys();
   if (tab === "files") return drawFiles();
@@ -3325,6 +3338,8 @@ let needsAdmin = false;  // no admin account on this server yet, so make one
 let keyTotal = 0, keyAt = 0, keyTimer = null, keySeq = 0;
 
 async function drawKeys() {
+  if (tab !== "keys") return;      // another view is on screen
+  const seq = ++drawSeq;
   const pane = document.getElementById("pane");
   pane.innerHTML = head("keys") + `
     <div class="filter">
@@ -3348,6 +3363,7 @@ async function drawKeys() {
     document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") applyPrefix(); });
   keyAt = 0;
   const out = await loadKeys(true);
+  if (stale(seq)) return;
   if (!out) return;
   if (out.total == null && Array.isArray(out.keys) && out.keys.length) {
     document.getElementById("rows").innerHTML = `<div class="notice">This barchd ignores the range offset, so the
@@ -3539,7 +3555,8 @@ function slideTo(i) {
     `${num(from)}–${num(Math.min(from + PAGE - 1, keyTotal))} of ${num(keyTotal)}`;
   document.getElementById("slide").value = i;
   clearTimeout(keyTimer);
-  keyTimer = setTimeout(async () => { const out = await loadKeys(false); if (out) showKeys(out); }, 60);
+  const seq = drawSeq;
+  keyTimer = setTimeout(async () => { const out = await loadKeys(false); if (out && !stale(seq)) showKeys(out); }, 60);
 }
 function slideBy(n) {
   const r = document.getElementById("slide");
@@ -3677,8 +3694,10 @@ async function saveNewFile() {
   const name = (document.getElementById("ek").value || "").trim();
   if (!name) { toast("a file name is required", "warn"); document.getElementById("ek").focus(); return; }
   if (name.includes("/")) { toast("a name has no slashes in it — the folder is where it goes", "warn"); return; }
-  const body = document.getElementById("nf-body").value;
+  let body = document.getElementById("nf-body").value;
   const ext = (name.split(".").pop() || "").toLowerCase();
+  if ((ext === "luau" || ext === "lua") && !body.trim())
+    body = "-- Run calls call() with the arguments; another function can use this file\n-- with require(\":" + ((dir === "/" ? "" : dir) + "/" + name) + "\").\nfunction call(name)\n    return \"hello \" .. tostring(name)\nend\n";
   let type = EXT_TYPES[ext] || "text/plain";
   if (RAW_IMAGES.includes(type)) type = "text/plain";
   const path = (dir === "/" ? "" : dir) + "/" + name;
@@ -3695,6 +3714,28 @@ async function saveNewFile() {
   openFile({ stopPropagation() {} }, enc(path));
 }
 
+// Save an open text file: the same file_put that made it, over the top, with
+// the type it already has. The tab reopens so its version and size are current.
+async function saveFile() {
+  const box = document.querySelector("#panel .valuebox[data-file]");
+  const ta = document.getElementById("ev");
+  if (!box || !ta) return;
+  const path = decodeURIComponent(box.dataset.file);
+  if (careful() && !armed(document.getElementById("fe-save"), "Really save?", carefulNote())) return;
+  const out = await write("file_put", { path, type: box.dataset.type || "text/plain", overwrite: "1" }, ta.value);
+  if (!out) return;
+  ta.defaultValue = ta.value;
+  toast(`Saved ${path}`, "ok");
+  const at = [ta.selectionStart, ta.selectionEnd, ta.scrollTop];
+  await openFile(null, enc(path));
+  const fresh = document.getElementById("ev");
+  if (fresh) {
+    fresh.setSelectionRange(at[0], at[1]); fresh.scrollTop = at[2]; fresh.focus({ preventScroll: true });
+    if (fresh._code) { codeScroll(fresh); codeStatus(fresh); }
+  }
+  drawFiles();
+}
+
 async function newFolder() {
   const name = await ask("New folder name (inside " + fsPath + ")");
   if (!name) return;
@@ -3703,12 +3744,34 @@ async function newFolder() {
 }
 
 // the same call renames a file or a folder; the server moves name records only
-async function renameFile(ev, path) {
-  ev.stopPropagation();
+// Rename asks for the new name with the old one selected up to its extension,
+// and keeps it in the same folder. A name with a / in it is a path, which moves
+// the file or folder there (that folder must exist). Tabs open on what moved
+// follow it to its new path.
+async function renameFile(ev, path, isDir) {
+  if (ev) { ev.preventDefault?.(); ev.stopPropagation(); }
   path = decodeURIComponent(path);
-  const to = await ask("Rename to (a full path; the folder must exist)", path);
-  if (!to || to === path) return;
-  if (await write("file_mv", { path, to })) drawFiles();
+  isDir = !!isDir || path.endsWith("/");
+  const clean = path.replace(/\/$/, "");
+  const cut = clean.lastIndexOf("/");
+  const dir = cut <= 0 ? "" : clean.slice(0, cut), name = clean.slice(cut + 1);
+  const dot = name.lastIndexOf(".");
+  const typed = await ask(`Rename ${name}`, name,
+    "A new name keeps it in " + (dir || "/") + "; a path starting with / moves it. Enter to rename, Esc to cancel.",
+    [0, dot > 0 && !isDir ? dot : name.length]);
+  const next = (typed || "").trim();
+  if (!next || next === name) return;
+  const to = next.startsWith("/") ? next : dir + "/" + next;
+  if (!await write("file_mv", { path: clean, to })) return;
+  toast(`Renamed to ${to}`, "ok");
+  // open tabs on the file, or on anything under the folder, follow the move
+  for (const d of docs.filter(x => x.id === docId("file", clean) || x.id.startsWith(docId("file", clean + "/")))) {
+    const moved = to + d.id.slice(docId("file", clean).length);
+    const wasActive = d === activeDoc;
+    closeDoc(d, true);
+    if (wasActive) await openFile(null, enc(moved));
+  }
+  drawFiles();
 }
 
 async function deleteFile(ev, path, isDir) {
@@ -3747,6 +3810,8 @@ async function openValue(key) {
 let fsTotal = 0, fsAt = 0, fsTimer = null, fsSeq = 0;
 
 async function drawFiles() {
+  if (tab !== "files") return;      // another view is on screen
+  const seq = ++drawSeq;
   const pane = document.getElementById("pane");
   const parts = fsPath.split("/").filter(Boolean);
   const crumbs = [`<a href="#" onclick="goPath(event,'%2F')">/</a>`].concat(
@@ -3772,6 +3837,7 @@ async function drawFiles() {
   document.getElementById("fmatch").addEventListener("keydown", e => { if (e.key === "Enter") applyFsMatch(); });
   fsAt = 0;
   const out = await loadFiles();
+  if (stale(seq)) return;
   if (!out) return;
   if (!out.files) {
     document.getElementById("rows").innerHTML =
@@ -3810,7 +3876,7 @@ function showFiles(out) {
         <td class="v">${e.dir ? "" : "v" + esc(e.version ?? "")}</td>
         ${isAdmin ? `<td class="act">
           <button class="ib" title="Rename" aria-label="Rename ${esc(e.name)}"
-                  onclick="renameFile(event,'${esc(at(e))}')">${ico("more")}</button>
+                  onclick="renameFile(event,'${esc(at(e))}',${e.dir ? "true" : "false"})">${ico("edit")}</button>
           <button class="ib" title="Delete" aria-label="Delete ${esc(e.name)}"
                   onclick="deleteFile(event,'${esc(at(e))}', ${e.dir ? "true" : "false"})">${ico("minus")}</button></td>` : ""}
       </tr>`).join("")}</tbody></table>`;
@@ -3828,7 +3894,8 @@ function fsSlideTo(i) {
     `${num(from)}–${num(Math.min(from + PAGE - 1, fsTotal))} of ${num(fsTotal)}`;
   document.getElementById("slide").value = i;
   clearTimeout(fsTimer);
-  fsTimer = setTimeout(async () => { const out = await loadFiles(); if (out) showFiles(out); }, 60);
+  const seq = drawSeq;
+  fsTimer = setTimeout(async () => { const out = await loadFiles(); if (out && !stale(seq)) showFiles(out); }, 60);
 }
 function fsSlideBy(n) {
   const r = document.getElementById("slide");
@@ -3845,7 +3912,7 @@ const EXT_TYPES = { json: "application/json", md: "text/markdown", txt: "text/pl
 const RAW_IMAGES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 async function openFile(ev, path) {
-  ev.stopPropagation();
+  if (ev) ev.stopPropagation();
   path = decodeURIComponent(path);
   const q = "space=" + encodeURIComponent(current) + "&path=" + encodeURIComponent(path);
   const out = await api("file?" + q).catch(() => null);
@@ -3857,19 +3924,150 @@ async function openFile(ev, path) {
     shown = `<div class="notice">${esc(out.error)}</div>`;
   } else if (RAW_IMAGES.includes(type)) {
     shown = `<div class="filepic"><img alt="${esc(path)}" src="/api/admin/file?${q}&raw=1"></div>`;
+  } else if (out.text != null && isAdmin && !out.truncated && isLuauFile(path, type)) {
+    // a module a function can require(":/path.luau"): the prompt bar, the Luau
+    // editor, and Run
+    shown = `${aiBar()}<div class="editor">
+      <div class="fn-body">
+        <div class="fn-code">${codeEditor(out.text, `placeholder="Luau source"`)}</div>
+        ${fnSide(out.text, true)}
+      </div>
+      <div class="row"><span class="fill"></span>
+        <button class="gear" id="fn-gear" title="Native code, deadline and slice" aria-label="File settings"
+                aria-controls="fn-side" aria-expanded="${appSetting("fnSide", "0") === "1"}" onclick="toggleFnSide()">${ico("gear")}</button>
+        <button class="primary" id="fe-save" onclick="saveFile()">Save</button></div>
+    </div>
+    <div class="fncall">
+      <div class="row">
+        <input id="call-args" placeholder="arguments for call(), e.g. bob or &quot;two words&quot;" spellcheck="false" autocomplete="off"
+               aria-label="Arguments" onkeydown="if(event.key==='Enter')runFile()">
+        <button class="primary" onclick="runFile()">${ico("play")} Run</button>
+      </div>
+      <pre class="cons-out" id="call-out" aria-live="polite"><span class="dim">Run calls this file's call() through ${RUNNER} in ${esc(current)}: require(":${esc(path)}", true).</span></pre>
+    </div>`;
+  } else if (out.text != null && isAdmin && !out.truncated) {
+    // editable: the bytes exactly as stored, so a save changes only what was typed
+    shown = `<div class="editor">
+      <textarea id="ev" rows="14" spellcheck="false" style="${valueHeightStyle()}">${esc(out.text)}</textarea>
+      ${hgrip("valueHeight", "Resize the file box")}
+      <div class="row"><span class="fill"></span>
+        <button class="primary" id="fe-save" onclick="saveFile()">Save</button></div>
+    </div>`;
   } else if (out.text != null) {
     let body = out.text;
     if (type.includes("json")) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {} }
     const luau = /luau|x-lua\b/.test(type) || ext === "luau" || ext === "lua";
-    shown = luau ? `<pre class="code-ro">${luauHighlight(body)}</pre>` : `<pre>${esc(body)}</pre>`;
+    shown = (out.truncated && isAdmin ? `<div class="notice small">Too large to edit here; upload a file to replace it.</div>` : "")
+      + (luau ? `<pre class="code-ro">${luauHighlight(body)}</pre>` : `<pre>${esc(body)}</pre>`);
   } else {
     shown = `<div class="meta">binary — first ${Math.min(512, out.size || 0)} bytes</div><pre>${esc(out.hex || "")}</pre>`;
   }
   show(`<div class="top"><h2>${esc(path)}</h2><button onclick="shut()">Close</button></div>
-    <div class="valuebox">
+    <div class="valuebox" data-file="${esc(enc(path))}" data-type="${esc(type || "")}">
       <div class="meta">${esc(current)} · ${esc(type || "unknown type")}${out.size != null ? " · " + bytes(out.size) : ""}${out.version != null ? " · v" + esc(out.version) : ""}${out.truncated ? " · truncated" : ""}</div>
+      ${isAdmin && !out.error ? `<div class="filter"><button onclick="renameFile(null,'${esc(enc(path))}')">${ico("edit")} Rename</button></div>` : ""}
       ${shown}
     </div>`, { id: docId("file", path), icon: "file" });
+  const ta = document.getElementById("ev");
+  if (ta && ta.closest(".code")) {
+    applyTabWidth();
+    codeAttach(ta, current + ":" + path);
+    ta._code.saved = out.text ?? "";
+    codeStatus(ta);
+    if (document.getElementById("fn-side")) {
+      ta.addEventListener("input", () => fnSideSync(ta));
+      fnSideSync(ta);
+      if (!document.getElementById("fn-side").hidden) fnSideDefaults();
+    }
+  }
+}
+
+// ---- running a .luau file ------------------------------------------------------
+//
+// A .luau file in the file store is a module: a function loads it with
+// require(":/path.luau") and gets its globals back. Run does exactly that
+// through a small stored function, RUNLUAU, which it installs in the space the
+// first time it is needed. The file is read fresh on every run, so Run always
+// uses what was last saved.
+
+const RUNNER = "RUNLUAU";
+const RUNNER_SRC = `-- Runs a .luau file from this space's file store, the way the viewer's Run
+-- button does: require(":" .. path, true) reads the file fresh and hands back
+-- its globals, and the file's own call() is called with the arguments. Errors
+-- pass through as the file raised them, so their line numbers are the file's.
+function call(path, ...)
+    local loaded, m = pcall(require, ":" .. path, true)
+    if not loaded then error(tostring(m), 0) end
+    local run = rawget(m, "call")
+    if type(run) ~= "function" then error(path .. " has no call() to run", 0) end
+    local result = table.pack(pcall(run, ...))
+    if not result[1] then error(tostring(result[2]), 0) end
+    return table.unpack(result, 2, result.n)
+end
+`;
+
+const isLuauFile = (path, type) => /\.(luau|lua)$/i.test(path) || /luau|x-lua\b/.test(type || "");
+
+// RUNLUAU as this file wants it: the viewer's runner with the file's own
+// --@barch line on top. A call's deadline and slice come from the function
+// that is called, not from what it requires, so the file's limits have to be
+// on the runner to apply.
+function runnerFor(source) {
+  const h = luauBarchHeader(source || "");
+  const line = h && !h.bad && Object.keys(h.obj).length
+    ? "--@barch " + JSON.stringify(h.obj).replace(/":/g, '": ').replace(/,"/g, ', "') + "\n" : "";
+  return line + RUNNER_SRC;
+}
+
+// RUNLUAU in the space, as `want`: installed when missing, and rewritten when it
+// is the viewer's own with other limits. One that is there and isn't the
+// viewer's is someone's own, so it is used as it is and left alone.
+async function ensureRunner(want) {
+  want = want || RUNNER_SRC;
+  const out = await api("function?" + new URLSearchParams({ space: current, name: RUNNER })).catch(() => null);
+  const have = out && !out.error && out.source != null ? out.source : null;
+  if (have === want) return true;
+  const ours = have != null && have.replace(/^--@barch[^\n]*\n/, "") === RUNNER_SRC;
+  if (have != null && !ours) { toast(`Using this space's own ${RUNNER}; its limits apply`); return true; }
+  const put = await putFunction(RUNNER, want).catch(e => ({ error: String(e) }));
+  if (put.error) { toast(`${RUNNER} not updated: ${put.error}`, "warn"); return false; }
+  if (have == null) {
+    toast(`Installed ${RUNNER} in ${current} to run .luau files`, "ok");
+    if (tab === "functions") drawFunctions();
+  }
+  return true;
+}
+
+async function runFile() {
+  const box = document.querySelector("#panel .valuebox[data-file]");
+  if (!box) return;
+  const path = decodeURIComponent(box.dataset.file);
+  let argsText = document.getElementById("call-args")?.value || "";
+  // what is on screen is what runs: save it first, as Call does for a function
+  const ta = document.getElementById("ev");
+  if (ta && ta.value !== ta.defaultValue && saveBeforeCall()) {
+    await saveFile();
+    const again = document.getElementById("call-args");
+    if (again) again.value = argsText;
+  }
+  let args;
+  try { args = splitArgs(argsText.trim()); } catch (e) { toast(e.message, "warn"); return; }
+  if (!await ensureRunner(runnerFor(document.getElementById("ev")?.value))) return;
+  const out = document.getElementById("call-out");
+  const quote = a => /[\s"'\\]/.test(a) || a === "" ? JSON.stringify(a) : a;
+  const shown = ["CALLF", RUNNER, path, ...args].map(quote).join(" ");
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n…`;
+  const r = await fetch("/api/admin/resp?" + new URLSearchParams({ space: current }),
+    { method: "POST", body: JSON.stringify({ args: ["CALLF", RUNNER, path, ...args] }) });
+  const res = await replyOf(r);
+  if (!res.ok) {
+    out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` +
+      `<span class="rerr">(error) ${codeErrorHtml(res.error || "failed")}</span>${blocksHint(res.error)}`;
+    codeMarkError(res.error);
+    return;
+  }
+  codeClearError();
+  out.innerHTML = `<span class="dim">${esc(current)}&gt; ${esc(shown)}</span>\n` + renderReply(res.reply, "");
 }
 
 function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(path || "%2F"); fsMatch = ""; drawFiles(); }
@@ -3890,6 +4088,8 @@ function goPath(ev, path) { ev.preventDefault(); fsPath = decodeURIComponent(pat
 let gAt = 0, gSeq = 0, gMore = false, gNode = null;
 
 async function drawGraph() {
+  if (tab !== "graph") return;      // another view is on screen
+  const seq = ++drawSeq;
   const pane = document.getElementById("pane");
   const parts = gPath.split("/").filter(Boolean);
   const crumbs = [`<a href="#" onclick="goNode(event,'%2F')">/</a>`].concat(
@@ -3909,6 +4109,7 @@ async function drawGraph() {
     <div id="rows"><div class="empty" style="padding:40px 0">Walking…</div></div>`;
   gAt = 0;
   const out = await loadGraph();
+  if (stale(seq)) return;
   if (!out) return;
   if (!out.graph) {
     document.getElementById("rows").innerHTML =
@@ -4337,6 +4538,8 @@ async function uploadNodes(input) {
 // RELOAD so every session picks the change up.
 
 async function drawFunctions() {
+  if (tab !== "functions") return;      // another view is on screen
+  const seq = ++drawSeq;
   const pane = document.getElementById("pane");
   pane.innerHTML = head("functions") + `
     <div class="filter">
@@ -4349,6 +4552,7 @@ async function drawFunctions() {
     <div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
   document.getElementById("fnmatch").addEventListener("keydown", e => { if (e.key === "Enter") applyFnMatch(); });
   const out = await loadFunctions();
+  if (stale(seq)) return;
   if (!out) return;
   if (out.error) {
     document.getElementById("rows").innerHTML = `<div class="notice">${esc(out.error)}</div>`;
@@ -4385,10 +4589,10 @@ async function loadFunctions() {
 // The settings a function carries in its own source: native code and its
 // --@barch limits. A side panel beside the editor, opened by the gear next to
 // Save, so the editor stays uncluttered; whether it is open is remembered.
-function fnSide(source) {
+function fnSide(source, forFile) {
   const open = appSetting("fnSide", "0") === "1";
   return `<aside class="fn-side" id="fn-side"${open ? "" : " hidden"} aria-label="Function settings">
-    <h5>Function settings</h5>
+    <h5>${forFile ? "File settings" : "Function settings"}</h5>
     <label class="aot" title="Compile to native code on Save. Kept as a --!native line at the top of the source.">
       <input type="checkbox" id="fn-aot" onchange="toggleNative(this.checked)"${luauNativeMarker(source ?? "") ? " checked" : ""}> Native (AOT)</label>
     <label class="lim" title="Running time this function gets. Empty uses the space's deadline.">Deadline
@@ -4402,6 +4606,9 @@ function fnSide(source) {
     <datalist id="fn-slice-opts"></datalist>
     <div class="sub" id="fn-slice-hint"></div>
     <div class="sub bad" id="fn-hdr-note" hidden></div>
+    <div class="sub">${forFile
+      ? "Native applies when the file is loaded. Deadline and slice apply to Run, which copies them onto " + RUNNER + "."
+      : ""}</div>
     <div class="sub"><a href="#" onclick="event.preventDefault();openSpaceConfig()">Space limits</a> · applied on Save</div>
   </aside>`;
 }
@@ -5050,7 +5257,7 @@ function aiBar() {
   return `<div class="ai" id="ai">
     ${key ? `<div class="ai-row">
       <span class="ai-ico">${ico("sparkles")}</span>
-      <textarea id="ai-q" rows="1" spellcheck="true" placeholder="Ask about this function, or describe a change to make"
+      <textarea id="ai-q" rows="1" spellcheck="true" placeholder="Ask about this code, or describe a change to make"
         aria-label="Question for the model"></textarea>
       <button class="primary" id="ai-go" onclick="aiAsk()">Ask</button>
     </div>
@@ -5064,7 +5271,7 @@ function aiBar() {
       <button class="ai-link" onclick="openAppSettings()">settings</button>
     </div>` : `<div class="ai-row ai-setup">
       <span class="ai-ico">${ico("sparkles")}</span>
-      <span class="ai-note">Ask a model about this function. Paste an
+      <span class="ai-note">Ask a model about this code. Paste an
         <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter API key</a> to turn it on; it is kept in this browser only.</span>
       <span class="ai-keyin"><input type="password" id="ai-key-in" placeholder="sk-or-…" autocomplete="off" spellcheck="false"
         aria-label="OpenRouter API key" onkeydown="if(event.key==='Enter')aiSaveKey(this.value)">
@@ -5128,7 +5335,7 @@ function aiApiReference() {
 
 function aiSystem() {
   return `You help an admin write stored functions for barch, a key-value server, in Luau.
-A function is Luau source stored with SETF under a name. \`function call(...)\` is the entry point that CALLF runs; its arguments are the CALLF parameters, as strings. An optional \`function service()\` (older name: \`transport()\`) returns a table that makes the function a service: kind = "resource" (an HTTP route with route and methods = {GET = fn(req, res)}), "files" (the file store over HTTP), "http" (a server with port, bind, user and keys listing the routes), "resp" (methods called as <space>.<METHOD>, with categories), "queue" or "cron" (declarations stored in the configuration space under queues/ and cron/jobs/, naming space, call and user). Queue handlers receive (message, sequence, attempts) as separate arguments. A first line \`--!native\` compiles the function to native code. A comment in the header (before the first line of code) sets its limits, and its body must be a JSON object with quoted field names, for example \`--@barch {"deadline_ms": 5000, "slice_insns": 200000}\` or the same JSON in a \`--[[@barch ... ]]\` block. Both fields are optional whole numbers above 0; Lua table syntax such as \`{deadline_ms = 5000}\` is refused.
+A function is Luau source stored with SETF under a name. Code can also live as .luau files in a space's file store, loaded with require(":/path.luau") (or require("space:/path.luau") for another space), which returns the file's globals. \`function call(...)\` is the entry point that CALLF runs; its arguments are the CALLF parameters, as strings. An optional \`function service()\` (older name: \`transport()\`) returns a table that makes the function a service: kind = "resource" (an HTTP route with route and methods = {GET = fn(req, res)}), "files" (the file store over HTTP), "http" (a server with port, bind, user and keys listing the routes), "resp" (methods called as <space>.<METHOD>, with categories), "queue" or "cron" (declarations stored in the configuration space under queues/ and cron/jobs/, naming space, call and user). Queue handlers receive (message, sequence, attempts) as separate arguments. A first line \`--!native\` compiles the function to native code. A comment in the header (before the first line of code) sets its limits, and its body must be a JSON object with quoted field names, for example \`--@barch {"deadline_ms": 5000, "slice_insns": 200000}\` or the same JSON in a \`--[[@barch ... ]]\` block. Both fields are optional whole numbers above 0; Lua table syntax such as \`{deadline_ms = 5000}\` is refused.
 
 Answer briefly and concretely. When you change or write code, give the complete updated source in a single \`\`\`luau block, so it can replace the editor's content as a whole. Use only the barch API listed below and standard Luau; say so when something cannot be done with it.
 
@@ -5137,8 +5344,18 @@ ${aiApiReference()}`;
 }
 
 async function aiContext() {
-  const name = (document.getElementById("ek")?.value || document.querySelector("#panel .valuebox[data-fn]")?.dataset.fn || "");
-  const parts = [`Space: ${current}`, `Function: ${decodeURIComponent(name) || "(new, not saved yet)"}`];
+  const fileBox = document.querySelector("#panel .valuebox[data-file]");
+  const parts = [`Space: ${current}`];
+  if (fileBox) {
+    const path = decodeURIComponent(fileBox.dataset.file);
+    parts.push(`File: ${path} in the space's file store. It is a module, not a stored function: ` +
+      `a function loads it with require(":${path}") and gets its globals back, so what it offers ` +
+      `are global functions. The viewer's Run button calls its global call() with the arguments ` +
+      `(through a stored helper that does require(":${path}", true)). A value the file returns is ignored.`);
+  } else {
+    const name = (document.getElementById("ek")?.value || document.querySelector("#panel .valuebox[data-fn]")?.dataset.fn || "");
+    parts.push(`Function: ${decodeURIComponent(name) || "(new, not saved yet)"}`);
+  }
   if (document.getElementById("ai-c-src")?.checked) {
     const src = document.getElementById("ev")?.value ?? "";
     parts.push("Source in the editor:\n```luau\n" + src.slice(0, 60000) + "\n```");
@@ -5309,6 +5526,8 @@ function aiCopy(n, btn) {
 document.addEventListener("keydown", e => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   if ((e.key === "s" || e.key === "S") && document.querySelector("#panel .valuebox[data-newfile]")) { e.preventDefault(); saveNewFile(); return; }
+  if ((e.key === "s" || e.key === "S") && document.querySelector("#panel .valuebox[data-file] #ev")) { e.preventDefault(); saveFile(); return; }
+  if (e.key === "Enter" && document.querySelector("#panel .valuebox[data-file] .code")) { e.preventDefault(); runFile(); return; }
   const kb = document.querySelector("#panel .valuebox[data-key]");
   if (kb && (e.key === "s" || e.key === "S")) { e.preventDefault(); saveKey(kb.dataset.key || null); return; }
   const vb = document.querySelector("#panel .valuebox[data-fn]");
@@ -5718,9 +5937,12 @@ async function setConfig(name, n, host) {
 // ---- statistics -----------------------------------------------------------
 
 async function drawStats() {
+  if (tab !== "stats") return;      // another view is on screen
+  const seq = ++drawSeq;
   const pane = document.getElementById("pane");
   pane.innerHTML = head("statistics") + `<div id="rows"><div class="empty" style="padding:40px 0">Reading…</div></div>`;
   const out = await api("stats").catch(() => null);
+  if (stale(seq)) return;
   if (!out) return;
   // every category reads in alphabetical order, so a name is found by looking
   // where it belongs rather than where the server happened to list it
@@ -6257,9 +6479,9 @@ document.getElementById("qi-in").addEventListener("keydown", e => {
 document.getElementById("qi").addEventListener("mousedown", e => { if (e.target.id === "qi") qiClose(null); });
 
 // one line of text, or null when it is dismissed
-function ask(question, value, hint) {
+function ask(question, value, hint, select) {
   return new Promise(resolve => qiOpen({ placeholder: question, value: value || "", hint: hint || question + " — Enter to accept, Esc to cancel", resolve,
-    select: value ? [value.length, value.length] : null }));
+    select: select || (value ? [value.length, value.length] : null) }));
 }
 
 function paletteItems(text) {
