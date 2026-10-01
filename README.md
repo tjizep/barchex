@@ -34,10 +34,31 @@ The gear beside a space's name opens its settings. The function limits
 and `function_slice_max_insns`) each have a dropdown, and the page shows the
 value the space runs with now. A change is saved as `<space>.<setting>` in the
 `configuration` space and takes effect the next time the space loads, which
-means after a server restart. **New space** asks for the deadline and slice up
-front and writes them as settings, so the space loads with them. Long calls
-from the viewer run inside `SPACESAPI` in the `spaces` space, so raise the
-deadline of `spaces` when Call reports `FUNCTION timeout`.
+means after a server restart. Long calls from the viewer run inside
+`SPACESAPI` in the `spaces` space, so raise the deadline of `spaces` when Call
+reports `FUNCTION timeout`.
+
+**New space** asks for a name, the function deadline and the function slice.
+Open **Advanced** to choose how the space stores its keys. The viewer writes
+each choice as `<space>.<setting>` in the `configuration` space before it
+creates the space, so the space loads with them. A field left on its server
+default writes nothing, and the space keeps following the server.
+
+| Field | Setting | Values |
+|---|---|---|
+| Shards | `shards` | A whole number from 1 to 256. Server default `internal_shards`. |
+| Key order | `ordered` | `1` ordered, `0` unordered. |
+| Key routing | `range_sharded` | `Range` writes `1`. `Hash` writes nothing. Range needs ordered keys, so the choice is disabled while the space is unordered. |
+| Hybrid keys | `hybrid` | `1` on, `0` off. |
+| Compression | `compression` | `zstd` or `off`. |
+| Key split | `key_split` | A regular expression. The viewer rejects one that does not compile. |
+| Change log | `aof` | `on` writes to the server's `aof_dir`. The field is disabled while `aof_dir` is `off`. |
+
+A space cannot change its shard count, key order or routing once it holds data,
+so set them here. The viewer lists the keys of an ordered space only. Settings
+that need outside resources, such as a foreign source, a file source or arena
+paths, are keys in the `configuration` space that you edit directly before the
+space is first used.
 
 **Add a service…** in the Code view opens a new function with a `service()`
 template for an HTTP route, an HTTP server, an HTTP starter, static files,

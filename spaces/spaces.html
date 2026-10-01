@@ -1851,6 +1851,19 @@ table.keys td.k .tail { color: var(--ink); font-weight: 600; }
 .wb-status { background: var(--st-bg); }
 .wb-status .led { background: #6cc28e; box-shadow: 0 0 0 3px rgba(108, 194, 142, .2); }
 
+
+/* the advanced settings of a new space */
+details.adv { margin: 14px 0 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+details.adv > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--ink-2); padding: 2px 0; }
+details.adv > summary:hover { color: var(--ink); }
+details.adv[open] > summary { margin-bottom: 10px; }
+details.adv .limits { max-width: none; }
+details.adv .lim-row { grid-template-columns: 150px minmax(0, 220px) minmax(0, 1fr); }
+details.adv input[type=number], details.adv input:not([type]) { height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 12.5px;
+  background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); min-width: 0; width: 100%; }
+.lim-hint { font-size: 12px; color: var(--ink-3); }
+@media (max-width: 560px) { details.adv .lim-row { grid-template-columns: 1fr; gap: 4px; } }
+
 </style>
 </head>
 <body>
@@ -5941,10 +5954,84 @@ async function setSpaceLimit(space, sel) {
 // A small form rather than a prompt: the name, and the deadline and slice it
 // starts with. The two limits are written as settings before the space is made,
 // so it loads with them and they are there to find and raise later.
+// ---- the advanced settings of a new space ------------------------------------
+// Each one is written as <space>.<option> in `configuration` before the space is
+// built, because barch reads them when the space first loads and the shard count,
+// key order and routing cannot change once there are keys. A field left on its
+// server default writes nothing, so the space keeps following the server.
+
+const isOn = v => ["on", "yes", "true", "1"].includes(String(v).toLowerCase());
+
+function advancedFields(g) {
+  const sel = (id, opts, onchange) => `<select id="${id}"${onchange ? ` onchange="${onchange}"` : ""}>${opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>`;
+  const dflt = on => `Server default (${isOn(on) ? "on" : "off"})`;
+  const aofDir = g.aof_dir && g.aof_dir !== "off" && g.aof_dir !== "no";
+  const row = (name, tip, control, hint) => `<label class="lim-row" title="${esc(tip)}"><span class="lim-name">${name} <i class="tip">${ico("more")}</i></span>${control}<span class="lim-hint" data-hint>${hint}</span></label>`;
+  return `<details class="adv" id="ns-adv"><summary>Advanced</summary>
+    <div class="limits">
+      ${row("Shards", "How many pieces the space is cut into. More shards let more clients write at once.",
+        `<input id="ns-shards" type="number" min="1" max="256" step="1" placeholder="${esc(g.internal_shards || "8")}" inputmode="numeric">`,
+        `Server default ${esc(g.internal_shards || "")}`)}
+      ${row("Key order", "Ordered keeps keys sorted, which sorted listings, MIN, MAX and range reads need. Unordered uses a hash and is cheaper.",
+        sel("ns-ordered", [["", dflt(g.ordered_keys)], ["1", "Ordered"], ["0", "Unordered"]], "syncAdvanced()"),
+        `The viewer lists the keys of ordered spaces only.`)}
+      ${row("Key routing", "Hash spreads keys evenly over the shards. Range keeps neighbouring keys together and needs ordered keys.",
+        sel("ns-routing", [["hash", "Hash"], ["range", "Range"]]),
+        `<span id="ns-routing-note"></span>`)}
+      ${row("Hybrid keys", "Keeps short keys inside the tree node.",
+        sel("ns-hybrid", [["", dflt(g.hybrid_keys)], ["1", "On"], ["0", "Off"]]), ``)}
+      ${row("Compression", "Compresses stored values with zstd. It saves memory and costs processor time.",
+        sel("ns-compress", [["", `Server default (${g.compression && !["none", "off", "no"].includes(g.compression) ? g.compression : "off"})`], ["zstd", "zstd"], ["off", "Off"]]), ``)}
+      ${row("Key split", "A regular expression that cuts a key into parts, for a database source's $0, $1 ... and for how the key is stored. Leave empty to cut at a space.",
+        `<input id="ns-split" placeholder="for example :" autocomplete="off" spellcheck="false">`, ``)}
+      ${row("Change log", "Records every write in an append-only file so the space can be replayed after a crash.",
+        `<select id="ns-aof"${aofDir ? "" : " disabled"}><option value="">Off</option><option value="on">On</option></select>`,
+        aofDir ? `Written to ${esc(g.aof_dir)}` : `Set the server's aof_dir to turn this on.`)}
+    </div>
+  </details>`;
+}
+
+// range routing only means something where keys are in order
+function syncAdvanced() {
+  const o = document.getElementById("ns-ordered"), r = document.getElementById("ns-routing");
+  if (!o || !r) return;
+  const server = serverLimitsCache || {};
+  const ordered = o.value === "" ? isOn(server.ordered_keys ?? "on") : o.value === "1";
+  const range = r.querySelector('option[value="range"]');
+  range.disabled = !ordered;
+  if (!ordered && r.value === "range") r.value = "hash";
+  const note = document.getElementById("ns-routing-note");
+  if (note) note.textContent = ordered ? "" : "Range routing needs ordered keys.";
+}
+let serverLimitsCache = null;
+
+// the options to write for a new space, or null after saying what is wrong
+function advancedChoices(g) {
+  const v = id => (document.getElementById(id)?.value ?? "").trim();
+  const out = [];
+  const shards = v("ns-shards");
+  if (shards) {
+    if (!/^[1-9][0-9]{0,2}$/.test(shards) || Number(shards) > 256) { toast("shards is a whole number from 1 to 256", "warn"); return null; }
+    if (shards !== String(g.internal_shards)) out.push(["shards", shards]);
+  }
+  if (v("ns-ordered")) out.push(["ordered", v("ns-ordered")]);
+  if (v("ns-routing") === "range") out.push(["range_sharded", "1"]);
+  if (v("ns-hybrid")) out.push(["hybrid", v("ns-hybrid")]);
+  if (v("ns-compress")) out.push(["compression", v("ns-compress")]);
+  const split = document.getElementById("ns-split")?.value ?? "";
+  if (split) {
+    try { new RegExp(split); } catch { toast("key split is not a regular expression", "warn"); return null; }
+    out.push(["key_split", split]);
+  }
+  if (v("ns-aof")) out.push(["aof", v("ns-aof")]);
+  return out;
+}
+
 async function newSpace(ev) {
   if (ev) ev.preventDefault();
   const out = await api("config").catch(() => null);
   const server = serverLimits(out);
+  serverLimitsCache = server;
   const dl = LIMITS[0], sl = LIMITS[2];
   const pick = (L, id, dflt) => `<select id="${id}">${[...new Set([...L.presets, Number(dflt) || 0])].filter(Boolean).sort((a, b) => a - b)
     .map(v => `<option value="${v}"${v === Number(dflt) ? " selected" : ""}>${fmtLimit(v, L.unit)}${v === Number(dflt) ? " · server default" : ""}</option>`).join("")}</select>`;
@@ -5956,9 +6043,11 @@ async function newSpace(ev) {
         <label class="lim-row" title="${esc(dl.tip)}"><span class="lim-name">Function deadline <i class="tip">${ico("more")}</i></span>${pick(dl, "ns-deadline", server[dl.server] || 1000)}</label>
         <label class="lim-row" title="${esc(sl.tip)}"><span class="lim-name">Function slice <i class="tip">${ico("more")}</i></span>${pick(sl, "ns-slice", server[sl.server] || 1000000)}</label>
       </div>
+      ${advancedFields(server)}
       <div class="row"><button class="primary" onclick="createSpace()">Create</button></div>
-      <div class="lim-foot">Change these later with the ${ico("gear")} next to the space's name.</div>
+      <div class="lim-foot">Change the function limits later with the ${ico("gear")} next to the space's name. The settings under Advanced are fixed once the space holds data.</div>
     </div>`, { space: null, id: "new-space", icon: "plus" });
+  syncAdvanced();
   const name = document.getElementById("ns-name");
   name.focus();
   name.addEventListener("keydown", e => { if (e.key === "Enter") createSpace(); });
@@ -5969,10 +6058,16 @@ async function createSpace() {
   if (!name) return document.getElementById("ns-name")?.focus();
   if (!/^[A-Za-z0-9_]+$/.test(name)) return toast("a space name is letters, digits and underscores", "warn");
   if (spaces.some(s => s.name === name)) return toast(`${name} already exists`, "warn");
-  // the limits first: the space reads them when it is built
+  // the settings first: the space reads them when it is built
+  const adv = advancedChoices(serverLimitsCache || {});
+  if (adv === null) return;
+  const opts = [];
   for (const [id, opt] of [["ns-deadline", "function_deadline_ms"], ["ns-slice", "function_slice_insns"]]) {
     const v = document.getElementById(id)?.value;
-    if (v && !await write("key_put", { space: "configuration", key: name + "." + opt }, v)) return;
+    if (v) opts.push([opt, v]);
+  }
+  for (const [opt, v] of [...opts, ...adv]) {
+    if (!await write("key_put", { space: "configuration", key: name + "." + opt }, v)) return;
   }
   if (!await write("space_add", { name })) return;
   shut();
