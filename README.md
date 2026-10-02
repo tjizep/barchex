@@ -1,17 +1,47 @@
 # barchex
 
-Extensions for barch, packaged as a git repository that `FUNCTIONS SYNC` can
-install.
+Extensions for barch, packaged as a git repository that barchd can install.
 
-A top-level folder becomes a key space with that name. Do not set
-`git/repositories/barchex/space` — that would dump every folder into one
-space and wipe whatever functions were already there.
+## Install with barchd -g
+
+Start barchd with the repository, and it installs barchex on startup and
+again on every sync:
 
 ```
+barchd --port 14000 --dir data -g https://github.com/tjizep/barchex user=default
+```
+
+`package.luau` at the root of the repository says what goes where. Each sync
+creates the `spaces`, `vectors`, `s3` and `watchdog` key spaces, loads each
+folder of the same name into its space, and starts the space viewer at
+`http://127.0.0.1:18091/spaces`. The viewer comes back after a restart. Keep
+it on loopback: `SPACESAPI` can export, import and change settings.
+
+The viewer's routes run as the `web` user. The package's after hook,
+`VIEWERGRANTS`, adds the categories the viewer needs to `web`'s rule:
+`read`, `write`, `data`, `keys`, `function`, `config` and `dangerous`. A
+category that `web`'s rule already sets, either way, stays as it is, so a
+`+outbound` granted for S3 calls from the viewer survives a restart. The hook
+runs as the repository's `user`. Without `user=`, barchd skips it, and you
+grant `web` its rights yourself with the `ACL SETUSER` line at the end of this
+page.
+
+The `tests/` folder is left out of the server. To install barchex into a
+barchd that is already running, use `FUNCTIONS SYNC` as described in
+[Install with FUNCTIONS SYNC](#install-with-functions-sync).
+
+## What it contains
+
+A top-level folder becomes a key space with that name.
+
+```
+package.luau       →  how barchd -g installs this repository
 spaces/
   spacesapi.luau   →  function SPACESAPI  (GET/POST /api/admin/*)
   spacesui.luau    →  function SPACESUI   (GET /spaces)
   users.luau       →  function USERS      (accounts in this space)
+  spaceshttp.luau  →  function SPACESHTTP (the viewer's HTTP server)
+  viewergrants.luau → function VIEWERGRANTS (package.luau's after hook)
   spaces.html      →  key spaces.html
 vectors/
   vectors.luau     →  function VECTORS    (vectors.SET/CLOSEST/TUNE/PARAMS)
@@ -146,11 +176,10 @@ space). Calling out to the network requires the `outbound` ACL category.
 From the viewer, select the `s3` space and use the `CALLF S3 …` form in the
 Call box or the console; the console does not accept the dotted `s3.S3`
 command. The viewer calls out as its HTTP user, so that user needs
-`outbound` too. `ACL SETUSER` states the complete rule, so add it to the
-rule the HTTP user already has:
+`outbound` too. `ACL SETUSER` adds a category to the user's rule:
 
 ```
-ACL SETUSER web on +read +write +data +keys +function +config +dangerous +outbound
+ACL SETUSER web on +outbound
 ```
 
 Without it, a call fails with `http.request needs the outbound category`.
@@ -274,6 +303,13 @@ cannot be a `…password` key, since scripts cannot read those. Anyone who can
 read `configuration` can therefore see it. The cron user needs `outbound`.
 After a restart, barch 0.5.8 does not load the `watchdog` space until something
 touches it, so cron cannot call into it until `watchdog:DBSIZE` wakes it up.
+An install from `package.luau` opens `watchdog` on every sync, including the
+first one after a restart.
+
+## Install with FUNCTIONS SYNC
+
+To add barchex to a server that is already running, configure the repository
+in the `configuration` space and sync it:
 
 ```
 CONFIG SET functions_dir /path/to/checkouts
@@ -284,6 +320,7 @@ SET git/repositories/barchex/pull   on
 SET git/repositories/barchex/branch main
 SET git/repositories/barchex/as     keys
 SET git/repositories/barchex/space  off
+SET git/repositories/barchex/user   default   # runs VIEWERGRANTS; omit to grant web yourself
 
 FUNCTIONS SYNC barchex
 FUNCTIONS STATUS
@@ -291,13 +328,17 @@ USE spaces
 KEYSF
 ```
 
-`as = keys` is required: `as = fs` would put the Luau in the file store, where
-it would never become a function.
+The sync applies `package.luau` the same way `barchd -g` does: it loads the
+four folders, starts the viewer on port 18091, and runs the after hook. Leave
+`as` on `keys` and `space` off; barch refuses a package that lists folders
+while either is set to something else.
 
-`SPACESUI` only answers when HTTP is started in the `spaces` space. The HTTP
-user also needs the rights requested by the page's buttons: `SETUSER` states
-the complete rule, and `+dangerous` lets Import and Export through
-(`IMPORT` carries the `dangerous` category; `EXPORT` does not).
+To start the viewer by hand, for example on another port, run
+`HTTP START SPACESHTTP <port> 127.0.0.1` in the `spaces` space. The HTTP user
+needs the rights requested by the page's buttons. `+dangerous` lets Import and
+Export through (`IMPORT` carries the `dangerous` category; `EXPORT` does not).
+`ACL SETUSER` adds the categories it names to the user's rule and leaves the
+others as they are.
 
 ```
 ACL SETUSER web on +read +write +data +keys +function +config +dangerous
