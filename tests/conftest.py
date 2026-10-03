@@ -134,50 +134,10 @@ def set_configuration(client, values: dict[str, str]) -> None:
         client.execute_command("SET", key, value)
 
 
-WEB_ACL = ["on", "+read", "+write", "+data", "+keys", "+function", "+config", "+dangerous"]
-
-
-@pytest.fixture
-def spaces_http(server):
-    client = server.client
-    port = free_port()
-    client.execute_command("ACL", "SETUSER", "web", *WEB_ACL)
-    client.execute_command("USE", "spaces")
-    client.execute_command("FLUSHDB")
-    install(client, "spaces", "USERS", "spaces/users.luau")
-    install(client, "spaces", "SPACESUI", "spaces/spacesui.luau")
-    install(client, "spaces", "SPACESAPI", "spaces/spacesapi.luau")
-    client.execute_command("SET", "spaces.html", source("spaces/spaces.html"))
-    client.execute_command("SET", "commands.json", source("spaces/commands.json"))
-    conf = f'''
-function call() return "http" end
-function transport()
-    return {{
-        kind = "http",
-        port = {port},
-        bind = "127.0.0.1",
-        user = "web",
-        keys = {{"USERS", "SPACESUI", "SPACESAPI"}},
-    }}
-end
-'''
-    client.execute_command("SETF", "HTTPCONF", conf)
-    client.execute_command("HTTP", "START", "HTTPCONF", str(port), "127.0.0.1")
-    wait_for_tcp(port)
-    try:
-        yield port
-    finally:
-        try:
-            client.execute_command("HTTP", "STOP")
-        except Exception:
-            pass
-
-
 __all__ = [
     "Server",
     "client",
     "server",
-    "spaces_http",
     "source",
     "install",
     "set_configuration",

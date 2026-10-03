@@ -8,11 +8,9 @@ beside a development server.
 
 ## What it covers
 
+- The viewer's tests moved to
+  [barch-spaces](https://github.com/tjizep/barch-spaces) with the viewer.
 - `test_sigv4.py` checks the signer against the request examples AWS publishes.
-- `test_spaces_viewer.py` starts HTTP for the `spaces` space and runs the
-  viewer end to end: registration, the first account becoming admin, the
-  session cookie, the admin and non-admin API split, key and function writes,
-  space creation, sign-on, and sign-out.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`
@@ -27,8 +25,7 @@ beside a development server.
   recovery message, retry after a refused delivery, the message formats, and
   `INSTALL`/`UNINSTALL`.
 - `test_stress.py` is opt-in. It measures concurrent inserts and p50/p95/p99
-  query latency across thousands of HNSW vectors, creates thousands of HTTP
-  sign-on sessions under CPU pressure, and checks that the configured memory
+  query latency across thousands of HNSW vectors, and checks that the configured memory
   ceiling rejects writes while the server remains available. An optional soak
   grows and queries the vector graph for a bounded interval.
 

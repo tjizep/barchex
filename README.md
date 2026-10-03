@@ -8,23 +8,22 @@ Start barchd with the repository, and it installs barchex on startup and
 again on every sync:
 
 ```
-barchd --port 14000 --dir data -g https://github.com/tjizep/barchex user=default
+barchd --port 14000 --dir data -g https://github.com/tjizep/barchex
 ```
 
 `package.luau` at the root of the repository says what goes where. Each sync
-creates the `spaces`, `vectors`, `s3` and `watchdog` key spaces, loads each
-folder of the same name into its space, and starts the space viewer at
-`http://127.0.0.1:18091/spaces`. The viewer comes back after a restart. Keep
-it on loopback: `SPACESAPI` can export, import and change settings.
+creates the `vectors`, `s3` and `watchdog` key spaces and loads each folder of the
+same name into its space.
 
-The viewer's routes run as the `web` user. The package's after hook,
-`VIEWERGRANTS`, adds the categories the viewer needs to `web`'s rule:
-`read`, `write`, `data`, `keys`, `function`, `config` and `dangerous`. A
-category that `web`'s rule already sets, either way, stays as it is, so a
-`+outbound` granted for S3 calls from the viewer survives a restart. The hook
-runs as the repository's `user`. Without `user=`, barchd skips it, and you
-grant `web` its rights yourself with the `ACL SETUSER` line at the end of this
-page.
+The space viewer that used to be part of barchex is a repository of its own now,
+[barch-spaces](https://github.com/tjizep/barch-spaces). To have it beside barchex,
+give barchd both:
+
+```
+barchd --port 14000 --dir data \
+  -g https://github.com/tjizep/barchex \
+  -g https://github.com/tjizep/barch-spaces user=default
+```
 
 The `tests/` folder is left out of the server. To install barchex into a
 barchd that is already running, use `FUNCTIONS SYNC` as described in
@@ -36,13 +35,6 @@ A top-level folder becomes a key space with that name.
 
 ```
 package.luau       →  how barchd -g installs this repository
-spaces/
-  spacesapi.luau   →  function SPACESAPI  (GET/POST /api/admin/*)
-  spacesui.luau    →  function SPACESUI   (GET /spaces)
-  users.luau       →  function USERS      (accounts in this space)
-  spaceshttp.luau  →  function SPACESHTTP (the viewer's HTTP server)
-  viewergrants.luau → function VIEWERGRANTS (package.luau's after hook)
-  spaces.html      →  key spaces.html
 vectors/
   vectors.luau     →  function VECTORS    (vectors.SET/CLOSEST/TUNE/PARAMS)
   vgraph.luau      →  required by VECTORS (HNSW graph over nk f32 vectors)
@@ -54,74 +46,7 @@ watchdog/
   watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
 ```
 
-USERS keeps `user:`, `sess:` and `admin:` keys in `spaces`. Until an admin
-exists, the viewer treats you as a local admin. The first account to register
-— or the first existing account to sign on — becomes admin.
-It does not use a `users` key space.
 
-The gear beside a space's name opens its settings. The function limits
-(`function_deadline_ms`, `function_deadline_max_ms`, `function_slice_insns`
-and `function_slice_max_insns`) each have a dropdown, and the page shows the
-value the space runs with now. A change is saved as `<space>.<setting>` in the
-`configuration` space and takes effect the next time the space loads, which
-means after a server restart. Long calls from the viewer run inside
-`SPACESAPI` in the `spaces` space, so raise the deadline of `spaces` when Call
-reports `FUNCTION timeout`.
-
-**New space** asks for a name, the function deadline and the function slice.
-Open **Advanced** to choose how the space stores its keys. The viewer writes
-each choice as `<space>.<setting>` in the `configuration` space before it
-creates the space, so the space loads with them. A field left on its server
-default writes nothing, and the space keeps following the server.
-
-| Field | Setting | Values |
-|---|---|---|
-| Shards | `shards` | A whole number from 1 to 256. Server default `internal_shards`. |
-| Key order | `ordered` | `1` ordered, `0` unordered. |
-| Key routing | `range_sharded` | `Range` writes `1`. `Hash` writes nothing. Range needs ordered keys, so the choice is disabled while the space is unordered. |
-| Hybrid keys | `hybrid` | `1` on, `0` off. |
-| Compression | `compression` | `zstd` or `off`. |
-| Key split | `key_split` | A regular expression. The viewer rejects one that does not compile. |
-| Change log | `aof` | `on` writes to the server's `aof_dir`. The field is disabled while `aof_dir` is `off`. |
-
-A space cannot change its shard count, key order or routing once it holds data,
-so set them here. The viewer lists the keys of an ordered space only. Settings
-that need outside resources, such as a foreign source, a file source or arena
-paths, are keys in the `configuration` space that you edit directly before the
-space is first used.
-
-**Add a service…** in the Code view opens a new function with a `service()`
-template for an HTTP route, an HTTP server, an HTTP starter, static files,
-RESP commands, a queue consumer or a cron job. The comments in each template
-say where it is stored and how to start it; queue and cron templates open in
-`configuration`. The HTTP starter runs `HTTP START` for the space when you
-press Call, and a cron job can call it every minute to bring the server back
-after a restart.
-
-In the Files view, text files open in an editor with **Save**, and `.luau`
-files get the Luau editor and a **Run** box. A `.luau` file is a module that
-a stored function loads with `require(":/path/file.luau")`; Run does that
-through `RUNLUAU`, a small function it stores in the space the first time,
-and calls the file's `call()` with the arguments. The file is read fresh on
-each run, and errors point at the file's own lines. The gear beside Save sets
-**Native**, **Deadline** and **Slice** as header lines in the file. barch
-compiles a required file natively when it has `--!native`, but takes a call's
-deadline and slice from the function that is called, so Run copies the file's
-`--@barch` line onto `RUNLUAU` before it calls it. A function that requires
-the file runs with its own limits.
-
-The function editor and the `.luau` file editor have a prompt bar for asking
-a model about the code or for describing a change. Paste an OpenRouter API key into the bar, or into
-App settings, to turn it on. The browser sends the question straight to
-`openrouter.ai`, together with the context ticked under the bar: the source
-in the editor, the last Call output, and the first 20 keys of the space with
-a short preview of each. Leave the key sample unticked when the space holds
-data that should stay on the server. The key is stored in the browser's
-`localStorage`, and barch never receives it. Choose the model in App settings;
-the default is the newest Claude Sonnet that OpenRouter lists. **Apply to
-editor** replaces the editor's content with the answer's code block. The
-stored function changes when you press Save, or Call while Save before Call
-is on (the default).
 
 VECTORS is the `examples/hnsw` index with nk vectors in place of words.
 `vectors.SET <name> <buffer>` stores a point; pass the vector as ONE argument:
@@ -133,9 +58,9 @@ as an EX/NX/GET option and refuses it before the function is reached).
 Distance defaults to cosine. TUNE can switch it to `euclidean` and back
 without a rebuild; TUNE also sets M/efConstruction/efSearch/heuristic, and
 PARAMS reports them. Write through the dotted form in the space (`USE vectors`
-first; the colon form writes a plain key). The console shares its command list
-(`spaces/commands.json`); add the four VECTORS commands there
-if the dropdown should offer them.
+first; the colon form writes a plain key). The barch-spaces console takes its command
+list from that repository's `spaces/commands.json`; add the four VECTORS commands
+there if its dropdown should offer them.
 
 S3 works with AWS and any service that speaks its API (MinIO, R2, B2, Wasabi).
 The function sandbox does not provide hashing or a clock, so SIGV4 implements
@@ -173,7 +98,7 @@ local up = s3.upload("bucket", "big/key")            -- multipart: up:part(body)
 `s3.S3 LS bucket [prefix]`, `GET`, `STAT`, `PUT`, `DEL`, `URL`, `BUCKETS`
 and `CHECK` do the same from a RESP connection (or `CALLF S3 …` in the `s3`
 space). Calling out to the network requires the `outbound` ACL category.
-From the viewer, select the `s3` space and use the `CALLF S3 …` form in the
+From the [barch-spaces](https://github.com/tjizep/barch-spaces) viewer, select the `s3` space and use the `CALLF S3 …` form in the
 Call box or the console; the console does not accept the dotted `s3.S3`
 command. The viewer calls out as its HTTP user, so that user needs
 `outbound` too. `ACL SETUSER` adds a category to the user's rule:
@@ -320,30 +245,14 @@ SET git/repositories/barchex/pull   on
 SET git/repositories/barchex/branch main
 SET git/repositories/barchex/as     keys
 SET git/repositories/barchex/space  off
-SET git/repositories/barchex/user   default   # runs VIEWERGRANTS; omit to grant web yourself
 
 FUNCTIONS SYNC barchex
 FUNCTIONS STATUS
-USE spaces
+USE vectors
 KEYSF
 ```
 
-The sync applies `package.luau` the same way `barchd -g` does: it loads the
-four folders, starts the viewer on port 18091, and runs the after hook. Leave
+The sync applies `package.luau` the same way `barchd -g` does: it creates the
+three spaces and loads the three folders. Leave
 `as` on `keys` and `space` off; barch refuses a package that lists folders
 while either is set to something else.
-
-To start the viewer by hand, for example on another port, run
-`HTTP START SPACESHTTP <port> 127.0.0.1` in the `spaces` space. The HTTP user
-needs the rights requested by the page's buttons. `+dangerous` lets Import and
-Export through (`IMPORT` carries the `dangerous` category; `EXPORT` does not).
-`ACL SETUSER` adds the categories it names to the user's rule and leaves the
-others as they are.
-
-```
-ACL SETUSER web on +read +write +data +keys +function +config +dangerous
-```
-
-`+admin` is not a grantable right — `admin` is a preset name, and command
-requirements that say `admin` are ignored by `cats2vec`. A `SETUSER` that
-includes it therefore fails with `ACL category not found`.
