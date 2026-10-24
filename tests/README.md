@@ -32,6 +32,10 @@ beside a development server.
   index entries after each step, that a refused create leaves nothing
   behind, that old rows read a new field's default, the error messages, and
   that a migration committed during a transaction makes it conflict.
+- `test_query.py` runs queries in optimistic and pessimistic transactions
+  and checks the rows and the index each one picks. It also links, follows
+  and unlinks edges, checks that `delete` removes a row's edges, and checks
+  the query and edge errors.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

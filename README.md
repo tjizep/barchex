@@ -50,7 +50,7 @@ ent/
   schema.luau      →  function SCHEMA     (ent tables, fields, indexes and edges)
   layout.luau      →  function LAYOUT     (the store keys of ent rows, indexes and edges)
   migrate.luau     →  function MIGRATE    (the ent catalog and index builds)
-  client.luau      →  function CLIENT     (ent create, get, update and delete)
+  client.luau      →  function CLIENT     (ent rows, edges and queries)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
@@ -415,6 +415,51 @@ writers of one value wait for each other. Inside a transaction you already
 run, `ent.client(pessimistic)` answers the same `c`. Each new id comes from
 one counter per table, so concurrent creates in one table conflict and
 retry. A refused call writes nothing, so `fn` can catch its error and go on.
+
+Edges link rows. Pass an edge's name to `create` with an id, a row, or a
+list of them, or call `link` and `unlink`:
+
+```lua
+local p = c.Post:create { title = "hi", author = u }   -- edge.from author
+c.User:link("friends", 1, 2)                          -- edge.to friends
+c.User:unlink("friends", 1, 2)                        -- false if not linked
+```
+
+A `:unique()` edge links each row to at most one row, and `create` and
+`link` refuse a second one. `delete` removes the row's edges in both
+directions, including edges that only the other table declares.
+
+Queries read through the best index for their filters:
+
+```lua
+c.User:query()
+    :where("name", "=", "ann")            -- = ~= < <= > >=
+    :where("age", ">", 30)
+    :where(function(r) return r.age % 2 == 0 end)
+    :order("age", "desc"):offset(10):limit(10)
+    :all()                                -- or first, ids, count
+c.User:query():where("id", "=", 1):queryPosts():all()  -- follow an edge
+```
+
+| method | effect |
+|---|---|
+| `where(field, op, value)` | keeps rows where the comparison holds; a field without a value matches only `= nil` |
+| `where(fn)` | keeps rows for which `fn(row)` is true |
+| `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; equal values come in id order, missing values first |
+| `limit(n)`, `offset(n)` | applied after the order |
+| `using(name)` | reads through the named index, or `"id"` for the table |
+| `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
+| `all()`, `first()`, `ids()`, `count()` | runs the query |
+| `explain()` | the plan, such as `by_name_age = name range age` |
+
+The query picks the index whose leading fields match the most `=` filters,
+then one range filter on the next field. When that index already returns
+rows in the requested order, the query stops reading at the limit.
+Otherwise `explain` ends with `then sort`, and the query reads every
+matching row before sorting. A `desc` order always reads every match. A
+unique index is used only when every one of its fields has an `=` filter,
+because it leaves out rows with a missing value. Filters on other fields
+are checked on each row read.
 
 Errors start with `ENT`, or with `ROWCODEC` for a value of the wrong kind or
 a missing required field. `ent.CLIENT` runs a self-check inside a

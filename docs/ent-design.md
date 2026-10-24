@@ -6,8 +6,9 @@ read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
 
 This page records the plan and the decisions made so far. The key and row
-codecs, the schema language, the key layout, migrations and row reads and
-writes are built; queries and edges are planned.
+codecs, the schema language, the key layout, migrations, row reads and
+writes, queries and edges are built. The open questions below are what
+remains.
 
 | part | module | status |
 |---|---|---|
@@ -17,7 +18,7 @@ writes are built; queries and edges are planned.
 | storage layout | `ent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
 | graph catalog and migrations | `ent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
 | create, get, update and delete with index upkeep | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| queries and edges | | planned |
+| queries and edges | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -170,17 +171,27 @@ ent.tx(function(c)
     local u = c.User:create { email = "a@b", name = "A" }
     c.Post:create { title = "hi", author = u }
     return c.User:query():where("email", "=", "a@b")
-        :queryPosts():order("created", "desc"):limit(10):all()
+        :queryPosts():order("title", "desc"):limit(10):all()
 end)
 ```
 
-Luau metatables build the typed clients at run time, so ent needs no code
-generation step. A query uses the index with the longest prefix matched by
-its equality filters plus one range filter. Without a matching index it scans
-the table and filters each row. `:using(index)` names the index to use.
+Luau metatables build the clients at run time, so ent needs no code
+generation step; `queryPosts` is looked up when it is called. A query uses
+the index with the longest prefix matched by its equality filters plus one
+range filter. Without a matching index it scans the table and filters each
+row. `:using(index)` names the index to use, and `:explain()` answers the
+plan. Index bounds may let in extra keys, so every filter is checked again
+on the row.
+
+Following an edge collects the linked ids, then reads those rows in id
+order. A later version could intersect them with an index on the target.
 
 ## Open questions
 
+- **Unique edges in pessimistic transactions.** `link` checks a unique edge
+  with a range read, which takes a shared lock. Two links to one row at once
+  can both hold it and deadlock; `barch.tx.run` retries on `TXDEADLOCK`. An
+  exclusive range read would order them instead.
 - **Descending order.** `barch.store.range` walks forward only, so
   `order(..., "desc")` with a limit reads the whole range. A reverse range, or
   a descending key encoding, would fix this.

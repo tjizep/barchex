@@ -112,7 +112,8 @@ function counter(t: any): string
 end
 
 -- Every key under `prefix`, `limit` at a time: calls each(key) for each and
--- answers how many there were. `each` may remove the key it is given.
+-- answers how many there were. `each` may remove the key it is given, here
+-- and in scan.
 function walk(prefix: string, each: (string) -> (), limit: number?): number
     local hi = kc.after(prefix)
     local lo, n, page = prefix, 0, limit or 1000
@@ -126,6 +127,24 @@ function walk(prefix: string, each: (string) -> (), limit: number?): number
             return n
         end
         -- no key here holds a NUL or a \1, so this is the next key there can be
+        lo = keys[#keys] .. "\2"
+    end
+end
+
+-- Calls each(key) for every key from `lo` up to `hi`, a page at a time,
+-- until `each` answers true. Answers whether it stopped early.
+function scan(lo: string, hi: string, each: (string) -> boolean?, limit: number?): boolean
+    local page = limit or 1000
+    while true do
+        local keys = barch.store.range(lo, hi, page)
+        for _, k in keys do
+            if each(k) then
+                return true
+            end
+        end
+        if #keys < page then
+            return false
+        end
         lo = keys[#keys] .. "\2"
     end
 end
