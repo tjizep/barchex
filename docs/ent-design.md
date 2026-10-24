@@ -6,13 +6,14 @@ read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
 
 This page records the plan and the decisions made so far. The key and row
-codecs are built; the remaining parts are planned.
+codecs and the schema language are built; the remaining parts are planned.
 
 | part | module | status |
 |---|---|---|
 | key codec | `ent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
 | row codecs | `ent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
-| schema code, graph catalog, `MIGRATE` | | planned |
+| schema language and field ids | `ent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
+| graph catalog, `MIGRATE` | | planned |
 | create, get, update and delete with index upkeep | | planned |
 | queries and edges | | planned |
 
@@ -37,13 +38,15 @@ ent depends on these barch behaviors. Each one shapes a decision below.
 - **`barch.store.range` answers keys only**, at most 10,000 per call. Reading
   a row found through an index costs one more `get`.
 
-These barch changes are in progress:
+- **A pessimistic transaction locks what it walks.** `RANGE`, `COUNT` and
+  `barch.store.range` take a shared lock on `[lo, hi)`, so a key written
+  into that range by anyone else waits for the transaction to end.
+- **`GRAPH` runs inside a transaction.** In a pessimistic transaction every
+  `GRAPH` call locks the whole graph, shared for a read and exclusive for a
+  write, so ent reads the catalog once per transaction.
 
-- `barch.graph` reads and writes inside a transaction. Until then, a
-  transaction cannot read the catalog.
-- `RANGE` and `COUNT` inside a pessimistic transaction. Whether a pessimistic
-  range locks the range decides how a pessimistic unique check works; see
-  [Open questions](#open-questions).
+`barch.graph` from Luau is still refused inside a transaction (TODO 708).
+Until that changes, ent cannot read the catalog from a transaction.
 
 ## Schema
 
@@ -53,17 +56,32 @@ ent uses Go code:
 ```lua
 local ent = require("ent.SCHEMA")
 
-return ent.schema "User" {
+local User = ent.schema "User" {
     format = "binary",
     fields = {
-        ent.string "email":unique(),
-        ent.string "name",
-        ent.int "age":optional(),
+        ent.field.string "email":unique(),
+        ent.field.string "name",
+        ent.field.int "age":optional(),
     },
-    edges = { ent.to "posts" "Post" },
+    edges = { ent.edge.to "posts" "Post" },
     indexes = { ent.index("name", "age") },
 }
+local Post = ent.schema "Post" {
+    fields = { ent.field.string "title" },
+    edges = { ent.edge.from "author" "User":ref "posts":unique() },
+}
+return ent.graph { User, Post }
 ```
+
+The builders live under `ent.field` and `ent.edge`, as in Go ent's `field`
+and `edge` packages. A module's global named `string` would hide the string
+library from the code that requires it.
+
+Every field gets a row codec id. `ent.ids` keeps the ids an earlier version
+gave out, follows `:was("old_name")` across a rename, and numbers new fields
+after the highest id ever used, so a dropped field's old values are skipped
+rather than read as a new field. The catalog will store each table's ids and
+next id.
 
 `MIGRATE` writes the declared schema into the graph as the catalog, so the
 schema can be browsed and linked:
@@ -124,8 +142,8 @@ change format and convert its rows over time.
 Field ids stay with a field for the table's life. A row written by an older
 schema reads with the current field list: a field added since reads as nil,
 a removed field's value is skipped, and a number reads into an `int` or
-`float` field when it fits that kind. A `json` row names fields, so renaming a field in a `json` table
-needs `MIGRATE` to rewrite its rows.
+`float` field when it fits that kind. A `json` row names fields, so renaming
+a field in a `json` table needs `MIGRATE` to rewrite its rows.
 
 ## Queries
 
@@ -145,9 +163,10 @@ the table and filters each row. `:using(index)` names the index to use.
 
 ## Open questions
 
-- **Pessimistic unique checks.** If a pessimistic range locks the range, a
-  unique check is a range read. Otherwise ent writes the `ent.u` key before
-  checking it, so the key lock orders two inserts of the same value.
+- **Pessimistic unique checks.** A pessimistic `get` of the `ent.u` key
+  locks it shared, so two inserts of one value both hold the shared lock and
+  deadlock when they write. Reading it with `get(key, true)` takes the
+  exclusive lock at once and orders them instead.
 - **Descending order.** `barch.store.range` walks forward only, so
   `order(..., "desc")` with a limit reads the whole range. A reverse range, or
   a descending key encoding, would fix this.

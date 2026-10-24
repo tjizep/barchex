@@ -47,6 +47,7 @@ watchdog/
 ent/
   keycodec.luau    →  function KEYCODEC   (order-preserving keys for ent indexes)
   rowcodec.luau    →  function ROWCODEC   (ent rows as json, text or binary)
+  schema.luau      →  function SCHEMA     (ent tables, fields, indexes and edges)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
@@ -299,6 +300,49 @@ with an older field list reads with the current one: added fields are nil,
 values for removed fields are skipped, an `int` value reads into a `float`
 field, and a whole-number `float` value in range reads into an `int` field.
 Other kind changes raise an error until the rows are rewritten. `ent.ROWCODEC` runs the module's self-check and answers `ok`.
+
+SCHEMA declares ent tables in Luau. `ent.schema` checks one table and
+`ent.graph` checks the tables together; each raises an error that starts with
+`SCHEMA` and names the problem:
+
+```lua
+local ent = require("ent.SCHEMA")
+local User = ent.schema "User" {
+    format = "json",                              -- default "binary"
+    fields = {
+        ent.field.string "email":unique(),        -- adds unique index by_email
+        ent.field.string "name",
+        ent.field.int "age":optional(),
+        ent.field.bool "admin":default(false),
+    },
+    edges = { ent.edge.to "posts" "Post" },
+    indexes = { ent.index("name", "age") },       -- index by_name_age
+}
+local Post = ent.schema "Post" {
+    fields = { ent.field.string "title" },
+    edges = { ent.edge.from "author" "User":ref "posts":unique() },
+}
+local app = ent.graph { User, Post }
+local version, fields = ent.ids(User, previous)   -- fields for rc.fields
+```
+
+| builder | modifiers |
+|---|---|
+| `ent.field.string`, `.int`, `.float`, `.bool` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")` |
+| `ent.index(field, ...)` | `:unique()`, `:name("by_x")` |
+| `ent.edge.to "name" "Table"` | `:unique()` |
+| `ent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
+
+Every table has an integer primary key named `id`, so a field cannot use
+that name. A table's keys use its name in snake case, so `BlogPost` stores as
+`blog_post`. `ent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
+and an `ent.edge.from` reads that edge backwards.
+
+`ent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
+new table, or the first answer of the previous version's call. A field keeps
+its id under its name or its `:was` name, and new fields are numbered after
+the highest id ever used, so a dropped field's id is never reused.
+`ent.SCHEMA` runs the module's self-check and answers `ok`.
 
 ## Install with FUNCTIONS SYNC
 

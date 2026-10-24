@@ -20,6 +20,9 @@ beside a development server.
 - `test_rowcodec.py` runs the row codec's self-check, stores rows in each
   format and reads them back, reads rows written by an older field list, and
   checks that bad rows are refused before anything is stored.
+- `test_schema.py` runs the schema self-check, declares tables from another
+  space, carries a stored row across a field rename with `ent.ids`, and
+  checks the errors for a missing table and an unknown index field.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`
