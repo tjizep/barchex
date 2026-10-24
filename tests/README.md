@@ -36,6 +36,8 @@ beside a development server.
   and checks the rows and the index each one picks. It also links, follows
   and unlinks edges, checks that `delete` removes a row's edges, and checks
   the query and edge errors.
+- `test_blog.py` installs the blog example from `examples/blog/` and runs its
+  commands: users, posts, follows, stars, timelines and its errors.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

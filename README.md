@@ -25,7 +25,7 @@ barchd --port 14000 --dir data \
   -g https://github.com/tjizep/barch-spaces user=default
 ```
 
-The `tests/` and `docs/` folders are left out of the server. To install
+The `tests/`, `docs/` and `examples/` folders are left out of the server. To install
 barchex into a barchd that is already running, use `FUNCTIONS SYNC` as
 described in [Install with FUNCTIONS SYNC](#install-with-functions-sync).
 
@@ -53,6 +53,8 @@ ent/
   client.luau      →  function CLIENT     (ent rows, edges and queries)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
+examples/
+  blog/            →  a blog on ent, installed by hand (see its README)
 ```
 
 
