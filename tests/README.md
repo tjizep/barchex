@@ -43,6 +43,11 @@ beside a development server.
   and unlinks edges, checks that `delete` removes a row's edges, runs `has`
   filters both ways and nested, loads edges with `with`, pages with
   `cursor` and `after` in each order, and checks the query and edge errors.
+- `test_rules.py` checks value rules, `time` fields, function defaults,
+  `updateDefault`, immutable fields and hooks through `ent.open`, that a
+  client without the graph still enforces the catalog's rules, the error
+  messages, and the migrations that time fields and function defaults allow
+  and refuse.
 - `test_blog.py` installs the blog example from `examples/blog/` and runs its
   commands: users, posts, follows, stars, timelines and its errors.
 - `test_vectors.py` builds a clustered corpus, inserts it through

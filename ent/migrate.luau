@@ -23,6 +23,8 @@
 --   /ent/tables/<table>/table              name, format, id kind and next
 --                                          field id
 --   /ent/tables/<table>/fields/<field>     kind, id, optional, unique, default
+--                                          and the value rules: immutable,
+--                                          min, max, minLen, maxLen, match
 --   /ent/tables/<table>/indexes/<ix>/spec  unique
 --   /ent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
 --   /ent/edges/<edge>/from, /to            links to the two tables' nodes
@@ -31,7 +33,7 @@
 --   - dropping a table;
 --   - changing a table's id kind, which its stored keys are written in;
 --   - a new field that is neither optional nor has a default;
---   - changing a field's kind, except int to float;
+--   - changing a field's kind, except int to float and int to or from time;
 --   - renaming a field of a table that has ever stored json rows, since
 --     those rows name their fields;
 --   - two tables that store under one key.
@@ -44,6 +46,12 @@ local lay = require("ent.LAYOUT")
 local function fail(msg: string)
     error("MIGRATE " .. msg, 0)
 end
+
+-- the numeric value rules a catalog field may carry
+local RULES = { "min", "max", "minLen", "maxLen" }
+
+-- kind changes that read stored values as they are
+local SAME_STORE = { ["int>float"] = true, ["int>time"] = true, ["time>int"] = true }
 
 local function num(v: any): any
     return type(v) == "integer" and integer.tonumber(v) or v
@@ -98,6 +106,9 @@ function load(): any
         for _, f in t.fields do
             f.id = num(f.id)
             f.default = num(f.default)
+            for _, k in RULES do
+                f[k] = num(f[k])
+            end
         end
         for k, id in t.ids do
             t.ids[k] = num(id)
@@ -134,9 +145,10 @@ function plan(prev: any, app: any): any
             local was = before[f.name] or (f.was and before[f.was])
             if old and was == nil and not f.optional and f.default == nil then
                 fail(where .. " field " .. f.name .. " is new, so rows stored before it have"
-                    .. " no value; make it :optional() or give it a :default()")
+                    .. " no value; make it :optional() or give it a :default() value"
+                    .. " (a function default fills only new rows)")
             end
-            if was and was.kind ~= f.kind and not (was.kind == "int" and f.kind == "float") then
+            if was and was.kind ~= f.kind and not SAME_STORE[was.kind .. ">" .. f.kind] then
                 fail(where .. " field " .. f.name .. " changes kind from " .. was.kind
                     .. " to " .. f.kind)
             end
@@ -150,7 +162,11 @@ function plan(prev: any, app: any): any
         local fields = {}
         for i, f in t.fields do
             fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
-                          unique = f.unique, default = f.default }
+                          unique = f.unique, default = f.default, immutable = f.immutable,
+                          match = f.match }
+            for _, k in RULES do
+                fields[i][k] = f[k]
+            end
         end
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,

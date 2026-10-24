@@ -25,7 +25,9 @@
 --   end)
 --
 -- ent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
--- conflict. Inside a transaction the caller already runs, ent.client(p)
+-- conflict. ent.open(app).tx(fn, pessimistic) does the same and also runs
+-- the graph's function defaults, validate functions and hooks; the value
+-- rules stored in the catalog apply either way. Inside a transaction the caller already runs, ent.client(p)
 -- answers the same `c`. Each answers rows as tables of field values with
 -- the row's `id`: a barch.uuid() string, or an integer for a table declared
 -- with id = "int". A field the row lacks reads as its default.
@@ -37,6 +39,7 @@ local rc = require("ent.ROWCODEC")
 local lay = require("ent.LAYOUT")
 local kc = require("ent.KEYCODEC")
 local mig = require("ent.MIGRATE")
+local SCHEMA = require("ent.SCHEMA")
 
 local function fail(msg: string)
     error("ENT " .. msg, 0)
@@ -45,16 +48,28 @@ end
 local Table = {}
 Table.__index = Table
 
-local function bind(t: any, version: number, pessimistic: boolean?): any
-    local byName, edgeByName = {}, {}
+local NO_HOOKS = { create = {}, update = {}, delete = {} }
+
+-- `decl` is the table as ent.schema declared it, for the parts that stay in
+-- code: function defaults, validate functions and hooks. nil leaves them out.
+local function bind(t: any, version: number, pessimistic: boolean?, decl: any?): any
+    local byName, edgeByName, code = {}, {}, {}
     for _, f in t.fields do
         byName[f.name] = f
     end
     for _, e in t.edges do
         edgeByName[e.name] = e
     end
+    for _, f in decl and decl.fields or {} do
+        if byName[f.name] == nil then
+            fail("table " .. t.name .. " field " .. f.name .. " is declared, and this"
+                .. " space's catalog lacks it; run MIGRATE")
+        end
+        code[f.name] = f.code
+    end
     return setmetatable({
         t = t, fields = rc.fields(t.fields), byName = byName, edgeByName = edgeByName,
+        code = code, hooks = decl and decl.hooks or NO_HOOKS,
         version = version, lock = pessimistic == true, where = "table " .. t.name,
     }, Table)
 end
@@ -100,6 +115,45 @@ local function set_fields(self: any, r: any, values: any)
             fail(self.where .. " has no field " .. tostring(k))
         end
         r[k] = v
+    end
+end
+
+-- Checks row `r` before it is stored over `old` (nil for a new row): every
+-- key is a field, an immutable field keeps its value, and each value that
+-- changed keeps its field's rules and validate functions.
+local function check_row(self: any, r: any, old: any)
+    for k in r do
+        if self.byName[k] == nil then
+            fail(self.where .. " has no field " .. tostring(k))
+        end
+    end
+    for _, f in self.t.fields do
+        local v = r[f.name]
+        if old == nil or v ~= old[f.name] then
+            local where = self.where .. " field " .. f.name
+            if old and f.immutable then
+                fail(where .. " is immutable, so update cannot change it")
+            end
+            if v ~= nil then
+                local why = SCHEMA.broken(f, v)
+                if why then
+                    fail(where .. " " .. why)
+                end
+                for _, fn in self.code[f.name] and self.code[f.name].validate or {} do
+                    local ok = fn(v)
+                    if ok == false or type(ok) == "string" then
+                        fail(where .. " refuses " .. string.format("%q", tostring(v))
+                            .. (type(ok) == "string" and ": " .. ok or ""))
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function run_hooks(self: any, op: string, ...: any)
+    for _, fn in self.hooks[op] do
+        fn(self.peers, ...)
     end
 end
 
@@ -310,7 +364,14 @@ function Table:create(values: { [string]: any }): any
         end
     end
     set_fields(self, r, plain)
+    for name, code in self.code do
+        if r[name] == nil and code.default then
+            r[name] = code.default()
+        end
+    end
     lay.fill(self.t, r)
+    run_hooks(self, "create", r)
+    check_row(self, r, nil)
     -- a uuid needs no shared key, so creates in one table do not conflict
     local counter, pk
     if lay.id_kind(self.t) == "uuid" then
@@ -373,11 +434,21 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
     end
     local r = table.clone(old)
     r.id = nil
-    set_fields(self, r, values or {})
+    values = values or {}
+    set_fields(self, r, values)
+    local cleared = {}
     for _, k in clear or {} do
         set_fields(self, r, { [k] = true })
         r[k] = nil
+        cleared[k] = true
     end
+    for name, code in self.code do
+        if code.update and values[name] == nil and not cleared[name] then
+            r[name] = code.update()
+        end
+    end
+    run_hooks(self, "update", pk, r, table.clone(old))
+    check_row(self, r, old)
     return store(self, pk, old, r)
 end
 
@@ -389,6 +460,7 @@ function Table:delete(pk: any): boolean
     if old == nil then
         return false
     end
+    run_hooks(self, "delete", pk, table.clone(old))
     for _, ix in self.t.indexes do
         local key = lay.entry(self.t, ix, old, pk)
         if key then
@@ -462,7 +534,7 @@ local function kind_of(tbl: any, field: string): string
 end
 
 local function fits(kind: string, v: any): boolean
-    if kind == "int" or kind == "float" then
+    if kind == "int" or kind == "float" or kind == "time" then
         return type(v) == "number" and v == v
     end
     if kind == "uuid" then
@@ -1042,14 +1114,20 @@ end
 -- The tables of this space's schema, by name, for a transaction the caller
 -- runs. Reading the catalog makes the transaction conflict with a migration
 -- that commits before it does.
-function client(pessimistic: boolean?): any
+function client(pessimistic: boolean?, app: any?): any
     local compiled = mig.load()
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
     end
     local c = {}
     for _, t in compiled.tables do
-        c[t.name] = bind(t, compiled.version, pessimistic)
+        c[t.name] = bind(t, compiled.version, pessimistic, app and app.tables[t.name])
+    end
+    for name in app and app.tables or {} do
+        if c[name] == nil then
+            fail("table " .. name .. " is declared, and this space's catalog lacks it;"
+                .. " run MIGRATE")
+        end
     end
     for _, b in c do
         b.peers = c
@@ -1063,10 +1141,27 @@ function client(pessimistic: boolean?): any
 end
 
 -- Runs fn(c) in a transaction and answers what it answers.
-function tx(fn: (any) -> any, pessimistic: boolean?): any
+function tx(fn: (any) -> any, pessimistic: boolean?, app: any?): any
     return barch.tx.run(function()
-        return fn(client(pessimistic))
+        return fn(client(pessimistic, app))
     end, pessimistic == true)
+end
+
+-- A client bound to `app`, the graph the space was migrated with, so its
+-- function defaults, validate functions and hooks run: db.tx(fn,
+-- pessimistic) and db.client(pessimistic) work as tx and client do.
+function open(app: any): any
+    if type(app) ~= "table" or type(app.tables) ~= "table" then
+        fail("open takes the graph from ent.graph")
+    end
+    return {
+        tx = function(fn: (any) -> any, pessimistic: boolean?): any
+            return tx(fn, pessimistic, app)
+        end,
+        client = function(pessimistic: boolean?): any
+            return client(pessimistic, app)
+        end,
+    }
 end
 
 local ROLLBACK = "CLIENT selftest rollback"

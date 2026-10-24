@@ -27,6 +27,7 @@
 --   "string"  "s" + escaped bytes + "\2\2"                 string, any bytes
 --   "uuid"    "u" + its 32 hex digits                      the uuid, 36 lowercase
 --                                                          characters with dashes
+--   "time"    as "int", for Unix milliseconds              integer
 --
 -- A string escapes five bytes and keeps the order of all of them:
 --   "\0" -> "\2\3"   "\1" -> "\2\4"   "\2" -> "\2\5"
@@ -116,6 +117,7 @@ local ENCODERS = {
     string = enc_string,
     bool = enc_bool,
     uuid = enc_uuid,
+    time = enc_int,
 }
 
 -- How many bytes a value of `kind` takes, for the kinds whose values all

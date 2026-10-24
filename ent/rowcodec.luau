@@ -16,7 +16,7 @@
 --   local row, version, format = rc.decode(users, value)  -- row, 3, "binary"
 --
 -- A field's kind is "string", "int" (an integer in +-2^53), "float" or "bool",
--- the same kinds as KEYCODEC. Its id is a number from 1 to 65535 that stays
+-- the same kinds as KEYCODEC. A "time" field is stored as an "int". Its id is a number from 1 to 65535 that stays
 -- with the field for the table's life: text and binary rows name fields by
 -- id, so a field can be renamed without rewriting them.
 --
@@ -40,7 +40,7 @@
 -- use "text" or "binary" for those.
 
 local MAX_INT = 2 ^ 53
-local KINDS = { string = true, int = true, float = true, bool = true }
+local KINDS = { string = true, int = true, float = true, bool = true, time = true }
 
 -- binary entry tags
 local FALSE, TRUE, INT, FLOAT, STRING = 0, 1, 2, 3, 4
@@ -68,7 +68,8 @@ function fields(list: { any }): any
         if byId[f.id] then
             error(where .. " has the id of " .. byId[f.id].name, 2)
         end
-        local field = { name = f.name, kind = f.kind, id = f.id, optional = f.optional == true }
+        local kind = f.kind == "time" and "int" or f.kind
+        local field = { name = f.name, kind = kind, id = f.id, optional = f.optional == true }
         byName[f.name] = field
         byId[f.id] = field
         out[i] = field

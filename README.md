@@ -261,6 +261,7 @@ local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
 | `string` | any bytes | byte order, a prefix before its extensions |
 | `bool` | `false`, `true` | `false` first |
 | `uuid` | 36 lowercase characters, as `barch.uuid()` answers | the uuid's text order |
+| `time` | as `int`, for Unix milliseconds | numeric |
 
 `nil` encodes as null for every kind and sorts before every value. `encode`
 raises an error for a value of the wrong kind, a fractional or out-of-range
@@ -289,7 +290,7 @@ local row, version, format = rc.decode(users, barch.store.get("ent.r.user.1"))
 | field key | required | values |
 |---|---|---|
 | `name` | yes | a letter, then letters, digits and `_` |
-| `kind` | yes | `string`, `int`, `float` or `bool`, as for KEYCODEC |
+| `kind` | yes | `string`, `int`, `float`, `bool`, or `time`, which is stored as an `int` |
 | `id` | yes | 1 to 65535, unique in the table; keep it when the field is renamed |
 | `optional` | no | `true` lets the row leave the field nil; default `false` |
 
@@ -336,7 +337,7 @@ local version, fields = ent.ids(User, previous)   -- fields for rc.fields
 
 | builder | modifiers |
 |---|---|
-| `ent.field.string`, `.int`, `.float`, `.bool` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")` |
+| `ent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
 | `ent.index(field, ...)` | `:unique()`, `:name("by_x")` |
 | `ent.edge.to "name" "Table"` | `:unique()` |
 | `ent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
@@ -350,6 +351,69 @@ concurrent creates in that table conflict and retry. A table keeps its id
 kind once it has a catalog; see MIGRATE. A table's keys use its name in snake case, so `BlogPost` stores as
 `blog_post`. `ent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
 and an `ent.edge.from` reads that edge backwards.
+
+A `time` field holds Unix milliseconds as an integer. `ent.now()` answers
+the current time that way. barch gives functions no clock, so `ent.now()`
+reads the milliseconds in a new `barch.uuid()`; one server's answers never
+go backwards.
+
+Value rules check each value that `create` and `update` write:
+
+```lua
+ent.schema "Post" {
+    fields = {
+        ent.field.string "title":notEmpty():maxLen(80),
+        ent.field.string "slug":match("^[%l%d-]+$"):unique():immutable(),
+        ent.field.int "stars":min(0):max(5):default(0),
+        ent.field.string "body":validate(function(v)
+            return not string.find(v, "spam") or "no spam"   -- the refusal's reason
+        end),
+        ent.field.time "created_at":default(ent.now):immutable(),
+        ent.field.time "updated_at":default(ent.now):updateDefault(ent.now),
+    },
+    hooks = {
+        ent.hook.create(function(c, row)
+            row.slug = row.slug or (string.gsub(string.lower(row.title), "%W+", "-"))
+        end),
+    },
+}
+```
+
+| modifier | fields | effect |
+|---|---|---|
+| `:min(n)`, `:max(n)` | `int`, `float`, `time` | the value is at least or at most `n` |
+| `:minLen(n)`, `:maxLen(n)` | `string` | the value's length in bytes is at least or at most `n` |
+| `:notEmpty()` | `string` | the same as `:minLen(1)` |
+| `:match(pattern)` | `string` | the value contains a match for the Luau string pattern; anchor it with `^` and `$` to match the whole value |
+| `:validate(fn)` | any | `fn(value)` refuses the value by answering `false` or a message, or by raising an error; a field may have several |
+| `:immutable()` | any | `update` refuses to change the value |
+| `:default(fn)` | any | `create` calls `fn()` when the row leaves the field nil |
+| `:updateDefault(fn)` | any but immutable | `update` calls `fn()` when the update leaves the field unchanged |
+
+`:min`, `:max`, `:minLen`, `:maxLen`, `:match` and `:immutable` are stored in
+the catalog, so every client of the space enforces them once `migrate` has
+run. A new rule applies to later writes; it leaves stored rows as they are.
+`update` checks only the values it changes.
+
+Functions stay in code: `:validate`, `:updateDefault`, a function
+`:default`, and hooks run only in a client opened with the graph; see
+`ent.open` under CLIENT. A function default fills only new rows, so a new
+required field also needs a value default, or `:optional()`, for the rows
+stored before it.
+
+`ent.hook.create(fn)`, `ent.hook.update(fn)` and `ent.hook.delete(fn)` run
+before the write, inside its transaction, in the order they are listed:
+
+| hook | called as | runs |
+|---|---|---|
+| `create` | `fn(c, row)` | after defaults, before the value rules |
+| `update` | `fn(c, id, row, old)` | after `updateDefault`, before the value rules |
+| `delete` | `fn(c, id, old)` | when the row exists, before it is removed |
+
+A hook may change `row` and may read and write other tables through `c`.
+An error it raises refuses the write. Writes a hook made before a refusal
+stay in the transaction, so a caller that catches the error and goes on
+keeps them.
 
 `ent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
 new table, or the first answer of the previous version's call. A field keeps
@@ -386,8 +450,8 @@ answers the current version.
 leave stored rows unreadable:
 
 - a table missing from the schema;
-- a new field that is neither `:optional()` nor has a `:default()`;
-- a kind change other than `int` to `float`;
+- a new field that is neither `:optional()` nor has a value `:default()`;
+- a kind change other than `int` to `float`, or `int` to or from `time`;
 - a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
 - a change to a table's `id` kind.
@@ -412,15 +476,27 @@ end)
 
 | call | answers | raises an error when |
 |---|---|---|
-| `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind, or a required field is missing |
+| `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind or breaks a value rule, or a required field is missing |
 | `get(id)` | the row, or `nil` | `id` does not fit the table's id kind: a lowercase uuid, or a positive integer for `id = "int"` |
 | `by(index, values...)` | the row, or `nil` | there is no such unique index, or the number of values differs from its fields |
-| `update(id, values, clear)` | the stored row | there is no row `id`, or as for `create` |
+| `update(id, values, clear)` | the stored row | there is no row `id`, it changes an immutable field, or as for `create` |
 | `delete(id)` | `true`, or `false` if there was no row | `id` does not fit the table's id kind |
 
 `by` takes an index name, such as `by_email`, or a field name with a unique
 `by_<field>` index. Rows are tables of field values plus `id`. A field the
 stored row lacks reads as its `:default()`.
+
+To run a schema's function defaults, `:validate` functions and hooks, open
+the client with the graph the space was migrated with:
+
+```lua
+local db = ent.open(app)        -- app: the answer of ent.graph
+db.tx(function(c) ... end)      -- db.client(pessimistic) inside a transaction
+```
+
+`ent.open` raises an error when the graph declares a table or field that the
+space's catalog lacks; run `migrate` first. Value rules stored in the catalog
+apply with or without it.
 
 `ent.tx(fn, pessimistic)` runs `fn(c)` in `barch.tx.run`, which retries on
 a conflict, and answers what `fn` answers. With `pessimistic` true, a row or
@@ -428,7 +504,8 @@ unique entry about to be written is read with the exclusive lock, so two
 writers of one value wait for each other. Inside a transaction you already
 run, `ent.client(pessimistic)` answers the same `c`. A table with
 `id = "int"` takes each new id from one counter, so concurrent creates in
-that table conflict and retry. A refused call writes nothing, so `fn` can catch its error and go on.
+that table conflict and retry. A refused call writes nothing apart from what
+its hooks wrote, so `fn` can catch its error and go on.
 
 Edges link rows. Pass an edge's name to `create` with an id, a row, or a
 list of them, or call `link` and `unlink`:

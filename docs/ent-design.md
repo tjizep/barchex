@@ -21,6 +21,7 @@ remains.
 | queries and edges | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge joins: `has`, `has<Edge>With` and `with` eager loading | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | cursor pagination: `cursor` and `after` | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| value rules, `time` fields and hooks | `ent.SCHEMA`, `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -116,6 +117,26 @@ transaction today, so an index build reads the whole table at once. Large
 tables will need builds in pages, with the index marked `building` until the
 last page commits, because one transaction has to finish within the
 function deadline.
+
+## Rules and hooks
+
+A schema's rules come in two parts. Rules that are values, `min`, `max`,
+`minLen`, `maxLen`, `match` and `immutable`, are stored in the catalog with
+the field, so every client of the space checks them, including one in
+another function that never loaded the schema code. Functions cannot be
+stored, so `validate`, `updateDefault`, a function `default` and hooks run
+only in a client made with `ent.open(app)`. Go ent compiles both into
+generated code; here the catalog keeps what it can.
+
+Hooks run before the write in the caller's transaction, which makes a hook
+that writes another table atomic with the write. barch has no savepoints,
+so a hook's writes stay when the write it ran for is refused and the caller
+catches the error.
+
+A `time` field is an `int` of Unix milliseconds. barch gives functions no
+clock, so `ent.now()` reads the time from `barch.uuid()`, whose first 48 bits
+are the server's milliseconds and never go backwards on one server. A
+`barch.time()` call would make that unnecessary.
 
 ## Storage layout
 

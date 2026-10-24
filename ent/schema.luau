@@ -37,7 +37,8 @@
 -- version of the table gave out and numbers new fields after the highest id
 -- ever used, so a removed field's id is never reused.
 
-local KINDS = { string = true, int = true, float = true, bool = true }
+local KINDS = { string = true, int = true, float = true, bool = true, time = true }
+local NUMERIC = { int = true, float = true, time = true }
 local FORMATS = { json = true, text = true, binary = true }
 local IDS = { uuid = true, int = true }
 local MAX_INT = 2 ^ 53
@@ -65,6 +66,42 @@ local function fits(kind: string, v: any): boolean
     return type(v) == "number" and v == math.floor(v) and v <= MAX_INT and v >= -MAX_INT
 end
 
+-- The time now in Unix milliseconds, for a time field. Functions have no
+-- clock, so this reads the one in barch.uuid(), whose first 48 bits are the
+-- server's milliseconds. One server's answers never go backwards.
+function now(): number
+    local u = barch.uuid()
+    return tonumber(string.sub(u, 1, 8) .. string.sub(u, 10, 13), 16) :: number
+end
+
+-- Why value `v` breaks a rule of compiled field `f`, or nil when it keeps
+-- them all. ent.CLIENT checks every value it writes with this.
+function broken(f: any, v: any): string?
+    if f.kind == "time" and not fits("int", v) then
+        return "wants a time in Unix milliseconds, got " .. tostring(v)
+    end
+    if type(v) == "number" then
+        if f.min ~= nil and v < f.min then
+            return "wants at least " .. f.min .. ", got " .. v
+        end
+        if f.max ~= nil and v > f.max then
+            return "wants at most " .. f.max .. ", got " .. v
+        end
+    elseif type(v) == "string" then
+        if f.minLen ~= nil and #v < f.minLen then
+            return "wants at least " .. f.minLen .. " bytes, got " .. #v
+        end
+        if f.maxLen ~= nil and #v > f.maxLen then
+            return "wants at most " .. f.maxLen .. " bytes, got " .. #v
+        end
+        if f.match ~= nil and string.find(v, f.match) == nil then
+            return "wants a value matching " .. string.format("%q", f.match) .. ", got "
+                .. string.format("%q", v)
+        end
+    end
+    return nil
+end
+
 -- fields ----------------------------------------------------------------------
 
 local Field = {}
@@ -82,10 +119,69 @@ function Field:unique()
     return self
 end
 
--- The value create() writes when the row leaves the field nil.
+-- The value create() writes when the row leaves the field nil. A function
+-- is called for each create, as in :default(ent.now); a value is also what
+-- older rows read for a field added later.
 function Field:default(v: any)
     self.default_ = v
     self.hasDefault = true
+    return self
+end
+
+-- A function update() calls for the field's value when the update leaves
+-- it unchanged, as in :updateDefault(ent.now) for an updated_at field.
+function Field:updateDefault(fn: () -> any)
+    self.updateDefault_ = fn
+    return self
+end
+
+-- update() refuses to change the field once create() has set it.
+function Field:immutable()
+    self.immutable_ = true
+    return self
+end
+
+-- Bounds for an int, float or time field's value, inclusive.
+function Field:min(n: number)
+    self.min_ = n
+    return self
+end
+
+function Field:max(n: number)
+    self.max_ = n
+    return self
+end
+
+-- Bounds for a string field's length in bytes, inclusive.
+function Field:minLen(n: number)
+    self.minLen_ = n
+    return self
+end
+
+function Field:maxLen(n: number)
+    self.maxLen_ = n
+    return self
+end
+
+-- Shorthand for :minLen(1).
+function Field:notEmpty()
+    self.minLen_ = 1
+    return self
+end
+
+-- A Luau string pattern that a string field's value has to contain; anchor
+-- it with ^ and $ to match the whole value.
+function Field:match(pattern: string)
+    self.match_ = pattern
+    return self
+end
+
+-- A function that checks each value written to the field. fn(value)
+-- refuses the value by answering false or a message, or by raising an
+-- error. A field may have several.
+function Field:validate(fn: (any) -> any)
+    self.validate_ = self.validate_ or {}
+    table.insert(self.validate_, fn)
     return self
 end
 
@@ -107,6 +203,8 @@ field = {
     int = builder("int"),
     float = builder("float"),
     bool = builder("bool"),
+    -- Unix milliseconds, stored as an int
+    time = builder("time"),
 }
 
 -- indexes ---------------------------------------------------------------------
@@ -168,15 +266,85 @@ edge = {
     from = edge_builder("from"),
 }
 
+-- hooks -----------------------------------------------------------------------
+
+local Hook = {}
+Hook.__index = Hook
+
+local function hook_builder(op: string)
+    return function(fn: any)
+        if type(fn) ~= "function" then
+            fail("hook." .. op .. " takes a function, got " .. type(fn))
+        end
+        return setmetatable({ op = op, fn = fn }, Hook)
+    end
+end
+
+-- Functions ent.CLIENT calls inside the transaction before it writes:
+--   hook.create(function(c, row) end)        row: the new row's fields
+--   hook.update(function(c, id, row, old) end)
+--   hook.delete(function(c, id, old) end)
+-- A hook may change `row` and may read and write through `c`. An error it
+-- raises refuses the write.
+hook = {
+    create = hook_builder("create"),
+    update = hook_builder("update"),
+    delete = hook_builder("delete"),
+}
+
 -- tables ----------------------------------------------------------------------
 
-local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true }
+local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true,
+                  hooks = true }
 
--- One table: `ent.schema "Name" { format?, id?, fields, edges?, indexes? }`.
+-- Checks the value rules of field `f` and copies them into `out`.
+local function rules(where: string, f: any, out: any)
+    for _, k in { "min", "max", "minLen", "maxLen" } do
+        local n = f[k .. "_"]
+        if n ~= nil then
+            if type(n) ~= "number" or n ~= n then
+                fail(where .. " " .. k .. " takes a number, got " .. tostring(n))
+            end
+            local numeric = k == "min" or k == "max"
+            if numeric and not NUMERIC[f.kind] or not numeric and f.kind ~= "string" then
+                fail(where .. " is a " .. f.kind .. " field, which takes no " .. k)
+            end
+            out[k] = n
+        end
+    end
+    if f.match_ ~= nil then
+        if f.kind ~= "string" then
+            fail(where .. " is a " .. f.kind .. " field, which takes no match")
+        end
+        if type(f.match_) ~= "string" or not pcall(string.find, "", f.match_) then
+            fail(where .. " match takes a Luau string pattern, got " .. tostring(f.match_))
+        end
+        out.match = f.match_
+    end
+    for _, fn in f.validate_ or {} do
+        if type(fn) ~= "function" then
+            fail(where .. " validate takes a function, got " .. type(fn))
+        end
+    end
+    if f.updateDefault_ ~= nil and type(f.updateDefault_) ~= "function" then
+        fail(where .. " updateDefault takes a function, got " .. type(f.updateDefault_))
+    end
+    if f.immutable_ and f.updateDefault_ then
+        fail(where .. " is immutable, so it takes no updateDefault")
+    end
+    out.immutable = f.immutable_ == true
+end
+
+-- One table:
+-- `ent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
---     default, was } }, indexes = { { name, on, unique } },
+--     default, was, immutable, min?, max?, minLen?, maxLen?, match? } },
+--     indexes = { { name, on, unique } },
 --     edges = { { name, dir, target, unique, ref } } }
+-- plus the parts that stay in code, which ent.CLIENT reads from the graph
+-- given to ent.open: each field's `code` = { default?, update?, validate }
+-- and the table's `hooks` = { create, update, delete } lists of functions.
 function schema(name: string)
     ident(name, "table")
     return function(spec: any)
@@ -212,7 +380,8 @@ function schema(name: string)
             if byName[fname] then
                 fail(where .. " field " .. fname .. " is declared twice")
             end
-            if f.hasDefault and not fits(f.kind, f.default_) then
+            local fn = type(f.default_) == "function"
+            if f.hasDefault and not fn and not fits(f.kind, f.default_) then
                 fail(where .. " field " .. fname .. " default is not of kind " .. f.kind)
             end
             if f.was_ then
@@ -223,7 +392,21 @@ function schema(name: string)
                 was[f.was_] = fname
             end
             local out = { name = fname, kind = f.kind, optional = f.optional_ == true,
-                          unique = f.unique_ == true, default = f.default_, was = f.was_ }
+                          unique = f.unique_ == true, was = f.was_,
+                          code = { update = f.updateDefault_,
+                                   validate = table.clone(f.validate_ or {}) } }
+            if fn then
+                out.code.default = f.default_
+            else
+                out.default = f.default_
+            end
+            rules(where .. " field " .. fname, f, out)
+            if out.default ~= nil then
+                local why = broken(out, out.default)
+                if why then
+                    fail(where .. " field " .. fname .. " default " .. why)
+                end
+            end
             byName[fname] = out
             t.fields[#t.fields + 1] = out
         end
@@ -285,6 +468,14 @@ function schema(name: string)
                           unique = e.unique_ == true, ref = e.ref_ }
             edges[e.name] = out
             t.edges[#t.edges + 1] = out
+        end
+
+        t.hooks = { create = {}, update = {}, delete = {} }
+        for _, h in spec.hooks or {} do
+            if getmetatable(h) ~= Hook then
+                fail(where .. " hooks must be made with ent.hook")
+            end
+            table.insert(t.hooks[h.op], h.fn)
         end
         return t
     end
@@ -450,6 +641,30 @@ function selftest(): (boolean, string?)
         return false, "later ids"
     end
 
+    local Doc = schema "Doc" {
+        fields = {
+            field.string "title":notEmpty():maxLen(5):match("^%u"),
+            field.int "rank":min(1):max(9):default(5),
+            field.time "at":default(now):immutable(),
+        },
+        hooks = { hook.create(function() end), hook.update(function() end) },
+    }
+    local title, rank, at = Doc.fields[1], Doc.fields[2], Doc.fields[3]
+    if title.minLen ~= 1 or title.maxLen ~= 5 or rank.min ~= 1 or not at.immutable
+        or at.default ~= nil or at.code.default ~= now or #Doc.hooks.create ~= 1
+        or #Doc.hooks.delete ~= 0 then
+        return false, "rules"
+    end
+    if broken(title, "Hi") or not broken(title, "hi") or not broken(title, "Hello!")
+        or not broken(title, "") or broken(rank, 9) or not broken(rank, 10)
+        or not broken(at, 1.5) or broken(at, now()) then
+        return false, "broken"
+    end
+    local t1 = now()
+    if t1 < 1.7e12 or t1 ~= math.floor(t1) or now() < t1 then
+        return false, "now " .. t1
+    end
+
     local refused = {
         { function() schema "User" { fields = {} } end, "needs at least one field" },
         { function() schema "User" { fields = { field.int "id" } } end, "primary key" },
@@ -463,6 +678,14 @@ function selftest(): (boolean, string?)
         { function() schema "User" { fields = { field.int "a" }, edges = { edge.from "x" "Y" } } end, "needs :ref" },
         { function() field.int "bad name" end, "letters, digits" },
         { function() graph { User, User } end, "declared twice" },
+        { function() schema "User" { fields = { field.string "a":min(1) } } end, "takes no min" },
+        { function() schema "User" { fields = { field.int "a":match("x") } } end, "takes no match" },
+        { function() schema "User" { fields = { field.string "a":match("[") } } end, "string pattern" },
+        { function() schema "User" { fields = { field.int "a":min(2):default(1) } } end, "at least 2" },
+        { function() schema "User" { fields = { field.time "a":immutable():updateDefault(now) } } end,
+          "takes no updateDefault" },
+        { function() schema "User" { fields = { field.int "a" }, hooks = { 1 } } end, "ent.hook" },
+        { function() hook.create(nil) end, "takes a function" },
     }
     for i, case in refused do
         if not raises(case[1], case[2]) then
