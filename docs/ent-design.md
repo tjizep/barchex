@@ -22,8 +22,11 @@ ent depends on these barch behaviors. Each one shapes a decision below.
 
 - **An optimistic transaction is serializable.** `COMMITTX` checks every key
   the transaction read and every range it walked, so unique checks and range
-  queries are safe in one. ent runs its work through `barch.tx.run`, which
-  retries on `TXCONFLICT`, `TXDEADLOCK` and `TXLOCKTIMEOUT`.
+  queries are safe in one. A read that finds a key missing counts too, so of
+  two inserts that both find a unique key free, the second to commit gets
+  `TXCONFLICT`; `tests/test_ent_tx.py` checks this for `GET`, `EXISTS` and an
+  empty range. ent runs its work through `barch.tx.run`, which retries on
+  `TXCONFLICT`, `TXDEADLOCK` and `TXLOCKTIMEOUT`.
 - **A transaction covers one space.** An ent client is bound to the space it
   runs in, and every table it uses lives there. The ent modules live in the
   `ent` space and run against the caller's space when required from it.
@@ -138,9 +141,6 @@ the table and filters each row. `:using(index)` names the index to use.
 - **Pessimistic unique checks.** If a pessimistic range locks the range, a
   unique check is a range read. Otherwise ent writes the `ent.u` key before
   checking it, so the key lock orders two inserts of the same value.
-- **Absent-key reads.** A unique check reads a missing key. A test has to
-  confirm that `COMMITTX` treats that read as a conflict when another
-  transaction writes the key.
 - **Descending order.** `barch.store.range` walks forward only, so
   `order(..., "desc")` with a limit reads the whole range. A reverse range, or
   a descending key encoding, would fix this.

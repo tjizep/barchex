@@ -14,6 +14,9 @@ beside a development server.
 - `test_keycodec.py` runs the key codec's self-check and writes encoded ints,
   floats, strings, nulls and packed tuples into a space, then checks that
   `barch.store.range` walks them back in value order.
+- `test_ent_tx.py` checks the transaction behavior ent's unique indexes need:
+  a transaction that read a key as missing, by `GET`, `EXISTS` or an empty
+  range, gets `TXCONFLICT` when another write to that key commits first.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`
@@ -40,8 +43,10 @@ Install `pytest` and `redis` for Python, then:
 pytest -q tests
 ```
 
-The tests look for the barch build used in this workspace. For another build,
-set `BARCHD` to its executable path:
+The tests look for `../barch/cmake-build-release/barchd`, then
+`../barch/cmake-build-relwithdebinfo/barchd`, then `barchd` on the `PATH`.
+`test_ent_tx.py` needs a build with transactions. For another build, set
+`BARCHD` to its executable path:
 
 ```sh
 BARCHD=/path/to/barchd pytest -q tests
