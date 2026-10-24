@@ -11,6 +11,9 @@ beside a development server.
 - The viewer's tests moved to
   [barch-spaces](https://github.com/tjizep/barch-spaces) with the viewer.
 - `test_sigv4.py` checks the signer against the request examples AWS publishes.
+- `test_keycodec.py` runs the key codec's self-check and writes encoded ints,
+  floats, strings, nulls and packed tuples into a space, then checks that
+  `barch.store.range` walks them back in value order.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

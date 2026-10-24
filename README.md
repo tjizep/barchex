@@ -12,8 +12,8 @@ barchd --port 14000 --dir data -g https://github.com/tjizep/barchex
 ```
 
 `package.luau` at the root of the repository says what goes where. Each sync
-creates the `vectors`, `s3` and `watchdog` key spaces and loads each folder of the
-same name into its space.
+creates the `vectors`, `s3`, `watchdog` and `ent` key spaces and loads each
+folder of the same name into its space.
 
 The space viewer that used to be part of barchex is a repository of its own now,
 [barch-spaces](https://github.com/tjizep/barch-spaces). To have it beside barchex,
@@ -25,13 +25,13 @@ barchd --port 14000 --dir data \
   -g https://github.com/tjizep/barch-spaces user=default
 ```
 
-The `tests/` folder is left out of the server. To install barchex into a
-barchd that is already running, use `FUNCTIONS SYNC` as described in
-[Install with FUNCTIONS SYNC](#install-with-functions-sync).
+The `tests/` and `docs/` folders are left out of the server. To install
+barchex into a barchd that is already running, use `FUNCTIONS SYNC` as
+described in [Install with FUNCTIONS SYNC](#install-with-functions-sync).
 
 ## What it contains
 
-A top-level folder becomes a key space with that name.
+Each folder that `package.luau` loads becomes a key space with that name.
 
 ```
 package.luau       →  how barchd -g installs this repository
@@ -44,6 +44,10 @@ s3/
   backup.luau      →  function BACKUP     (a key space to a bucket and back)
 watchdog/
   watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
+ent/
+  keycodec.luau    →  function KEYCODEC   (order-preserving keys for ent indexes)
+docs/
+  ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
 
 
@@ -231,6 +235,34 @@ touches it, so cron cannot call into it until `watchdog:DBSIZE` wakes it up.
 An install from `package.luau` opens `watchdog` on every sync, including the
 first one after a restart.
 
+KEYCODEC encodes values as key text that `barch.store.range` walks in value
+order. It is the first part of ent, an ORM planned in
+[docs/ent-design.md](docs/ent-design.md). Require it from any space:
+
+```lua
+local kc = require("ent.KEYCODEC")
+local key = "ent.i.user.by_age" .. kc.pack({ "int", "string" }, { 42, "ann" })
+local values, next = kc.unpack(key, 2, #"ent.i.user.by_age" + 1)  -- { 42, "ann" }
+local lo = "ent.i.user.by_age" .. kc.encode("int", 42)
+local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
+```
+
+| kind | values | order |
+|---|---|---|
+| `int` | integers from -2^53 to 2^53 | numeric |
+| `float` | any number except NaN; -0 is stored as 0 | numeric, `-inf` to `inf` |
+| `string` | any bytes | byte order, a prefix before its extensions |
+| `bool` | `false`, `true` | `false` first |
+
+`nil` encodes as null for every kind and sorts before every value. `encode`
+raises an error for a value of the wrong kind, a fractional or out-of-range
+`int`, and NaN. Encoded values contain no space, NUL or `\1` byte, which
+barch would otherwise read as a tuple separator, refuse, or cut short in a
+range. Start each key with a prefix that begins with a letter, such as
+`ent.`, so barch keeps the whole key as text. `after(prefix)` answers the
+exclusive upper bound for a range over every key that starts with `prefix`.
+`ent.KEYCODEC` runs the module's self-check and answers `ok`.
+
 ## Install with FUNCTIONS SYNC
 
 To add barchex to a server that is already running, configure the repository
@@ -253,6 +285,6 @@ KEYSF
 ```
 
 The sync applies `package.luau` the same way `barchd -g` does: it creates the
-three spaces and loads the three folders. Leave
+four spaces and loads the four folders. Leave
 `as` on `keys` and `space` off; barch refuses a package that lists folders
 while either is set to something else.
