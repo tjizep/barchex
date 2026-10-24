@@ -353,6 +353,9 @@ LAYOUT names the store keys ent uses in the application's space: rows
 (`lay.row(t, pk)`), index entries (`lay.entry(t, ix, row, pk)`), edges and a
 table's pk counter. `lay.walk(prefix, each)` calls `each(key)` for every key
 under a prefix, a page at a time, and `each` may remove the key it is given.
+`lay.scan(lo, hi, each)` and `lay.scan_back(lo, hi, each)` call `each(key)`
+for the keys in `[lo, hi)`, in key order or highest first, and stop when
+`each` answers `true`.
 `ent.LAYOUT` runs the module's self-check and answers `ok`.
 
 MIGRATE puts a schema into the space that calls it. Call it from that space
@@ -447,7 +450,7 @@ c.User:query():where("id", "=", 1):queryPosts():all()  -- follow an edge
 |---|---|
 | `where(field, op, value)` | keeps rows where the comparison holds; a field without a value matches only `= nil` |
 | `where(fn)` | keeps rows for which `fn(row)` is true |
-| `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; equal values come in id order, missing values first |
+| `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
 | `limit(n)`, `offset(n)` | applied after the order |
 | `using(name)` | reads through the named index, or `"id"` for the table |
 | `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
@@ -457,8 +460,9 @@ c.User:query():where("id", "=", 1):queryPosts():all()  -- follow an edge
 The query picks the index whose leading fields match the most `=` filters,
 then one range filter on the next field. When that index already returns
 rows in the requested order, the query stops reading at the limit.
+A `desc` order reads the index from the end and stops the same way.
 Otherwise `explain` ends with `then sort`, and the query reads every
-matching row before sorting. A `desc` order always reads every match. A
+matching row before sorting. A
 unique index is used only when every one of its fields has an `=` filter,
 because it leaves out rows with a missing value. Filters on other fields
 are checked on each row read.

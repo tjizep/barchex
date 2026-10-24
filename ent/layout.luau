@@ -149,6 +149,26 @@ function scan(lo: string, hi: string, each: (string) -> boolean?, limit: number?
     end
 end
 
+-- scan from `hi` back down to `lo`: calls each(key) for every key in the
+-- span, highest first, until `each` answers true. barch counts the span and
+-- jumps to each page by offset, so a page costs the same at either end.
+-- `each` must not add or remove keys in the span.
+function scan_back(lo: string, hi: string, each: (string) -> boolean?, limit: number?): boolean
+    local page = limit or 1000
+    local pos = barch.store.count(lo, hi)
+    while pos > 0 do
+        local from = math.max(0, pos - page)
+        local keys = barch.store.range(lo, hi, pos - from, from)
+        for i = #keys, 1, -1 do
+            if each(keys[i]) then
+                return true
+            end
+        end
+        pos = from
+    end
+    return false
+end
+
 function selftest(): (boolean, string?)
     local t = {
         key = "user",

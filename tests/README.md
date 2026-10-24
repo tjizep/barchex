@@ -33,7 +33,8 @@ beside a development server.
   behind, that old rows read a new field's default, the error messages, and
   that a migration committed during a transaction makes it conflict.
 - `test_query.py` runs queries in optimistic and pessimistic transactions
-  and checks the rows and the index each one picks. It also links, follows
+  and checks the rows and the index each one picks. It counts the rows a
+  `desc` query reads to check that it stops at the limit. It also links, follows
   and unlinks edges, checks that `delete` removes a row's edges, and checks
   the query and edge errors.
 - `test_blog.py` installs the blog example from `examples/blog/` and runs its

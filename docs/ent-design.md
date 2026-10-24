@@ -192,8 +192,13 @@ order. A later version could intersect them with an index on the target.
   with a range read, which takes a shared lock. Two links to one row at once
   can both hold it and deadlock; `barch.tx.run` retries on `TXDEADLOCK`. An
   exclusive range read would order them instead.
-- **Descending order.** `barch.store.range` walks forward only, so
-  `order(..., "desc")` with a limit reads the whole range. A reverse range, or
-  a descending key encoding, would fix this.
+- **Counts and offsets inside a transaction.** `order(..., "desc")` reads
+  pages from the end with `barch.store.count` and the offset of
+  `barch.store.range`. Outside a transaction barch answers both from node
+  counts. Inside one, every shard reads through the transaction's overlay,
+  so both walk every key in the range: over 20,000 rows a `desc` query with
+  a limit of 5 takes about 10 ms, against 2 ms for `asc`. It still reads
+  only the rows it answers. Counting the overlay's keys on top of the node
+  counts would make both cheap again.
 - **Range with values.** A range that answers keys and values would remove
   the `get` per row.

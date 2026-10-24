@@ -69,6 +69,33 @@ function steps.delete(c)
     }
 end
 
+-- desc reads: the ids, the plan, and how many rows the query read
+function steps.desc(c)
+    local n = 0
+    local function read(q)
+        n = 0
+        local got = ids(q:where(function() n += 1; return true end))
+        return got .. " " .. n
+    end
+    local U = c.User
+    local lay, kc = require("ent.LAYOUT"), require("ent.KEYCODEC")
+    local back = {}
+    local lo = lay.row(U.t)
+    lay.scan_back(lo, kc.after(lo), function(k)
+        back[#back + 1] = tostring(kc.decode(k, #k - 16))
+        return #back == 5
+    end, 2)
+    return {
+        read(U:query():order("age", "desc"):limit(2)),
+        read(U:query():where("age", ">=", 30):order("age", "desc"):limit(3)),
+        read(U:query():order("id", "desc"):offset(1):limit(2)),
+        read(U:query():where("name", "=", "ann"):order("age", "desc")),
+        read(U:query():order("name", "desc"):limit(2)),
+        read(U:query():where("id", "=", 1):queryPosts():order("id", "desc"):limit(1)),
+        table.concat(back, ","),
+    }
+end
+
 local errors = {
     field = function(c) c.User:query():where("nick", "=", 1) end,
     op = function(c) c.User:query():where("age", "like", 1) end,
@@ -144,6 +171,23 @@ def test_queries_pick_an_index(client, mode):
         "4",
         "eve",
         "nil",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
+def test_desc_reads_from_the_end(client, mode):
+    setup(client, "query_desc_" + mode)
+    assert client.execute_command("CALLF", "QUERYAPP", "desc", mode) == [
+        # the ordered reads stop at the limit
+        "5,1 by_age 2",
+        "5,1,4 by_age range age 3",
+        "5,4 id 3",
+        "1,6 by_name_age = name 2",
+        # a sort has to read every row first
+        "5,4 id then sort 6",
+        "2 edge user_posts 1",
+        # pages of two from the end, stopped after five keys
+        "6,5,4,3,2",
     ]
 
 

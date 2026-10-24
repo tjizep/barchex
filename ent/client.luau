@@ -610,7 +610,9 @@ local function rows(q: any): { any }
     local tbl = q.tbl
     local p = plan(q)
     local want = q.lim and q.skip + q.lim
-    local early = p.ordered and not q.desc and want ~= nil
+    local early = p.ordered and want ~= nil
+    -- an ordered read in desc order reads from the end, so it can stop early
+    local back = p.ordered and q.desc
     local out = {}
     local function consider(pk: number): boolean
         local r = read(tbl, pk)
@@ -621,13 +623,15 @@ local function rows(q: any): { any }
         return false
     end
     if q.idset then
-        for _, pk in q.idset do
-            if consider(pk) then
+        local n = #q.idset
+        for i = 1, n do
+            if consider(q.idset[back and n + 1 - i or i]) then
                 break
             end
         end
     elseif want ~= 0 then
-        lay.scan(p.lo, p.hi, function(k)
+        local scan = back and lay.scan_back or lay.scan
+        scan(p.lo, p.hi, function(k)
             if p.ix.unique and not p.ix.primary then
                 return consider(tonumber(barch.store.get(k)) :: number)
             end
@@ -643,7 +647,7 @@ local function rows(q: any): { any }
             return less(a[f], b[f])
         end)
     end
-    if q.desc then
+    if q.desc and not back then
         local n = #out
         for i = 1, n // 2 do
             out[i], out[n + 1 - i] = out[n + 1 - i], out[i]
