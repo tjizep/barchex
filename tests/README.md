@@ -17,6 +17,9 @@ beside a development server.
 - `test_ent_tx.py` checks the transaction behavior ent's unique indexes need:
   a transaction that read a key as missing, by `GET`, `EXISTS` or an empty
   range, gets `TXCONFLICT` when another write to that key commits first.
+- `test_rowcodec.py` runs the row codec's self-check, stores rows in each
+  format and reads them back, reads rows written by an older field list, and
+  checks that bad rows are refused before anything is stored.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

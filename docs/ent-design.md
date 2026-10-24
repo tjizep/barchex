@@ -5,13 +5,13 @@ ent is a planned ORM for barch, written in Luau and modelled on Go's
 read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
 
-This page records the plan and the decisions made so far. The key codec is
-built; the remaining parts are planned.
+This page records the plan and the decisions made so far. The key and row
+codecs are built; the remaining parts are planned.
 
 | part | module | status |
 |---|---|---|
 | key codec | `ent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
-| row codecs | | planned |
+| row codecs | `ent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
 | schema code, graph catalog, `MIGRATE` | | planned |
 | create, get, update and delete with index upkeep | | planned |
 | queries and edges | | planned |
@@ -111,14 +111,21 @@ the basics work.
 
 ## Row formats
 
-Each table names its row format. Every stored row starts with a format byte
-and the schema version it was written with.
+Each table names its row format. Every stored row records the schema
+version it was written with, and `ROWCODEC` reads any format, so a table can
+change format and convert its rows over time.
 
-| format | encoding | use |
-|---|---|---|
-| `json` | `barch.store.setJson` and `getJson` | readable rows and tools that read JSON |
-| `text` | tab-separated fields in field order | debugging |
-| `binary` | a buffer of (field id, type tag, value) entries | compact rows; adding a field leaves old rows readable |
+| format | stored value | fields named by | use |
+|---|---|---|---|
+| `json` | a JSON object with the version in `_v` | name | rows other tools read as JSON; strings must be UTF-8 |
+| `text` | `t<version>` then tab-separated `<id>=<value>` | field id | rows a person reads with `GET` |
+| `binary` | `b`, a u32 version, then (id, tag, value) entries | field id | compact rows that hold any bytes |
+
+Field ids stay with a field for the table's life. A row written by an older
+schema reads with the current field list: a field added since reads as nil,
+a removed field's value is skipped, and a number reads into an `int` or
+`float` field when it fits that kind. A `json` row names fields, so renaming a field in a `json` table
+needs `MIGRATE` to rewrite its rows.
 
 ## Queries
 

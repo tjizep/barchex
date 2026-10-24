@@ -46,6 +46,7 @@ watchdog/
   watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
 ent/
   keycodec.luau    →  function KEYCODEC   (order-preserving keys for ent indexes)
+  rowcodec.luau    →  function ROWCODEC   (ent rows as json, text or binary)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
@@ -262,6 +263,42 @@ range. Start each key with a prefix that begins with a letter, such as
 `ent.`, so barch keeps the whole key as text. `after(prefix)` answers the
 exclusive upper bound for a range over every key that starts with `prefix`.
 `ent.KEYCODEC` runs the module's self-check and answers `ok`.
+
+ROWCODEC turns a row table into a stored value and back. Compile the
+table's fields once with `fields`, then call `encode` with a format and the
+schema version, and `decode` with the stored value:
+
+```lua
+local rc = require("ent.ROWCODEC")
+local users = rc.fields({
+    { name = "email", kind = "string", id = 1 },
+    { name = "age", kind = "int", id = 2, optional = true },
+})
+barch.store.set("ent.r.user.1", rc.encode(users, "binary", 3, { email = "a@b", age = 41 }))
+local row, version, format = rc.decode(users, barch.store.get("ent.r.user.1"))
+```
+
+| field key | required | values |
+|---|---|---|
+| `name` | yes | a letter, then letters, digits and `_` |
+| `kind` | yes | `string`, `int`, `float` or `bool`, as for KEYCODEC |
+| `id` | yes | 1 to 65535, unique in the table; keep it when the field is renamed |
+| `optional` | no | `true` lets the row leave the field nil; default `false` |
+
+| format | stored value | limits |
+|---|---|---|
+| `json` | a JSON object keyed by field name, with the version in `_v` | strings must be UTF-8; no infinite floats |
+| `text` | `t<version>`, then a tab and `<id>=<value>` per field | none |
+| `binary` | `b`, a u32 version, then an id, a tag and a value per field | none |
+
+`encode` raises an error for a key the fields do not define, a missing value
+for a field that is not optional, a value of the wrong kind, NaN, and a
+version outside 0 to 2^32-1. `decode` reads every format and answers the
+row, the schema version it was written with and the format. A row written
+with an older field list reads with the current one: added fields are nil,
+values for removed fields are skipped, an `int` value reads into a `float`
+field, and a whole-number `float` value in range reads into an `int` field.
+Other kind changes raise an error until the rows are rewritten. `ent.ROWCODEC` runs the module's self-check and answers `ok`.
 
 ## Install with FUNCTIONS SYNC
 
