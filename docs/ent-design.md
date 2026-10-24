@@ -6,8 +6,8 @@ read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
 
 This page records the plan and the decisions made so far. The key and row
-codecs, the schema language, the key layout and migrations are built; the
-remaining parts are planned.
+codecs, the schema language, the key layout, migrations and row reads and
+writes are built; queries and edges are planned.
 
 | part | module | status |
 |---|---|---|
@@ -16,7 +16,7 @@ remaining parts are planned.
 | schema language and field ids | `ent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
 | storage layout | `ent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
 | graph catalog and migrations | `ent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
-| create, get, update and delete with index upkeep | | planned |
+| create, get, update and delete with index upkeep | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | queries and edges | | planned |
 
 ## What barch provides
@@ -45,7 +45,12 @@ ent depends on these barch behaviors. Each one shapes a decision below.
   into that range by anyone else waits for the transaction to end.
 - **`GRAPH` and `barch.graph` run inside a transaction.** In a pessimistic
   transaction every `GRAPH` call locks the whole graph, shared for a read and
-  exclusive for a write, so ent reads the catalog once per transaction.
+  exclusive for a write, so ent reads the catalog once per transaction. A
+  graph read conflicts like a key read, which `tests/test_client.py` checks.
+- **`get(key, true)` takes the exclusive lock at once.** A pessimistic `get`
+  locks a key shared, so two inserts of one unique value would both hold the
+  shared lock and deadlock when they write. `ent.CLIENT` reads every key it
+  is about to write with `get(key, true)`, which orders them.
 - **`SETF` keeps the first body of a name.** A second `SETF` of an existing
   function answers `OK`, and `CALLF` still runs the first body. Tests that
   share a server give each function its own name.
@@ -124,13 +129,15 @@ ent.i<table><index><values><pk>    "" (non-unique index entry)
 ent.u<table><index><values>        pk (unique index entry)
 ent.e<edge><from><to>              "" (edge, forward)
 ent.E<edge><to><from>              "" (edge, reverse)
+ent.n<table>                       the last pk given out
 ```
 
 Every part ends itself, so a range over an encoded prefix holds exactly the
 keys that start with those values. A write reads the old row, works out which
 index keys changed, and updates the row and those keys in one transaction.
 
-Primary keys are integers for now. An ordered UUID library will replace them;
+Primary keys are integers from a counter per table for now, so concurrent
+creates in one table conflict and retry. An ordered UUID library will replace them;
 a UUID key will use the `string` kind, so the layout stays the same.
 
 Edges start as store keys because they page in key order. Graph-backed edges,
@@ -174,10 +181,6 @@ the table and filters each row. `:using(index)` names the index to use.
 
 ## Open questions
 
-- **Pessimistic unique checks.** A pessimistic `get` of the `ent.u` key
-  locks it shared, so two inserts of one value both hold the shared lock and
-  deadlock when they write. Reading it with `get(key, true)` takes the
-  exclusive lock at once and orders them instead.
 - **Descending order.** `barch.store.range` walks forward only, so
   `order(..., "desc")` with a limit reads the whole range. A reverse range, or
   a descending key encoding, would fix this.

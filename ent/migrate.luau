@@ -211,7 +211,7 @@ local function build(t: any, ix: any)
     local fields = row_fields(t)
     lay.walk(lay.row(t), function(k)
         local pk = kc.decode(k, #k - 16)
-        local r = rc.decode(fields, barch.store.get(k))
+        local r = lay.fill(t, rc.decode(fields, barch.store.get(k)))
         local key, value = lay.entry(t, ix, r, pk)
         if key == nil then
             return

@@ -27,6 +27,11 @@ beside a development server.
   space twice over stored rows, and checks the catalog, the index entries
   built and dropped, and that a unique index broken by stored rows rolls the
   whole migration back.
+- `test_client.py` runs the client self-check, then creates, reads, updates
+  and deletes rows in optimistic and pessimistic transactions. It checks the
+  index entries after each step, that a refused create leaves nothing
+  behind, that old rows read a new field's default, the error messages, and
+  that a migration committed during a transaction makes it conflict.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

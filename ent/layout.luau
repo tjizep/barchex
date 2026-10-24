@@ -55,6 +55,18 @@ function index(t: any, ix: any, values: { any }?): string
     return prefix .. kc.pack(table.move(kinds, 1, n, 1, {}), values)
 end
 
+-- Gives `r` the default of each field it lacks, as a row stored before the
+-- field was added reads, and answers `r`. Index entries are built from rows
+-- filled this way.
+function fill(t: any, r: { [string]: any }): { [string]: any }
+    for _, f in t.fields do
+        if r[f.name] == nil and f.default ~= nil then
+            r[f.name] = f.default
+        end
+    end
+    return r
+end
+
 -- The index entry for `row` at `pk`: the key and its value. nil for a
 -- unique index when one of the row's indexed fields is nil.
 function entry(t: any, ix: any, r: { [string]: any }, pk: number): (string?, string?)
@@ -143,6 +155,10 @@ function selftest(): (boolean, string?)
     end
     if entry(t, uniq, { age = 1 }, 8) ~= nil then
         return false, "a unique entry for a nil"
+    end
+    local filled = fill({ fields = { { name = "n", default = 0 }, { name = "m" } } }, { m = 1 })
+    if filled.n ~= 0 or filled.m ~= 1 then
+        return false, "fill"
     end
     if entry(t, plain, { email = "x" }, 8) == nil then
         return false, "no plain entry for a nil"

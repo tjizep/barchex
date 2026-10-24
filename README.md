@@ -50,6 +50,7 @@ ent/
   schema.luau      →  function SCHEMA     (ent tables, fields, indexes and edges)
   layout.luau      →  function LAYOUT     (the store keys of ent rows, indexes and edges)
   migrate.luau     →  function MIGRATE    (the ent catalog and index builds)
+  client.luau      →  function CLIENT     (ent create, get, update and delete)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
@@ -380,6 +381,44 @@ leave stored rows unreadable:
 Index builds read the whole table in that one transaction, so a large table
 can exceed the function deadline. `ent.MIGRATE` runs the self-check of the
 planning step and answers `ok`.
+
+CLIENT reads and writes the rows of a migrated space and keeps their indexes
+current. Call `ent.tx` from the application's space:
+
+```lua
+local ent = require("ent.CLIENT")
+ent.tx(function(c)
+    local u = c.User:create { email = "a@b", name = "ann" }  -- u.id == 1
+    c.User:get(u.id)                         -- the row, or nil
+    c.User:by("email", "a@b")                -- the row, through by_email
+    c.User:update(u.id, { name = "al" }, { "age" })  -- sets name, clears age
+    c.User:delete(u.id)                      -- false if there was no row
+end)
+```
+
+| call | answers | raises an error when |
+|---|---|---|
+| `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind, or a required field is missing |
+| `get(id)` | the row, or `nil` | `id` is not a positive integer |
+| `by(index, values...)` | the row, or `nil` | there is no such unique index, or the number of values differs from its fields |
+| `update(id, values, clear)` | the stored row | there is no row `id`, or as for `create` |
+| `delete(id)` | `true`, or `false` if there was no row | `id` is not a positive integer |
+
+`by` takes an index name, such as `by_email`, or a field name with a unique
+`by_<field>` index. Rows are tables of field values plus `id`. A field the
+stored row lacks reads as its `:default()`.
+
+`ent.tx(fn, pessimistic)` runs `fn(c)` in `barch.tx.run`, which retries on
+a conflict, and answers what `fn` answers. With `pessimistic` true, a row or
+unique entry about to be written is read with the exclusive lock, so two
+writers of one value wait for each other. Inside a transaction you already
+run, `ent.client(pessimistic)` answers the same `c`. Each new id comes from
+one counter per table, so concurrent creates in one table conflict and
+retry. A refused call writes nothing, so `fn` can catch its error and go on.
+
+Errors start with `ENT`, or with `ROWCODEC` for a value of the wrong kind or
+a missing required field. `ent.CLIENT` runs a self-check inside a
+transaction it rolls back and answers `ok`.
 
 ## Install with FUNCTIONS SYNC
 
