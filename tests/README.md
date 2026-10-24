@@ -41,8 +41,8 @@ beside a development server.
   and checks the rows and the index each one picks. It counts the rows a
   `desc` query reads to check that it stops at the limit. It also links, follows
   and unlinks edges, checks that `delete` removes a row's edges, runs `has`
-  filters both ways and nested, loads edges with `with`, and checks the
-  query and edge errors.
+  filters both ways and nested, loads edges with `with`, pages with
+  `cursor` and `after` in each order, and checks the query and edge errors.
 - `test_blog.py` installs the blog example from `examples/blog/` and runs its
   commands: users, posts, follows, stars, timelines and its errors.
 - `test_vectors.py` builds a clustered corpus, inserts it through

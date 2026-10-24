@@ -528,6 +528,70 @@ function Query:offset(n: number): any
     return self
 end
 
+local function less(a: any, b: any): boolean
+    if a == nil or b == nil then
+        return a == nil and b ~= nil
+    end
+    if type(a) == "boolean" then
+        return not a and b
+    end
+    return a < b
+end
+
+-- The order a cursor follows: the sort field, or id, and its direction.
+local function cursor_order(q: any): (string, string)
+    return q.sortField or "id", q.desc and "desc" or "asc"
+end
+
+-- A cursor for the rows after `row` in this query's order. Pass it to
+-- after() on the same query to read the next page.
+function Query:cursor(row: any): string
+    local tbl = self.tbl
+    if type(row) ~= "table" or row.id == nil then
+        fail(tbl.where .. " query cursor takes a row, got " .. tostring(row))
+    end
+    local field, dir = cursor_order(self)
+    local raw = kc.pack({ "string", "string", kind_of(tbl, field), lay.id_kind(tbl.t) },
+                        { field, dir, row[field], row.id })
+    return (string.gsub(raw, ".", function(ch)
+        return string.format("%02x", string.byte(ch))
+    end))
+end
+
+-- Keeps the rows after the cursor's row in the query's order, which is id
+-- order when the query sets none. The cursor comes from cursor().
+function Query:after(cursor: string): any
+    local tbl = self.tbl
+    local ok, values = false, nil
+    if type(cursor) == "string" and #cursor % 2 == 0 and not string.find(cursor, "[^0-9a-f]") then
+        local raw = string.gsub(cursor, "..", function(h)
+            return string.char(tonumber(h, 16) :: number)
+        end)
+        ok, values = pcall(kc.unpack, raw, 4)
+    end
+    if not ok or type(values[1]) ~= "string" or type(values[2]) ~= "string" then
+        fail(tbl.where .. " query after takes a cursor from cursor(), got " .. tostring(cursor))
+    end
+    self.cur = { field = values[1], dir = values[2], value = values[3], id = values[4] }
+    return self
+end
+
+-- Whether row r comes after the cursor in q's order.
+local function beyond(q: any, r: any): boolean
+    local c = q.cur
+    local v = r[c.field]
+    if v ~= c.value then
+        if q.desc then
+            return less(v, c.value)
+        end
+        return less(c.value, v)
+    end
+    if q.desc then
+        return r.id < c.id
+    end
+    return r.id > c.id
+end
+
 -- Reads through the index named `name`, or "id" for the table itself.
 function Query:using(name: string): any
     self.use = name
@@ -583,6 +647,9 @@ function matches(q: any, r: any): boolean
             return false
         end
     end
+    if q.cur and not beyond(q, r) then
+        return false
+    end
     for _, h in q.checks do
         if not has_link(q, h, r.id) then
             return false
@@ -594,16 +661,6 @@ function matches(q: any, r: any): boolean
         end
     end
     return true
-end
-
-local function less(a: any, b: any): boolean
-    if a == nil or b == nil then
-        return a == nil and b ~= nil
-    end
-    if type(a) == "boolean" then
-        return not a and b
-    end
-    return a < b
 end
 
 -- How to read q: which index, the key span, and whether the keys come in
@@ -711,7 +768,53 @@ end
 -- the rows that link to them. Other checks probe each candidate row's
 -- edges. When q itself would read its whole table, the first driving check
 -- supplies its rows.
+-- Validates q's cursor and, when the read comes in cursor order, starts it
+-- at the cursor's key.
+local function from_cursor(q: any, p: any, parts: { string })
+    local c = q.cur
+    if c == nil then
+        return
+    end
+    local tbl = q.tbl
+    local field, dir = cursor_order(q)
+    if c.field ~= field or c.dir ~= dir then
+        fail(tbl.where .. " query cursor follows order " .. c.field .. " " .. c.dir
+            .. ", and the query orders by " .. field .. " " .. dir)
+    end
+    local key
+    if p.ordered and p.ix and not p.via then
+        if p.ix.primary then
+            key = lay.row(tbl.t, c.id)
+        elseif not p.ix.unique then
+            local r = { [c.field] = c.value }
+            for i, v in p.values do
+                r[p.ix.on[i]] = v
+            end
+            key = lay.entry(tbl.t, p.ix, r, c.id)
+        end
+    end
+    if key == nil then
+        parts[#parts + 1] = "after cursor"
+        return
+    end
+    if q.desc then
+        if p.hi == nil or key < p.hi then
+            p.hi = key
+        end
+    else
+        local lo = kc.after(key) :: string
+        if lo > p.lo then
+            p.lo = lo
+        end
+    end
+    parts[1] = parts[1] .. " from cursor"
+end
+
 local function plan(q: any): any
+    if q.cur then
+        -- a cursor pages in id order when the query sets no order
+        q.sortField = q.sortField or "id"
+    end
     local p = index_plan(q)
     local parts = { p.name }
     for _, h in q.checks do
@@ -726,6 +829,7 @@ local function plan(q: any): any
             parts[#parts + 1] = part
         end
     end
+    from_cursor(q, p, parts)
     p.name = table.concat(parts, ", ")
     return p
 end
@@ -914,9 +1018,9 @@ function Query:has(name: string, fn: ((any) -> any)?): any
         end
         sub = tbl.peers[e.target]:query()
         sub = fn(sub) or sub
-        if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 then
+        if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 or sub.cur then
             fail(tbl.where .. " query has " .. name .. " filters rows with where, has and"
-                .. " using; order, limit, offset and with have no effect there")
+                .. " using; order, limit, offset, after and with have no effect there")
         end
     end
     self.checks[#self.checks + 1] = { e = e, sub = sub }

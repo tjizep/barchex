@@ -111,6 +111,39 @@ function steps.joins(c)
     }
 end
 
+-- cursor pages: each walk answers its plan, then each page's ids
+function steps.pages(c)
+    local U = c.User
+    local out = {}
+    local function walk(make, n)
+        local pages, cur, plan = {}, nil, nil
+        repeat
+            local q = make():limit(n)
+            if cur then
+                q:after(cur)
+                plan = q:explain()
+            end
+            local rs = q:all()
+            local ids = {}
+            for i, r in rs do
+                ids[i] = r.id
+            end
+            pages[#pages + 1] = table.concat(ids, ",")
+            cur = rs[1] and q:cursor(rs[#rs])
+        until #rs < n
+        out[#out + 1] = plan .. ": " .. table.concat(pages, " ")
+    end
+    walk(function() return U:query():order("age") end, 2)
+    walk(function() return U:query():order("age", "desc") end, 2)
+    walk(function() return U:query() end, 2)
+    walk(function() return U:query():order("id", "desc") end, 4)
+    walk(function() return U:query():where("name", "=", "ann"):order("age", "desc") end, 1)
+    walk(function() return U:query():order("name") end, 4)
+    walk(function() return U:query():where("id", "=", 1):queryFriends() end, 1)
+    walk(function() return U:query():where("email", "=", "c@d") end, 1)
+    return out
+end
+
 -- desc reads: the ids, the plan, and how many rows the query read
 function steps.desc(c)
     local n = 0
@@ -152,6 +185,18 @@ local errors = {
     hasfn = function(c) c.User:query():hasPostsWith() end,
     hasedge = function(c) c.User:query():hasLikes() end,
     withfn = function(c) c.User:query():withPosts(3) end,
+    cursor = function(c) c.User:query():after("zz"):all() end,
+    cursororder = function(c)
+        local q = c.User:query():order("age")
+        local cur = q:cursor(q:first())
+        c.User:query():order("name"):after(cur):all()
+    end,
+    cursorrow = function(c) c.User:query():cursor(3) end,
+    hasafter = function(c)
+        local q = c.Post:query()
+        local cur = q:cursor(q:first())
+        c.User:query():hasPostsWith(function(p) p:after(cur) end)
+    end,
 }
 
 function call(step, mode)
@@ -276,6 +321,23 @@ def test_has_filters_and_with_loads(client, mode):
     ]
 
 
+@pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
+def test_cursor_pages(client, mode):
+    setup(client, "query_pages_" + mode)
+    assert client.execute_command("CALLF", "QUERYAPP", "pages", mode) == [
+        # an index that serves the order starts each page at the cursor
+        "by_age from cursor: 3,6 2,4 1,5 ",
+        "by_age from cursor: 5,1 4,2 6,3 ",
+        "id from cursor: 1,2 3,4 5,6 ",
+        "id from cursor: 6,5,4,3 2,1",
+        "by_name_age = name from cursor: 1 6 ",
+        # a sorted read checks the cursor on each row
+        "id then sort, after cursor: 1,6,2,3 4,5",
+        "edge user_friends, after cursor: 2 5 ",
+        "by_email = email, after cursor: 2 ",
+    ]
+
+
 @pytest.mark.parametrize("step, error", [
     ("field", "ENT table User has no field nick"),
     ("op", "ENT table User query has no operator like"),
@@ -290,6 +352,10 @@ def test_has_filters_and_with_loads(client, mode):
     ("hasfn", "ENT table User query hasPostsWith takes a function, got nil"),
     ("hasedge", "ENT table User has no edge likes"),
     ("withfn", "ENT table User query with takes a function, got 3"),
+    ("cursor", "ENT table User query after takes a cursor from cursor\\(\\), got zz"),
+    ("cursororder", "ENT table User query cursor follows order age asc, and the query orders by name asc"),
+    ("cursorrow", "ENT table User query cursor takes a row, got 3"),
+    ("hasafter", "ENT table User query has posts filters rows with where, has and using; order, limit, offset, after"),
 ])
 def test_query_and_edge_errors(client, step, error):
     setup(client, "query_errors_" + step)

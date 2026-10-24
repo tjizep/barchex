@@ -461,6 +461,8 @@ c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 | `where(fn)` | keeps rows for which `fn(row)` is true |
 | `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
 | `limit(n)`, `offset(n)` | applied after the order |
+| `cursor(row)` | a string that marks `row`'s place in the query's order |
+| `after(cursor)` | keeps the rows after the cursor's row; with no `order`, the query orders by id |
 | `using(name)` | reads through the named index, or `"id"` for the table |
 | `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
@@ -478,6 +480,26 @@ matching row before sorting. A
 unique index is used only when every one of its fields has an `=` filter,
 because it leaves out rows with a missing value. Filters on other fields
 are checked on each row read.
+
+Use `cursor` and `after` to page through a query. Each page starts where the
+last one ended, so later pages cost the same as the first, and rows added or
+removed between pages do not shift the next page as they would with
+`offset`:
+
+```lua
+local q = c.Post:query():order("stars", "desc"):limit(20)
+local page = q:all()
+local cur = q:cursor(page[#page])     -- hand this to the caller
+-- later, with the same order:
+local next = c.Post:query():order("stars", "desc"):limit(20):after(cur):all()
+```
+
+A cursor is a hex string that records the order's field and direction, the
+row's value and its id. `after` raises an error when the query's order
+differs from the cursor's. When the index read already comes in the
+cursor's order, the read starts at the cursor and `explain` adds
+`from cursor`; otherwise each row is checked and `explain` ends with
+`after cursor`.
 
 `has` and `with` join through edges:
 

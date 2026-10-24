@@ -20,6 +20,7 @@ remains.
 | create, get, update and delete with index upkeep | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | queries and edges | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge joins: `has`, `has<Edge>With` and `with` eager loading | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| cursor pagination: `cursor` and `after` | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -188,6 +189,12 @@ on the row.
 
 Following an edge collects the linked ids, then reads those rows in id
 order. A later version could intersect them with an index on the target.
+
+Cursor pages replace `offset` for paging. A cursor holds the order's field
+and direction, the last row's value and its id, so a page whose index read
+comes in that order starts at the key the cursor names. That avoids the
+offset walk inside a transaction for `asc` pages. A `desc` page still
+counts the span below the cursor to read it from the end.
 
 Joins go through edges, as in Go ent, and each is an index nested loop over
 edge keys. `has<Edge>With(fn)` picks one of two ways to run. When the
