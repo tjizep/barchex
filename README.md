@@ -463,6 +463,9 @@ c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 | `limit(n)`, `offset(n)` | applied after the order |
 | `using(name)` | reads through the named index, or `"id"` for the table |
 | `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
+| `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
+| `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
+| `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
 | `explain()` | the plan, such as `by_name_age = name range age` |
 
@@ -475,6 +478,28 @@ matching row before sorting. A
 unique index is used only when every one of its fields has an `=` filter,
 because it leaves out rows with a missing value. Filters on other fields
 are checked on each row read.
+
+`has` and `with` join through edges:
+
+```lua
+-- users with a post of 5 stars or more
+c.User:query():hasPostsWith(function(p) p:where("stars", ">=", 5) end):all()
+-- each user with their three best posts in u.posts
+c.User:query():withPosts(function(p) p:order("stars", "desc"):limit(3) end):all()
+-- each post with its author in p.author, a row or nil
+c.Post:query():withAuthor():all()
+```
+
+A `has` filter that reads part of its table through an index runs first,
+and the rows linked to its matches become the candidates. `explain` shows
+this as `has posts from (by_stars range stars)`. Any other `has` checks the
+edges of each candidate row, which `explain` shows as `has posts`. A `has`
+filter with `order`, `limit`, `offset` or `with` raises an error.
+
+`with` runs after the outer query's `limit`, one query per answered row,
+and only for `all` and `first`. An edge with one row at its far end loads a
+row or `nil`; any other edge loads a list. Loaded edges are extra keys on
+the row, so pass `update` only the fields to change.
 
 Errors start with `ENT`, or with `ROWCODEC` for a value of the wrong kind or
 a missing required field. `ent.CLIENT` runs a self-check inside a

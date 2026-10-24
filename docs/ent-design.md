@@ -19,6 +19,7 @@ remains.
 | graph catalog and migrations | `ent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
 | create, get, update and delete with index upkeep | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | queries and edges | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| edge joins: `has`, `has<Edge>With` and `with` eager loading | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -188,6 +189,15 @@ on the row.
 Following an edge collects the linked ids, then reads those rows in id
 order. A later version could intersect them with an index on the target.
 
+Joins go through edges, as in Go ent, and each is an index nested loop over
+edge keys. `has<Edge>With(fn)` picks one of two ways to run. When the
+filter reads part of the target table through an index, it runs first and
+the reverse edges of its matches give the candidate rows. Otherwise each
+candidate row's edges are walked and the linked rows tested, each one once.
+`with<Edge>(fn)` runs one query per answered row over that row's links, so
+`fn`'s order and limit apply per row. Joins on plain fields are left out:
+a relationship worth joining on is declared as an edge.
+
 ## Open questions
 
 - **Unique edges in pessimistic transactions.** `link` checks a unique edge
@@ -201,6 +211,8 @@ order. A later version could intersect them with an index on the target.
   so both walk every key in the range: over 20,000 rows a `desc` query with
   a limit of 5 takes about 10 ms, against 2 ms for `asc`. It still reads
   only the rows it answers. Counting the overlay's keys on top of the node
-  counts would make both cheap again.
+  counts would make both cheap again. To do: try barch's ordered sharded key
+  space configuration, which may keep counts and offsets cheap inside a
+  transaction.
 - **Range with values.** A range that answers keys and values would remove
   the `get` per row.

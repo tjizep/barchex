@@ -69,6 +69,48 @@ function steps.delete(c)
     }
 end
 
+-- has() filters and with() eager loads
+function steps.joins(c)
+    local U, P = c.User, c.Post
+    local function titles(list)
+        local out = {}
+        for i, p in list do
+            out[i] = p.title
+        end
+        return table.concat(out, ",")
+    end
+    local anns = {}
+    for i, u in U:query():where("name", "=", "ann"):withPosts(function(p)
+        return p:order("stars", "desc")
+    end):all() do
+        anns[i] = u.id .. ":" .. titles(u.posts)
+    end
+    local authors = {}
+    for i, p in P:query():withAuthor():all() do
+        authors[i] = p.title .. "=" .. p.author.name
+    end
+    local top = U:query():where("id", "=", 1):withFriends(function(f)
+        f:order("id", "desc"):limit(1)
+    end):first()
+    return {
+        ids(U:query():hasPosts()),
+        ids(U:query():hasPostsWith(function(p) p:where("stars", "=", 5) end)),
+        ids(U:query():hasPostsWith(function(p) p:where("title", "=", "b") end)),
+        ids(U:query():where("name", "=", "ann"):hasPostsWith(function(p)
+            p:where("stars", "<", 4)
+        end)),
+        ids(P:query():hasAuthorWith(function(u) u:where("age", ">", 35) end):order("stars")),
+        ids(U:query():hasFriendsWith(function(f) f:hasPosts() end)),
+        ids(U:query():hasFriendsWith(function(f) f:hasPostsWith(function(p)
+            p:where("stars", ">", 4)
+        end) end)),
+        tostring(U:query():hasPosts():count()),
+        table.concat(anns, " "),
+        table.concat(authors, " "),
+        top.friends[1].name .. " " .. #top.friends,
+    }
+end
+
 -- desc reads: the ids, the plan, and how many rows the query read
 function steps.desc(c)
     local n = 0
@@ -106,6 +148,10 @@ local errors = {
     one = function(c) c.Post:create { title = "d", stars = 1, author = { 1, 4 } } end,
     taken = function(c) c.Post:link("author", 1, 4) end,
     missing = function(c) c.Post:create { title = "d", stars = 1, author = 99 } end,
+    hasorder = function(c) c.User:query():hasPostsWith(function(p) p:order("stars") end) end,
+    hasfn = function(c) c.User:query():hasPostsWith() end,
+    hasedge = function(c) c.User:query():hasLikes() end,
+    withfn = function(c) c.User:query():withPosts(3) end,
 }
 
 function call(step, mode)
@@ -206,6 +252,30 @@ def test_edges_link_follow_and_delete(client):
     assert run("delete") == ["0", " edge user_friends", "c"]
 
 
+@pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
+def test_has_filters_and_with_loads(client, mode):
+    setup(client, "query_joins_" + mode)
+    assert client.execute_command("CALLF", "QUERYAPP", "joins", mode) == [
+        # without a filter, has checks each row's edges
+        "1,2 id, has posts",
+        # a filter that reads part of Post supplies the users through the
+        # reverse edges
+        "1,2 has posts from (by_stars = stars)",
+        "1 id, has posts",
+        "1 by_name_age = name, has posts from (by_stars range stars)",
+        "2,1 has author from (by_age range age) then sort",
+        "1 id, has friends",
+        # nested filters drive too: posts with 5 stars, their authors, then
+        # the users who befriend them
+        "1 has friends from (has posts from (by_stars range stars))",
+        "2",
+        # ann 6 has no posts; ann 1's come by stars, highest first
+        "6: 1:a,b",
+        "a=ann b=ann c=bob",
+        "eve 1",
+    ]
+
+
 @pytest.mark.parametrize("step, error", [
     ("field", "ENT table User has no field nick"),
     ("op", "ENT table User query has no operator like"),
@@ -216,6 +286,10 @@ def test_edges_link_follow_and_delete(client):
     ("one", "ENT table Post edge author links one row, got 2"),
     ("taken", "ENT edge user_posts allows one User per Post, and Post row 1 has one"),
     ("missing", "ENT table User has no row 99"),
+    ("hasorder", "ENT table User query has posts filters rows with where, has and using"),
+    ("hasfn", "ENT table User query hasPostsWith takes a function, got nil"),
+    ("hasedge", "ENT table User has no edge likes"),
+    ("withfn", "ENT table User query with takes a function, got 3"),
 ])
 def test_query_and_edge_errors(client, step, error):
     setup(client, "query_errors_" + step)

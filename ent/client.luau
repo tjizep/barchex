@@ -20,6 +20,8 @@
 --       c.User:link("posts", u.id, p.id)     -- or unlink
 --       c.User:query():where("name", "=", "ann")
 --           :queryPosts():order("title", "desc"):limit(10):all()
+--       c.User:query():hasPostsWith(function(q) q:where("title", "=", "hi") end)
+--           :withPosts():all()             -- each u.posts holds u's posts
 --   end)
 --
 -- ent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
@@ -198,6 +200,23 @@ end
 
 local function first_key(prefix: string): string?
     return barch.store.range(prefix, kc.after(prefix), 1)[1]
+end
+
+-- The key prefix of the edges of edge store `s` at row pk: its forward edges
+-- when `forward`, else its reverse edges.
+local function edge_prefix(s: any, forward: boolean, pk: any): string
+    return forward and lay.edge(s, pk) or lay.edge_back(s, pk)
+end
+
+-- Calls each(other) for the rows that row pk links to through edge store
+-- `s`, in id order, until `each` answers true. Answers whether it did.
+local function linked(s: any, forward: boolean, pk: any, each: (any) -> boolean?,
+                      page: number?): boolean
+    local prefix = edge_prefix(s, forward, pk)
+    local pick = forward and lay.edge_to or lay.edge_from
+    return lay.scan(prefix, kc.after(prefix), function(k)
+        return each(pick(s, k))
+    end, page)
 end
 
 -- Raises an error unless `from` -> `to` can be added to edge `e`.
@@ -384,16 +403,46 @@ end
 -- queries ----------------------------------------------------------------------
 
 local Query = {}
+
+local function edge_name(rest: string): string
+    return string.lower(string.sub(rest, 1, 1)) .. string.sub(rest, 2)
+end
+
+-- queryPosts(), hasPosts(), hasPostsWith(fn) and withPosts(fn) name the edge
+-- posts in the method name.
 Query.__index = function(_, k)
     local m = Query[k]
-    if m ~= nil or type(k) ~= "string" or #k < 6 or string.sub(k, 1, 5) ~= "query" then
+    if m ~= nil or type(k) ~= "string" then
         return m
     end
-    -- queryPosts() follows the edge posts
-    local name = string.lower(string.sub(k, 6, 6)) .. string.sub(k, 7)
-    return function(self)
-        return self:follow(name)
+    local rest = string.match(k, "^query(%u.*)$")
+    if rest then
+        return function(self)
+            return self:follow(edge_name(rest))
+        end
     end
+    rest = string.match(k, "^has(%u.*)With$")
+    if rest then
+        return function(self, fn)
+            if type(fn) ~= "function" then
+                fail(self.tbl.where .. " query " .. k .. " takes a function, got " .. tostring(fn))
+            end
+            return self:has(edge_name(rest), fn)
+        end
+    end
+    rest = string.match(k, "^has(%u.*)$")
+    if rest then
+        return function(self)
+            return self:has(edge_name(rest))
+        end
+    end
+    rest = string.match(k, "^with(%u.*)$")
+    if rest then
+        return function(self, fn)
+            return self:with(edge_name(rest), fn)
+        end
+    end
+    return nil
 end
 
 local RANGE = { ["<"] = true, ["<="] = true, [">"] = true, [">="] = true }
@@ -424,7 +473,8 @@ end
 
 -- Starts a query over this table's rows.
 function Table:query(): any
-    return setmetatable({ tbl = self, conds = {}, preds = {}, skip = 0 }, Query)
+    return setmetatable({ tbl = self, conds = {}, preds = {}, checks = {}, loads = {}, skip = 0 },
+        Query)
 end
 
 -- Keeps the rows where `field op value` holds, op being one of = ~= < <= >
@@ -502,9 +552,39 @@ local function holds(c: any, v: any): boolean
     return v >= w
 end
 
-local function matches(q: any, r: any): boolean
+local matches
+
+-- Whether row pk has a link through check h, and when h has a filter, one
+-- to a row that matches it.
+local function has_link(q: any, h: any, pk: any): boolean
+    if h.set then
+        return h.set[pk] == true
+    end
+    local s = q.tbl.allEdges[h.e.store]
+    local forward = h.e.dir == "to"
+    if h.sub == nil then
+        return first_key(edge_prefix(s, forward, pk)) ~= nil
+    end
+    local target = q.tbl.peers[h.e.target]
+    return linked(s, forward, pk, function(other)
+        local m = h.memo[other]
+        if m == nil then
+            local r = read(target, other)
+            m = r ~= nil and matches(h.sub, r)
+            h.memo[other] = m
+        end
+        return m
+    end, 100)
+end
+
+function matches(q: any, r: any): boolean
     for _, c in q.conds do
         if not holds(c, r[c.field]) then
+            return false
+        end
+    end
+    for _, h in q.checks do
+        if not has_link(q, h, r.id) then
             return false
         end
     end
@@ -528,7 +608,7 @@ end
 
 -- How to read q: which index, the key span, and whether the keys come in
 -- the order q asks for.
-local function plan(q: any): any
+local function index_plan(q: any): any
     local tbl, t = q.tbl, q.tbl.t
     if q.idset then
         local ordered = q.sortField == nil or q.sortField == "id"
@@ -588,6 +668,7 @@ local function plan(q: any): any
         prefix = lay.index(t, ix, best.values)
     end
     best.lo, best.hi = prefix, kc.after(prefix)
+    best.full = #best.values == 0
     local parts = { ix.name }
     if #best.values > 0 then
         parts[#parts + 1] = "= " .. table.concat(ix.on, ",", 1, #best.values)
@@ -610,9 +691,11 @@ local function plan(q: any): any
         -- is checked against them
         if lo ~= nil and (type(lo) ~= "number" or math.abs(lo) ~= math.huge) then
             best.lo = prefix .. kc.encode(kind, lo)
+            best.full = false
         end
         if hi ~= nil and (type(hi) ~= "number" or math.abs(hi) ~= math.huge) then
             best.hi = kc.after(prefix .. kc.encode(kind, hi))
+            best.full = false
         end
         parts[#parts + 1] = "range " .. best.next
     end
@@ -623,10 +706,93 @@ local function plan(q: any): any
     return best
 end
 
--- The matching rows, in order, after offset and limit.
-local function rows(q: any): { any }
+-- index_plan, plus how each has() check runs. A check whose filter reads
+-- part of its table drives: it reads the matching rows first and collects
+-- the rows that link to them. Other checks probe each candidate row's
+-- edges. When q itself would read its whole table, the first driving check
+-- supplies its rows.
+local function plan(q: any): any
+    local p = index_plan(q)
+    local parts = { p.name }
+    for _, h in q.checks do
+        local sp = h.sub and plan(h.sub)
+        h.drive = sp ~= nil and not sp.full
+        local part = "has " .. h.e.name .. (h.drive and " from (" .. sp.name .. ")" or "")
+        if h.drive and p.full and p.via == nil then
+            p.via, p.full = h, false
+            p.ordered = q.sortField == nil or q.sortField == "id"
+            parts[1] = part .. (p.ordered and "" or " then sort")
+        else
+            parts[#parts + 1] = part
+        end
+    end
+    p.name = table.concat(parts, ", ")
+    return p
+end
+
+-- Resets the has() checks of q for a run, and reads the rows of each
+-- driving one.
+local function prepare(q: any)
+    for _, h in q.checks do
+        h.memo, h.set = {}, nil
+        if h.drive then
+            local set = {}
+            local s = q.tbl.allEdges[h.e.store]
+            for _, other in h.sub:ids() do
+                linked(s, h.e.dir ~= "to", other, function(pk)
+                    set[pk] = true
+                    return false
+                end)
+            end
+            h.set = set
+        elseif h.sub then
+            prepare(h.sub)
+        end
+    end
+end
+
+-- Fills each row's eager-loaded edges.
+local function load(q: any, list: { any })
+    local tbl = q.tbl
+    for _, w in q.loads do
+        local s = tbl.allEdges[w.e.store]
+        local forward = w.e.dir == "to"
+        local single = one(tbl, w.e)
+        local target = tbl.peers[w.e.target]
+        for _, r in list do
+            local ids = {}
+            linked(s, forward, r.id, function(other)
+                ids[#ids + 1] = other
+                return false
+            end)
+            local sub = target:query()
+            sub.idset, sub.via = ids, w.e.store
+            if w.fn then
+                sub = w.fn(sub) or sub
+            end
+            if single then
+                r[w.e.name] = sub:first()
+            else
+                r[w.e.name] = sub:all()
+            end
+        end
+    end
+end
+
+-- The matching rows, in order, after offset and limit, with their eager
+-- loaded edges when `loading`.
+local function rows(q: any, loading: boolean?): { any }
     local tbl = q.tbl
     local p = plan(q)
+    prepare(q)
+    local idset = q.idset
+    if p.via then
+        idset = {}
+        for pk in p.via.set do
+            idset[#idset + 1] = pk
+        end
+        table.sort(idset)
+    end
     local want = q.lim and q.skip + q.lim
     local early = p.ordered and want ~= nil
     -- an ordered read in desc order reads from the end, so it can stop early
@@ -640,10 +806,10 @@ local function rows(q: any): { any }
         end
         return false
     end
-    if q.idset then
-        local n = #q.idset
+    if idset then
+        local n = #idset
         for i = 1, n do
-            if consider(q.idset[back and n + 1 - i or i]) then
+            if consider(idset[back and n + 1 - i or i]) then
                 break
             end
         end
@@ -671,22 +837,25 @@ local function rows(q: any): { any }
             out[i], out[n + 1 - i] = out[n + 1 - i], out[i]
         end
     end
-    if q.skip == 0 and (want == nil or #out <= want) then
-        return out
+    if q.skip ~= 0 or (want ~= nil and #out > want) then
+        out = table.move(out, q.skip + 1, math.min(#out, want or #out), 1, {})
     end
-    return table.move(out, q.skip + 1, math.min(#out, want or #out), 1, {})
+    if loading then
+        load(q, out)
+    end
+    return out
 end
 
 -- The rows the query matches.
 function Query:all(): { any }
-    return rows(self)
+    return rows(self, true)
 end
 
 -- The first row the query matches, or nil.
 function Query:first(): any
     local lim = self.lim
     self.lim = 1
-    local r = rows(self)[1]
+    local r = rows(self, true)[1]
     self.lim = lim
     return r
 end
@@ -715,22 +884,55 @@ end
 function Query:follow(name: string): any
     local tbl = self.tbl
     local e = find_edge(tbl, name)
+    local s = tbl.allEdges[e.store]
     local seen, list = {}, {}
     for _, pk in self:ids() do
-        local s = tbl.allEdges[e.store]
-        local prefix = e.dir == "to" and lay.edge(s, pk) or lay.edge_back(s, pk)
-        lay.walk(prefix, function(k)
-            local other = e.dir == "to" and lay.edge_to(s, k) or lay.edge_from(s, k)
+        linked(s, e.dir == "to", pk, function(other)
             if not seen[other] then
                 seen[other] = true
                 list[#list + 1] = other
             end
+            return false
         end)
     end
     table.sort(list)
     local q = tbl.peers[e.target]:query()
     q.idset, q.via = list, e.store
     return q
+end
+
+-- Keeps the rows that link to at least one row through edge `name`. With
+-- fn, the linked row must also match the query fn(q) builds, from where,
+-- has and using calls; fn may answer q or nothing.
+function Query:has(name: string, fn: ((any) -> any)?): any
+    local tbl = self.tbl
+    local e = find_edge(tbl, name)
+    local sub
+    if fn ~= nil then
+        if type(fn) ~= "function" then
+            fail(tbl.where .. " query has takes a function, got " .. tostring(fn))
+        end
+        sub = tbl.peers[e.target]:query()
+        sub = fn(sub) or sub
+        if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 then
+            fail(tbl.where .. " query has " .. name .. " filters rows with where, has and"
+                .. " using; order, limit, offset and with have no effect there")
+        end
+    end
+    self.checks[#self.checks + 1] = { e = e, sub = sub }
+    return self
+end
+
+-- Loads the rows each answered row links to through edge `name` into
+-- row[name]: a row or nil for an edge with one row at its far end, else a
+-- list. fn(q) may filter, order and limit each row's list.
+function Query:with(name: string, fn: ((any) -> any)?): any
+    local e = find_edge(self.tbl, name)
+    if fn ~= nil and type(fn) ~= "function" then
+        fail(self.tbl.where .. " query with takes a function, got " .. tostring(fn))
+    end
+    self.loads[#self.loads + 1] = { e = e, fn = fn }
+    return self
 end
 
 -- The tables of this space's schema, by name, for a transaction the caller
