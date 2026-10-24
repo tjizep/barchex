@@ -260,11 +260,13 @@ local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
 | `float` | any number except NaN; -0 is stored as 0 | numeric, `-inf` to `inf` |
 | `string` | any bytes | byte order, a prefix before its extensions |
 | `bool` | `false`, `true` | `false` first |
+| `uuid` | 36 lowercase characters, as `barch.uuid()` answers | the uuid's text order |
 
 `nil` encodes as null for every kind and sorts before every value. `encode`
 raises an error for a value of the wrong kind, a fractional or out-of-range
-`int`, and NaN. Encoded values contain no space, NUL or `\1` byte, which
-barch would otherwise read as a tuple separator, refuse, or cut short in a
+`int`, NaN, and a uuid that is not 36 lowercase characters. Encoded values
+contain no space, NUL or `\1` byte, which barch would otherwise read as a
+tuple separator or refuse, and which earlier barch builds cut short in a
 range. Start each key with a prefix that begins with a letter, such as
 `ent.`, so barch keeps the whole key as text. `after(prefix)` answers the
 exclusive upper bound for a range over every key that starts with `prefix`.
@@ -324,6 +326,7 @@ local User = ent.schema "User" {
     indexes = { ent.index("name", "age") },       -- index by_name_age
 }
 local Post = ent.schema "Post" {
+    id = "int",                                   -- ids 1, 2, 3, ...
     fields = { ent.field.string "title" },
     edges = { ent.edge.from "author" "User":ref "posts":unique() },
 }
@@ -338,8 +341,13 @@ local version, fields = ent.ids(User, previous)   -- fields for rc.fields
 | `ent.edge.to "name" "Table"` | `:unique()` |
 | `ent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
 
-Every table has an integer primary key named `id`, so a field cannot use
-that name. A table's keys use its name in snake case, so `BlogPost` stores as
+Every table has a primary key named `id`, so a field cannot use that name.
+By default each new row's id is a `barch.uuid()` string, such as
+`019a1f3c-7d2e-7a41-9b3c-5e6f7a8b9c0d`. Ids from one server sort in creation
+order, and creates in one table never conflict over the id. Set
+`id = "int"` for ids 1, 2, 3 and so on from a counter per table, which makes
+concurrent creates in that table conflict and retry. A table keeps its id
+kind once it has a catalog; see MIGRATE. A table's keys use its name in snake case, so `BlogPost` stores as
 `blog_post`. `ent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
 and an `ent.edge.from` reads that edge backwards.
 
@@ -381,7 +389,8 @@ leave stored rows unreadable:
 - a new field that is neither `:optional()` nor has a `:default()`;
 - a kind change other than `int` to `float`;
 - a field rename in a table that has stored `json` rows;
-- a unique index whose values two stored rows already share.
+- a unique index whose values two stored rows already share;
+- a change to a table's `id` kind.
 
 Index builds read the whole table in that one transaction, so a large table
 can exceed the function deadline. `ent.MIGRATE` runs the self-check of the
@@ -393,7 +402,7 @@ current. Call `ent.tx` from the application's space:
 ```lua
 local ent = require("ent.CLIENT")
 ent.tx(function(c)
-    local u = c.User:create { email = "a@b", name = "ann" }  -- u.id == 1
+    local u = c.User:create { email = "a@b", name = "ann" }  -- u.id, a uuid
     c.User:get(u.id)                         -- the row, or nil
     c.User:by("email", "a@b")                -- the row, through by_email
     c.User:update(u.id, { name = "al" }, { "age" })  -- sets name, clears age
@@ -404,10 +413,10 @@ end)
 | call | answers | raises an error when |
 |---|---|---|
 | `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind, or a required field is missing |
-| `get(id)` | the row, or `nil` | `id` is not a positive integer |
+| `get(id)` | the row, or `nil` | `id` does not fit the table's id kind: a lowercase uuid, or a positive integer for `id = "int"` |
 | `by(index, values...)` | the row, or `nil` | there is no such unique index, or the number of values differs from its fields |
 | `update(id, values, clear)` | the stored row | there is no row `id`, or as for `create` |
-| `delete(id)` | `true`, or `false` if there was no row | `id` is not a positive integer |
+| `delete(id)` | `true`, or `false` if there was no row | `id` does not fit the table's id kind |
 
 `by` takes an index name, such as `by_email`, or a field name with a unique
 `by_<field>` index. Rows are tables of field values plus `id`. A field the
@@ -417,17 +426,17 @@ stored row lacks reads as its `:default()`.
 a conflict, and answers what `fn` answers. With `pessimistic` true, a row or
 unique entry about to be written is read with the exclusive lock, so two
 writers of one value wait for each other. Inside a transaction you already
-run, `ent.client(pessimistic)` answers the same `c`. Each new id comes from
-one counter per table, so concurrent creates in one table conflict and
-retry. A refused call writes nothing, so `fn` can catch its error and go on.
+run, `ent.client(pessimistic)` answers the same `c`. A table with
+`id = "int"` takes each new id from one counter, so concurrent creates in
+that table conflict and retry. A refused call writes nothing, so `fn` can catch its error and go on.
 
 Edges link rows. Pass an edge's name to `create` with an id, a row, or a
 list of them, or call `link` and `unlink`:
 
 ```lua
 local p = c.Post:create { title = "hi", author = u }   -- edge.from author
-c.User:link("friends", 1, 2)                          -- edge.to friends
-c.User:unlink("friends", 1, 2)                        -- false if not linked
+c.User:link("friends", u.id, v.id)                    -- edge.to friends
+c.User:unlink("friends", u.id, v.id)                  -- false if not linked
 ```
 
 A `:unique()` edge links each row to at most one row, and `create` and
@@ -443,7 +452,7 @@ c.User:query()
     :where(function(r) return r.age % 2 == 0 end)
     :order("age", "desc"):offset(10):limit(10)
     :all()                                -- or first, ids, count
-c.User:query():where("id", "=", 1):queryPosts():all()  -- follow an edge
+c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 ```
 
 | method | effect |

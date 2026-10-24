@@ -16,11 +16,12 @@ local m = require("ent.MIGRATE")
 local function v1()
     return ent.graph {
         ent.schema "User" {
+            id = "int",
             fields = { ent.field.string "email", ent.field.string "name" },
             edges = { ent.edge.to "posts" "Post" },
             indexes = { ent.index("name") },
         },
-        ent.schema "Post" { fields = { ent.field.string "title" } },
+        ent.schema "Post" { id = "int", fields = { ent.field.string "title" } },
     }
 end
 
@@ -28,12 +29,13 @@ local function v2(unique)
     local email = ent.field.string "email"
     return ent.graph {
         ent.schema "User" {
+            id = "int",
             fields = { unique and email:unique() or email, ent.field.string "name",
                        ent.field.int "age":optional() },
             edges = { ent.edge.to "posts" "Post" },
             indexes = { ent.index("email", "name") },
         },
-        ent.schema "Post" { fields = { ent.field.string "title" } },
+        ent.schema "Post" { id = "int", fields = { ent.field.string "title" } },
     }
 end
 

@@ -10,7 +10,8 @@
 --   CALLF BLOG timeline <email> [n]          -> newest posts by people the user follows
 --   CALLF BLOG top [n]                       -> the n posts with the most stars
 --
--- Post lists answer "<id> <stars> <title>" lines. n defaults to 10.
+-- Ids are barch.uuid() strings. Post lists answer "<id> <stars> <title>"
+-- lines. n defaults to 10.
 
 local blog = require("blog.SCHEMA")
 local m = require("ent.MIGRATE")
@@ -60,15 +61,14 @@ function commands.follow(c, email, other)
 end
 
 function commands.star(c, id)
-    local pk = tonumber(id)
-    local p = pk and c.Post:get(pk)
+    local p = c.Post:get(id)
     if p == nil then
         fail("has no post " .. tostring(id))
     end
     return c.Post:update(p.id, { stars = p.stars + 1 }).stars
 end
 
--- Ids grow with time, so the newest posts have the highest ids.
+-- barch.uuid() ids grow with time, so the newest posts have the highest ids.
 function commands.posts(c, email, n)
     local q = c.User:query():where("id", "=", user(c, email).id):queryPosts()
     return lines(q:order("id", "desc"):limit(count(n)):all())

@@ -23,9 +23,7 @@ CALLF BLOG migrate
 ```
 
 `migrate` answers the schema version. Call it again after you change
-`schema.luau` and run `SETF` for it again. A second `SETF` of a function that
-already exists answers `OK`, but current barch keeps running the first body,
-so give the changed function a new name or install it in a new space.
+`schema.luau` and run `SETF` for it again.
 
 ## Commands
 
@@ -43,15 +41,16 @@ Each command runs in one transaction. Post lists answer one
 | `CALLF BLOG timeline <email> [n]` | the newest `n` posts by the users they follow |
 | `CALLF BLOG top [n]` | the `n` posts with the most stars |
 
-Ids grow over time, so `posts` and `timeline` sort by id, highest first.
+Ids are `barch.uuid()` strings, which grow over time, so `posts` and
+`timeline` sort by id, highest first. Pass the id `post` answered to `star`.
 
 ```
-CALLF BLOG user ann@x Ann        -> 1
-CALLF BLOG user cy@x Cy          -> 2
-CALLF BLOG post ann@x hello hi   -> 1
+CALLF BLOG user ann@x Ann        -> "019a1f3c-7d2e-7a41-9b3c-5e6f7a8b9c0d"
+CALLF BLOG user cy@x Cy          -> "019a1f3c-7d31-7c02-8e15-2a3b4c5d6e7f"
+CALLF BLOG post ann@x hello hi   -> "019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50"
 CALLF BLOG follow cy@x ann@x     -> OK
-CALLF BLOG star 1                -> 1
-CALLF BLOG timeline cy@x         -> 1) "1 1 hello"
+CALLF BLOG star 019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50   -> 1
+CALLF BLOG timeline cy@x         -> 1) "019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50 1 hello"
 ```
 
 ## Errors
@@ -60,6 +59,7 @@ CALLF BLOG timeline cy@x         -> 1) "1 1 hello"
 |---|---|
 | `BLOG has no user <email>` | no user has that email |
 | `BLOG has no post <id>` | `star` names a post that does not exist |
+| `ENT table Post wants a uuid id, got <id>` | `star` names something that is not a lowercase uuid |
 | `BLOG wants a count of 1 or more, got <n>` | `n` is not a whole number of 1 or more |
 | `BLOG has no command <name>` | the first argument is not a command above |
 | `ENT table User index by_email is unique, and row <id> already has email=<email>` | `user` reuses an email |

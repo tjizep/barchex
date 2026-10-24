@@ -12,11 +12,11 @@
 --
 -- barch reads a key with a space in it as a tuple, and a key or tuple part
 -- that parses as a number as that number (integers before doubles, whatever
--- their values), and refuses a key with a NUL in it. A key with "\1" in it
--- is stored, but RANGE and KEYS give it back cut short at that byte. So an
--- encoded value never holds a NUL, a "\1" or a space, and the caller's prefix
--- has to start with a letter, such as "ent.". barch walks every other byte
--- in unsigned order.
+-- their values), and refuses a key with a NUL in it. Earlier barch builds gave
+-- a key with "\1" in it back from RANGE and KEYS cut short at that byte, and
+-- keys stored then still have to sort the same way. So an encoded value never
+-- holds a NUL, a "\1" or a space, and the caller's prefix has to start with a
+-- letter, such as "ent.". barch walks every other byte in unsigned order.
 --
 --   kind      encoded as                                   decodes to
 --   (nil)     "-"                                          nil, before any value
@@ -25,6 +25,8 @@
 --   "float"   "f" + 16 hex digits of the IEEE bits,        number; -0 is 0,
 --             sign bit flipped (all bits when negative)    NaN is refused
 --   "string"  "s" + escaped bytes + "\2\2"                 string, any bytes
+--   "uuid"    "u" + its 32 hex digits                      the uuid, 36 lowercase
+--                                                          characters with dashes
 --
 -- A string escapes five bytes and keeps the order of all of them:
 --   "\0" -> "\2\3"   "\1" -> "\2\4"   "\2" -> "\2\5"
@@ -85,6 +87,22 @@ local function enc_string(s: string): string
     return "s" .. string.gsub(s, "[%z\1\2\31 ]", ESCAPE) .. "\2\2"
 end
 
+local UUID = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+
+-- Whether `s` is a uuid as barch.uuid() writes it: 36 characters, lowercase
+-- hex digits and four dashes.
+function is_uuid(s: any): boolean
+    return type(s) == "string" and string.match(s, UUID) ~= nil and string.lower(s) == s
+end
+
+local function enc_uuid(s: string): string
+    if not is_uuid(s) then
+        error("KEYCODEC uuid needs 36 lowercase characters like barch.uuid(), got "
+            .. tostring(s), 3)
+    end
+    return "u" .. string.gsub(s, "-", "")
+end
+
 local function enc_bool(b: boolean): string
     if type(b) ~= "boolean" then
         error("KEYCODEC bool needs a boolean, got " .. type(b), 3)
@@ -97,9 +115,15 @@ local ENCODERS = {
     float = enc_float,
     string = enc_string,
     bool = enc_bool,
+    uuid = enc_uuid,
 }
 
--- The key text for one value of `kind`: "int", "float", "string" or "bool".
+-- How many bytes a value of `kind` takes, for the kinds whose values all
+-- take the same: a pk at the end of a key is read from there.
+WIDTH = { int = 17, uuid = 33 }
+
+-- The key text for one value of `kind`: "int", "float", "string", "bool"
+-- or "uuid".
 -- nil encodes as null whatever the kind.
 function encode(kind: string, value: any): string
     local enc = ENCODERS[kind]
@@ -145,6 +169,13 @@ function decode(key: string, at: number?): (any, number)
     elseif tag == "i" then
         local hi, lo = hex32(key, pos + 1), hex32(key, pos + 9)
         return (hi - SIGN) * TWO32 + lo, pos + 17
+    elseif tag == "u" then
+        local h = string.sub(key, pos + 1, pos + 32)
+        if #h ~= 32 or not string.match(h, "^%x+$") then
+            error("KEYCODEC truncated uuid at byte " .. pos, 2)
+        end
+        return string.sub(h, 1, 8) .. "-" .. string.sub(h, 9, 12) .. "-" .. string.sub(h, 13, 16)
+            .. "-" .. string.sub(h, 17, 20) .. "-" .. string.sub(h, 21), pos + 33
     elseif tag == "f" then
         local hi, lo = hex32(key, pos + 1), hex32(key, pos + 9)
         if hi >= SIGN then
@@ -231,6 +262,7 @@ function selftest(): (boolean, string?)
         { "string", "" }, { "string", "plain" }, { "string", "a b" }, { "string", "\0\1\2\31 \255" },
         { "string", "\2\2" }, { "string", "\1\1" }, { "string", "\31\31\2" },
         { "bool", true }, { "bool", false },
+        { "uuid", "01a16f3f-429a-7b08-9017-ec30094a149b" }, { "uuid", barch.uuid() },
     }
     for _, c in cases do
         local key = encode(c[1], c[2])
@@ -255,7 +287,13 @@ function selftest(): (boolean, string?)
         or back[5] ~= "" or next ~= #key + 1 then
         return false, "pack and unpack disagreed"
     end
-    for _, bad in { { "int", 1.5 }, { "int", 2 ^ 54 }, { "float", 0 / 0 }, { "string", 1 } } do
+    local u1, u2 = barch.uuid(), barch.uuid()
+    if not (encode("uuid", u1) < encode("uuid", u2)) or #encode("uuid", u1) ~= WIDTH.uuid
+        or #encode("int", 7) ~= WIDTH.int then
+        return false, "uuid order or width"
+    end
+    for _, bad in { { "int", 1.5 }, { "int", 2 ^ 54 }, { "float", 0 / 0 }, { "string", 1 },
+                    { "uuid", "01A16F3F-429A-7B08-9017-EC30094A149B" }, { "uuid", "x" } } do
         if pcall(encode, bad[1], bad[2]) then
             return false, bad[1] .. " accepted " .. tostring(bad[2])
         end

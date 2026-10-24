@@ -10,7 +10,7 @@
 -- From the application's space, after MIGRATE:
 --
 --   ent.tx(function(c)
---       local u = c.User:create { email = "a@b", name = "ann" }  -- u.id = 1
+--       local u = c.User:create { email = "a@b", name = "ann" }  -- u.id, a uuid
 --       c.User:get(u.id)                     -- the row, or nil
 --       c.User:by("email", "a@b")            -- the row, through by_email
 --       c.User:update(u.id, { name = "bo" }, { "age" })  -- sets name, clears age
@@ -25,7 +25,8 @@
 -- ent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
 -- conflict. Inside a transaction the caller already runs, ent.client(p)
 -- answers the same `c`. Each answers rows as tables of field values with
--- the row's integer `id`; a field the row lacks reads as its default.
+-- the row's `id`: a barch.uuid() string, or an integer for a table declared
+-- with id = "int". A field the row lacks reads as its default.
 --
 -- Errors start with ENT, or ROWCODEC for a value of the wrong kind or a
 -- missing field that is not optional.
@@ -64,14 +65,18 @@ local function get(self: any, key: string, exclusive: boolean?): string?
 end
 
 local function check_pk(self: any, pk: any)
-    if type(pk) ~= "number" or pk < 1 or pk ~= math.floor(pk) then
+    if lay.id_kind(self.t) == "uuid" then
+        if not kc.is_uuid(pk) then
+            fail(self.where .. " wants a uuid id, got " .. tostring(pk))
+        end
+    elseif type(pk) ~= "number" or pk < 1 or pk ~= math.floor(pk) then
         fail(self.where .. " wants an integer id, got " .. tostring(pk))
     end
 end
 
 -- The row at pk, filled with defaults, or nil. A pessimistic caller about
 -- to write the row reads it with the exclusive lock.
-local function read(self: any, pk: number, exclusive: boolean?): any
+local function read(self: any, pk: any, exclusive: boolean?): any
     local v = get(self, lay.row(self.t, pk), exclusive)
     if v == nil then
         return nil
@@ -97,9 +102,9 @@ local function set_fields(self: any, r: any, values: any)
 end
 
 -- Raises an error if another row holds the unique entry `key`.
-local function check_free(self: any, ix: any, key: string, pk: number, r: any)
+local function check_free(self: any, ix: any, key: string, pk: any, r: any)
     local other = get(self, key, true)
-    if other ~= nil and tonumber(other) ~= pk then
+    if other ~= nil and lay.unique_pk(self.t, other) ~= pk then
         local parts = {}
         for i, f in ix.on do
             parts[i] = f .. "=" .. tostring(r[f])
@@ -112,7 +117,7 @@ end
 -- Stores row `r` at pk, given the row it replaces (nil for a new row), and
 -- moves each index entry whose values changed. Everything is checked
 -- before the first write, so an error leaves the store as it was.
-local function store(self: any, pk: number, old: any, r: any, counter: string?): any
+local function store(self: any, pk: any, old: any, r: any, counter: string?): any
     local value = rc.encode(self.fields, self.t.format, self.version, r)
     local moves = {}
     for _, ix in self.t.indexes do
@@ -155,7 +160,7 @@ end
 
 -- The from and to pks of edge `e`'s store, given this table's pk and the
 -- other table's.
-local function ends(e: any, pk: number, other: number): (number, number)
+local function ends(e: any, pk: any, other: any): (any, any)
     if e.dir == "to" then
         return pk, other
     end
@@ -172,8 +177,8 @@ local function one(self: any, e: any): boolean
 end
 
 -- The ids in an edge's value: an id, a row, or a list of either.
-local function ids_in(self: any, e: any, v: any): { number }
-    if type(v) == "number" or (type(v) == "table" and v.id ~= nil) then
+local function ids_in(self: any, e: any, v: any): { any }
+    if type(v) == "number" or type(v) == "string" or (type(v) == "table" and v.id ~= nil) then
         v = { v }
     end
     if type(v) ~= "table" then
@@ -186,7 +191,7 @@ local function ids_in(self: any, e: any, v: any): { number }
     return list
 end
 
-local function exists(self: any, pk: number): boolean
+local function exists(self: any, pk: any): boolean
     check_pk(self, pk)
     return barch.store.exists(lay.row(self.t, pk))
 end
@@ -196,72 +201,76 @@ local function first_key(prefix: string): string?
 end
 
 -- Raises an error unless `from` -> `to` can be added to edge `e`.
-local function check_link(self: any, e: any, pk: number, other: number)
+local function check_link(self: any, e: any, pk: any, other: any)
     local target = self.peers[e.target]
     if not exists(target, other) then
         fail(target.where .. " has no row " .. other)
     end
     local s = self.allEdges[e.store]
     local from, to = ends(e, pk, other)
-    local k = s.unique and first_key(lay.edge(e.store, from))
-    if k and k ~= lay.edge(e.store, from, to) then
+    local k = s.unique and first_key(lay.edge(s, from))
+    if k and k ~= lay.edge(s, from, to) then
         fail("edge " .. e.store .. " allows one " .. s.to .. " per " .. s.from .. ", and "
             .. s.from .. " row " .. from .. " has one")
     end
-    k = s.inverseUnique and first_key(lay.edge_back(e.store, to))
-    if k and k ~= lay.edge_back(e.store, to, from) then
+    k = s.inverseUnique and first_key(lay.edge_back(s, to))
+    if k and k ~= lay.edge_back(s, to, from) then
         fail("edge " .. e.store .. " allows one " .. s.from .. " per " .. s.to .. ", and "
             .. s.to .. " row " .. to .. " has one")
     end
 end
 
-local function write_link(e: any, pk: number, other: number)
+local function write_link(self: any, e: any, pk: any, other: any)
+    local s = self.allEdges[e.store]
     local from, to = ends(e, pk, other)
-    barch.store.set(lay.edge(e.store, from, to), "")
-    barch.store.set(lay.edge_back(e.store, to, from), "")
+    barch.store.set(lay.edge(s, from, to), "")
+    barch.store.set(lay.edge_back(s, to, from), "")
 end
 
 -- Links row pk to row `other` through edge `name`. Linking twice is
 -- harmless.
-function Table:link(name: string, pk: number, other: number)
+function Table:link(name: string, pk: any, other: any)
     local e = find_edge(self, name)
     if not exists(self, pk) then
         fail(self.where .. " has no row " .. pk)
     end
     check_link(self, e, pk, other)
-    write_link(e, pk, other)
+    write_link(self, e, pk, other)
 end
 
 -- Removes the link from row pk to row `other`. Answers whether there was one.
-function Table:unlink(name: string, pk: number, other: number): boolean
+function Table:unlink(name: string, pk: any, other: any): boolean
     local e = find_edge(self, name)
+    local s = self.allEdges[e.store]
+    check_pk(self, pk)
+    check_pk(self.peers[e.target], other)
     local from, to = ends(e, pk, other)
-    local key = lay.edge(e.store, from, to)
+    local key = lay.edge(s, from, to)
     if not barch.store.exists(key) then
         return false
     end
     barch.store.remove(key)
-    barch.store.remove(lay.edge_back(e.store, to, from))
+    barch.store.remove(lay.edge_back(s, to, from))
     return true
 end
 
 -- Removes every edge into or out of row pk, including edges declared only
 -- by the table at the other end.
-local function unlink_all(self: any, pk: number)
+local function unlink_all(self: any, pk: any)
     local name = self.t.name
-    for store, s in self.allEdges do
+    for _, s in self.allEdges do
         if s.from == name then
-            lay.walk(lay.edge(store, pk), function(k)
-                local to = kc.decode(k, #k - 16)
+            lay.walk(lay.edge(s, pk), function(k)
+                local to = lay.edge_to(s, k)
                 barch.store.remove(k)
-                barch.store.remove(lay.edge_back(store, to, pk))
+                barch.store.remove(lay.edge_back(s, to, pk))
             end)
         end
         if s.to == name then
-            lay.walk(lay.edge_back(store, pk), function(k)
-                local from = kc.decode(k, #k - 16)
+            lay.walk(lay.edge_back(s, pk), function(k)
+                local from = lay.edge_from(s, k)
                 barch.store.remove(k)
-                barch.store.remove(lay.edge(store, from, pk))
+                barch.store.remove(lay.edge(s, from, pk))
             end)
         end
     end
@@ -283,8 +292,14 @@ function Table:create(values: { [string]: any }): any
     end
     set_fields(self, r, plain)
     lay.fill(self.t, r)
-    local counter = lay.counter(self.t)
-    local pk = (tonumber(get(self, counter, true)) or 0) + 1
+    -- a uuid needs no shared key, so creates in one table do not conflict
+    local counter, pk
+    if lay.id_kind(self.t) == "uuid" then
+        pk = barch.uuid()
+    else
+        counter = lay.counter(self.t)
+        pk = (tonumber(get(self, counter, true)) or 0) + 1
+    end
     for _, l in links do
         if #l[2] > 1 and one(self, l[1]) then
             fail(self.where .. " edge " .. l[1].name .. " links one row, got " .. #l[2])
@@ -296,14 +311,14 @@ function Table:create(values: { [string]: any }): any
     store(self, pk, nil, r, counter)
     for _, l in links do
         for _, other in l[2] do
-            write_link(l[1], pk, other)
+            write_link(self, l[1], pk, other)
         end
     end
     return r
 end
 
 -- The row with this id, or nil.
-function Table:get(pk: number): any
+function Table:get(pk: any): any
     check_pk(self, pk)
     return read(self, pk)
 end
@@ -326,12 +341,12 @@ function Table:by(name: string, ...: any): any
             .. select("#", ...))
     end
     local pk = barch.store.get(lay.index(self.t, ix, values))
-    return pk and read(self, tonumber(pk) :: number)
+    return pk and read(self, lay.unique_pk(self.t, pk))
 end
 
 -- Sets the fields in `values` and clears the fields named in `clear`, then
 -- answers the stored row. Raises an error if there is no row with this id.
-function Table:update(pk: number, values: { [string]: any }?, clear: { string }?): any
+function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): any
     check_pk(self, pk)
     local old = read(self, pk, true)
     if old == nil then
@@ -349,7 +364,7 @@ end
 
 -- Removes the row, its index entries and its edges. Answers false if there
 -- was no row.
-function Table:delete(pk: number): boolean
+function Table:delete(pk: any): boolean
     check_pk(self, pk)
     local old = read(self, pk, true)
     if old == nil then
@@ -388,7 +403,7 @@ local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
 
 local function kind_of(tbl: any, field: string): string
     if field == "id" then
-        return "int"
+        return lay.id_kind(tbl.t)
     end
     local f = tbl.byName[field]
     if f == nil then
@@ -400,6 +415,9 @@ end
 local function fits(kind: string, v: any): boolean
     if kind == "int" or kind == "float" then
         return type(v) == "number" and v == v
+    end
+    if kind == "uuid" then
+        return kc.is_uuid(v)
     end
     return type(v) == (kind == "string" and "string" or "boolean")
 end
@@ -590,10 +608,10 @@ local function plan(q: any): any
         end
         -- the bounds may let in more keys than the filters keep; every row
         -- is checked against them
-        if lo ~= nil and math.abs(lo) ~= math.huge then
+        if lo ~= nil and (type(lo) ~= "number" or math.abs(lo) ~= math.huge) then
             best.lo = prefix .. kc.encode(kind, lo)
         end
-        if hi ~= nil and math.abs(hi) ~= math.huge then
+        if hi ~= nil and (type(hi) ~= "number" or math.abs(hi) ~= math.huge) then
             best.hi = kc.after(prefix .. kc.encode(kind, hi))
         end
         parts[#parts + 1] = "range " .. best.next
@@ -632,10 +650,10 @@ local function rows(q: any): { any }
     elseif want ~= 0 then
         local scan = back and lay.scan_back or lay.scan
         scan(p.lo, p.hi, function(k)
-            if p.ix.unique and not p.ix.primary then
-                return consider(tonumber(barch.store.get(k)) :: number)
+            if p.ix.primary then
+                return consider(lay.row_pk(tbl.t, k))
             end
-            return consider((kc.decode(k, #k - 16)))
+            return consider(lay.pk_of(tbl.t, p.ix, k, p.ix.unique and barch.store.get(k) or nil))
         end)
     end
     if not p.ordered then
@@ -699,9 +717,10 @@ function Query:follow(name: string): any
     local e = find_edge(tbl, name)
     local seen, list = {}, {}
     for _, pk in self:ids() do
-        local prefix = e.dir == "to" and lay.edge(e.store, pk) or lay.edge_back(e.store, pk)
+        local s = tbl.allEdges[e.store]
+        local prefix = e.dir == "to" and lay.edge(s, pk) or lay.edge_back(s, pk)
         lay.walk(prefix, function(k)
-            local other = kc.decode(k, #k - 16)
+            local other = e.dir == "to" and lay.edge_to(s, k) or lay.edge_from(s, k)
             if not seen[other] then
                 seen[other] = true
                 list[#list + 1] = other
@@ -753,6 +772,7 @@ local function check(): string?
     end
     mig.apply(mig.plan(nil, ent.graph {
         ent.schema "T" {
+            id = "int",
             fields = { ent.field.string "k":unique(), ent.field.int "n":default(5) },
             indexes = { ent.index("n") },
             edges = { ent.edge.to "us" "U" },
@@ -787,6 +807,9 @@ local function check(): string?
     end
     local u1 = c.U:create { v = 1, t = 1 }
     local u2 = c.U:create { v = 2, t = a }
+    if not kc.is_uuid(u1.id) or not (u1.id < u2.id) or c.U:get(u2.id).v ~= 2 then
+        return "uuid ids"
+    end
     local got = c.T:query():where("k", "=", "c"):queryUs():order("v", "desc"):ids()
     if #got ~= 2 or got[1] ~= u2.id or got[2] ~= u1.id then
         return "edge query"

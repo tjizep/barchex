@@ -32,6 +32,11 @@ beside a development server.
   index entries after each step, that a refused create leaves nothing
   behind, that old rows read a new field's default, the error messages, and
   that a migration committed during a transaction makes it conflict.
+- `test_uuid.py` creates rows with `barch.uuid()` ids and checks that they
+  sort in creation order, that get, by, update, delete, queries and edges
+  work with them, including edges to a table with integer ids, the errors
+  for ids of the wrong kind, and that `migrate` refuses to change a table's
+  id kind.
 - `test_query.py` runs queries in optimistic and pessimistic transactions
   and checks the rows and the index each one picks. It counts the rows a
   `desc` query reads to check that it stops at the limit. It also links, follows

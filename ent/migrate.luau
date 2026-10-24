@@ -20,7 +20,8 @@
 --   /ent/version                           the version, bumped by each change
 --   /ent/compiled                          the whole schema as JSON, which
 --                                          load() reads: one GRAPH GET
---   /ent/tables/<table>/table              name, format and next field id
+--   /ent/tables/<table>/table              name, format, id kind and next
+--                                          field id
 --   /ent/tables/<table>/fields/<field>     kind, id, optional, unique, default
 --   /ent/tables/<table>/indexes/<ix>/spec  unique
 --   /ent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
@@ -28,6 +29,7 @@
 --
 -- plan() refuses a change that would leave stored rows unreadable or wrong:
 --   - dropping a table;
+--   - changing a table's id kind, which its stored keys are written in;
 --   - a new field that is neither optional nor has a default;
 --   - changing a field's kind, except int to float;
 --   - renaming a field of a table that has ever stored json rows, since
@@ -37,7 +39,6 @@
 
 local SCHEMA = require("ent.SCHEMA")
 local rc = require("ent.ROWCODEC")
-local kc = require("ent.KEYCODEC")
 local lay = require("ent.LAYOUT")
 
 local function fail(msg: string)
@@ -118,6 +119,11 @@ function plan(prev: any, app: any): any
         if old and old.name ~= name then
             fail(where .. " stores as " .. t.key .. ", which table " .. old.name .. " uses")
         end
+        -- a catalog from before tables had an id kind holds int ids
+        if old and (old.id or "int") ~= t.id then
+            fail(where .. " has " .. (old.id or "int") .. " ids, so its schema needs id = \""
+                .. (old.id or "int") .. "\"; a table keeps the id kind its rows were stored with")
+        end
         local before = {}
         if old then
             for _, f in old.fields do
@@ -147,7 +153,7 @@ function plan(prev: any, app: any): any
                           unique = f.unique, default = f.default }
         end
         local c = {
-            name = name, key = t.key, format = t.format, next = ver.next, ids = ver.ids,
+            name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
             fields = fields, indexes = t.indexes, edges = {},
         }
@@ -210,7 +216,7 @@ end
 local function build(t: any, ix: any)
     local fields = row_fields(t)
     lay.walk(lay.row(t), function(k)
-        local pk = kc.decode(k, #k - 16)
+        local pk = lay.row_pk(t, k)
         local r = lay.fill(t, rc.decode(fields, barch.store.get(k)))
         local key, value = lay.entry(t, ix, r, pk)
         if key == nil then
@@ -246,7 +252,7 @@ local function write_catalog(c: any)
     for key, t in c.tables do
         local base = "/ent/tables/" .. key
         g.mkdir(base)
-        g.put(base .. "/table", simdjson.encode({ name = t.name, format = t.format,
+        g.put(base .. "/table", simdjson.encode({ name = t.name, format = t.format, id = t.id,
                                                   next = t.next }), "json")
         nodes[t.name] = g.stat(base .. "/table").id
         g.mkdir(base .. "/fields")
@@ -358,6 +364,16 @@ function selftest(): (boolean, string?)
         if not raises(function() plan(stored, app) end, case[2]) then
             return false, "refusal " .. i
         end
+    end
+    local ints = ent.graph { ent.schema "User" { id = "int", fields = {
+        ent.field.string "email", ent.field.string "name", ent.field.int "age":optional() } } }
+    if not raises(function() plan(stored, ints) end, "needs id = \"uuid\"") then
+        return false, "changed the id kind"
+    end
+    local legacy = simdjson.parse(simdjson.encode(c1))
+    legacy.tables.user.id = nil
+    if not raises(function() plan(legacy, v1()) end, "has int ids") then
+        return false, "read a catalog without id kinds as uuid"
     end
     local other = ent.graph { ent.schema "Post" { fields = { ent.field.string "t" } } }
     if not raises(function() plan(stored, other) end, "dropping a table") then

@@ -26,24 +26,31 @@ def test_blog_example(client, blog):
     assert blog("migrate") == 1
     for email, name in [("ann@x", "Ann"), ("bob@x", "Bob"), ("cy@x", "Cy")]:
         blog("user", email, name)
+    ids = {}
     for email, title in [("ann@x", "hello"), ("bob@x", "first"), ("ann@x", "again"),
                          ("cy@x", "lurking")]:
-        blog("post", email, title, "body of " + title)
+        ids[title] = blog("post", email, title, "body of " + title)
+    # barch.uuid() ids sort in creation order
+    assert sorted(ids.values()) == list(ids.values())
     blog("follow", "cy@x", "ann@x")
     blog("follow", "cy@x", "bob@x")
-    assert [blog("star", "2") for _ in range(3)] == [1, 2, 3]
-    blog("star", "1")
+    assert [blog("star", ids["first"]) for _ in range(3)] == [1, 2, 3]
+    blog("star", ids["hello"])
 
-    assert blog("posts", "ann@x") == ["3 0 again", "1 1 hello"]
-    assert blog("timeline", "cy@x", "2") == ["3 0 again", "2 3 first"]
+    def line(title, stars):
+        return f"{ids[title]} {stars} {title}"
+
+    assert blog("posts", "ann@x") == [line("again", 0), line("hello", 1)]
+    assert blog("timeline", "cy@x", "2") == [line("again", 0), line("first", 3)]
     assert blog("timeline", "ann@x") == []
-    assert blog("top", "2") == ["2 3 first", "1 1 hello"]
+    assert blog("top", "2") == [line("first", 3), line("hello", 1)]
 
 
 @pytest.mark.parametrize("args, error", [
     (("post", "zed@x", "t", "b"), "BLOG has no user zed@x"),
-    (("user", "ann@x", "Again"), "ENT table User index by_email is unique, and row 1"),
-    (("star", "9"), "BLOG has no post 9"),
+    (("user", "ann@x", "Again"), "ENT table User index by_email is unique, and row "),
+    (("star", "9"), "ENT table Post wants a uuid id, got 9"),
+    (("star", "01890000-0000-7000-8000-000000000000"), "BLOG has no post 0189"),
     (("top", "0"), "BLOG wants a count of 1 or more, got 0"),
     (("tweet",), "BLOG has no command tweet"),
 ])

@@ -10,6 +10,7 @@
 --
 --   local User = ent.schema "User" {
 --       format = "binary",                       -- "json", "text" or "binary"
+--       id = "uuid",                             -- or "int"
 --       fields = {
 --           ent.field.string "email":unique(),
 --           ent.field.string "name",
@@ -24,6 +25,10 @@
 --   }
 --   local app = ent.graph { User, Post }
 --
+-- A table's ids are barch.uuid() strings by default, which sort by the time
+-- they were made. id = "int" numbers the rows 1, 2, 3 from a counter key
+-- that every create in the table writes.
+--
 -- schema() checks one table and graph() checks the tables together: every
 -- edge names a declared table, and every edge.from names the edge.to it is
 -- the inverse of. Both raise an error naming what is wrong.
@@ -34,6 +39,7 @@
 
 local KINDS = { string = true, int = true, float = true, bool = true }
 local FORMATS = { json = true, text = true, binary = true }
+local IDS = { uuid = true, int = true }
 local MAX_INT = 2 ^ 53
 
 local function fail(msg: string)
@@ -164,11 +170,11 @@ edge = {
 
 -- tables ----------------------------------------------------------------------
 
-local OPTIONS = { format = true, fields = true, edges = true, indexes = true }
+local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true }
 
--- One table: `ent.schema "Name" { format?, fields, edges?, indexes? }`.
+-- One table: `ent.schema "Name" { format?, id?, fields, edges?, indexes? }`.
 -- The answer is plain data:
---   { name, key, format, fields = { { name, kind, optional, unique,
+--   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was } }, indexes = { { name, on, unique } },
 --     edges = { { name, dir, target, unique, ref } } }
 function schema(name: string)
@@ -187,7 +193,11 @@ function schema(name: string)
         if not FORMATS[format] then
             fail(where .. " has no format " .. tostring(format))
         end
-        local t = { name = name, key = snake(name), format = format,
+        local id = spec.id or "uuid"
+        if not IDS[id] then
+            fail(where .. " ids are uuid or int, got " .. tostring(id))
+        end
+        local t = { name = name, key = snake(name), format = format, id = id,
                     fields = {}, indexes = {}, edges = {} }
 
         local byName, was = {}, {}
@@ -283,8 +293,9 @@ end
 -- the whole schema ------------------------------------------------------------
 
 -- Checks tables together and answers { tables = { [name] = table },
--- order = { names }, edges = { [store name] = { name, from, to, unique,
--- inverseUnique } } }. An edge.to on User named posts is stored as
+-- order = { names }, edges = { [store name] = { name, from, to, fromId,
+-- toId, unique, inverseUnique } } }, where fromId and toId are the id kinds
+-- of the two tables. An edge.to on User named posts is stored as
 -- "user_posts"; its edge.from reads the same keys backwards.
 function graph(list: { any })
     local tables, order, keys = {}, {}, {}
@@ -314,6 +325,7 @@ function graph(list: { any })
             if e.dir == "to" then
                 e.store = t.key .. "_" .. e.name
                 stored[e.store] = { name = e.store, from = name, to = e.target,
+                                    fromId = t.id, toId = target.id,
                                     unique = e.unique, inverseUnique = false }
             end
         end
@@ -384,7 +396,7 @@ function selftest(): (boolean, string?)
         edges = { edge.to "posts" "Post" },
         indexes = { index("name", "age"), index("age"):name("young"):unique() },
     }
-    if User.key ~= "user" or User.format ~= "json" or #User.fields ~= 4 then
+    if User.key ~= "user" or User.format ~= "json" or User.id ~= "uuid" or #User.fields ~= 4 then
         return false, "table"
     end
     local ix = User.indexes
@@ -407,12 +419,14 @@ function selftest(): (boolean, string?)
         return false, "graph took an edge to a missing table"
     end
     Post = schema "Post" {
+        id = "int",
         fields = { field.string "title" },
         edges = { edge.from "author" "User":ref "posts":unique() },
     }
     local g = graph { User, Post }
     local e = g.edges.user_posts
-    if e == nil or e.from ~= "User" or e.to ~= "Post" or e.unique or not e.inverseUnique
+    if e == nil or e.from ~= "User" or e.to ~= "Post" or e.fromId ~= "uuid" or e.toId ~= "int"
+        or e.unique or not e.inverseUnique
         or g.tables.Post.edges[1].store ~= "user_posts" then
         return false, "edges"
     end
@@ -442,6 +456,7 @@ function selftest(): (boolean, string?)
         { function() schema "User" { fields = { field.int "a", field.int "a" } } end, "declared twice" },
         { function() schema "User" { fields = { field.int "a" }, colour = 1 } end, "no option colour" },
         { function() schema "User" { format = "csv", fields = { field.int "a" } } end, "no format csv" },
+        { function() schema "User" { id = "serial", fields = { field.int "a" } } end, "ids are uuid or int" },
         { function() schema "User" { fields = { field.int "a":default(1.5) } } end, "default is not of kind int" },
         { function() schema "User" { fields = { field.int "a" }, indexes = { index("b") } } end, "not a field" },
         { function() schema "User" { fields = { field.int "a", field.int "b":was("a") } } end, "still declared" },

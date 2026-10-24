@@ -20,7 +20,7 @@ local function schema(admin)
         fields[#fields + 1] = ent.field.bool "admin":default(false)
         indexes[#indexes + 1] = ent.index("admin", "name")
     end
-    return ent.graph { ent.schema "User" { fields = fields, indexes = indexes } }
+    return ent.graph { ent.schema "User" { id = "int", fields = fields, indexes = indexes } }
 end
 
 local function entries()
@@ -115,7 +115,6 @@ def setup(client):
 def app(client, space):
     setup(client)
     client.execute_command("USE", space)
-    # SETF keeps the first body of a name, so each test space gets its own
     client.execute_command("SETF", "CLIENTAPP", APP)
     client.execute_command("SETF", "CLIENTWRITE", WRITE)
 

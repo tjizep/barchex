@@ -14,6 +14,12 @@
 --   ent.u<table><index><values>        the pk, for each row of a unique index
 --   ent.e<edge><from pk><to pk>        "" for each edge, read forwards
 --   ent.E<edge><to pk><from pk>        "" for each edge, read backwards
+--   ent.n<table>                       the last pk given out, for id = "int"
+--
+-- A pk is encoded with its table's id kind, "uuid" or "int", and takes the
+-- same number of bytes in every key of the table, so a key's pk is read
+-- from its end. A unique entry's value is the pk as text: the uuid, or the
+-- integer's digits.
 --
 -- A unique index has no entry for a row with a nil in any of its fields, so
 -- any number of rows can leave a unique field nil. A plain index keeps those
@@ -25,10 +31,31 @@ local function name(s: string): string
     return kc.encode("string", s)
 end
 
+-- The id kind of table `t`. A catalog written before tables had one holds
+-- int ids.
+function id_kind(t: any): string
+    return t.id or "int"
+end
+
+-- The pk at the end of `key`, in a table or edge end of id kind `kind`.
+local function tail(kind: string, key: string): any
+    return (kc.decode(key, #key - kc.WIDTH[kind] + 1))
+end
+
+-- The pk a unique entry's value holds.
+function unique_pk(t: any, value: string): any
+    return id_kind(t) == "int" and tonumber(value) or value
+end
+
 -- The key of row `pk` in table `t`, or with pk nil, the prefix of them all.
-function row(t: any, pk: number?): string
+function row(t: any, pk: any): string
     local key = "ent.r" .. name(t.key)
-    return pk == nil and key or key .. kc.encode("int", pk)
+    return pk == nil and key or key .. kc.encode(id_kind(t), pk)
+end
+
+-- The pk of a row key.
+function row_pk(t: any, key: string): any
+    return tail(id_kind(t), key)
 end
 
 -- The prefix of index `ix`'s keys in table `t`, and the value kinds.
@@ -69,7 +96,7 @@ end
 
 -- The index entry for `row` at `pk`: the key and its value. nil for a
 -- unique index when one of the row's indexed fields is nil.
-function entry(t: any, ix: any, r: { [string]: any }, pk: number): (string?, string?)
+function entry(t: any, ix: any, r: { [string]: any }, pk: any): (string?, string?)
     local prefix, kinds = index_prefix(t, ix)
     local values = table.create(#ix.on)
     for i, fname in ix.on do
@@ -82,28 +109,41 @@ function entry(t: any, ix: any, r: { [string]: any }, pk: number): (string?, str
     if ix.unique then
         return key, tostring(pk)
     end
-    return key .. kc.encode("int", pk), ""
+    return key .. kc.encode(id_kind(t), pk), ""
 end
 
 -- The pk at the end of a plain index key, or in a unique entry's value.
-function pk_of(ix: any, key: string, value: string?): number
+function pk_of(t: any, ix: any, key: string, value: string?): any
     if ix.unique then
-        return tonumber(value) :: number
+        return unique_pk(t, value :: string)
     end
-    return (kc.decode(key, #key - 16))
+    return tail(id_kind(t), key)
 end
 
--- The forward and backward keys of edge `store` from `from` to `to`; with
--- `to` nil, the prefix of every edge from `from`.
-function edge(store: string, from: number, to: number?): string
-    local key = "ent.e" .. name(store) .. kc.encode("int", from)
-    return to == nil and key or key .. kc.encode("int", to)
+-- Edge keys take `s`, the edge's record in SCHEMA's graph().edges, for its
+-- name and the id kinds of its two ends.
+
+-- The forward key of edge `s` from `from` to `to`; with `to` nil, the prefix
+-- of every edge from `from`.
+function edge(s: any, from: any, to: any): string
+    local key = "ent.e" .. name(s.name) .. kc.encode(s.fromId or "int", from)
+    return to == nil and key or key .. kc.encode(s.toId or "int", to)
 end
 
 -- The backward key, or with `from` nil the prefix of every edge into `to`.
-function edge_back(store: string, to: number, from: number?): string
-    local key = "ent.E" .. name(store) .. kc.encode("int", to)
-    return from == nil and key or key .. kc.encode("int", from)
+function edge_back(s: any, to: any, from: any): string
+    local key = "ent.E" .. name(s.name) .. kc.encode(s.toId or "int", to)
+    return from == nil and key or key .. kc.encode(s.fromId or "int", from)
+end
+
+-- The far end of a forward edge key: its `to` pk.
+function edge_to(s: any, key: string): any
+    return tail(s.toId or "int", key)
+end
+
+-- The far end of a backward edge key: its `from` pk.
+function edge_from(s: any, key: string): any
+    return tail(s.fromId or "int", key)
 end
 
 -- The key that holds a table's next pk.
@@ -181,7 +221,7 @@ function selftest(): (boolean, string?)
     local k, v = entry(t, plain, r, 7)
     if k == nil or string.sub(k, 1, #index(t, plain)) ~= index(t, plain)
         or string.sub(k, 1, #index(t, plain, { 41 })) ~= index(t, plain, { 41 })
-        or v ~= "" or pk_of(plain, k) ~= 7 then
+        or v ~= "" or pk_of(t, plain, k) ~= 7 then
         return false, "plain entry"
     end
     local back = kc.unpack(k, 2, #index(t, plain) + 1)
@@ -189,7 +229,7 @@ function selftest(): (boolean, string?)
         return false, "plain entry values"
     end
     k, v = entry(t, uniq, r, 7)
-    if k ~= index(t, uniq, { "a b" }) or v ~= "7" or pk_of(uniq, k, v) ~= 7 then
+    if k ~= index(t, uniq, { "a b" }) or v ~= "7" or pk_of(t, uniq, k, v) ~= 7 then
         return false, "unique entry"
     end
     if entry(t, uniq, { age = 1 }, 8) ~= nil then
@@ -205,9 +245,20 @@ function selftest(): (boolean, string?)
     if string.find(row(t, 1), "[%z\1 ]") or string.sub(row(t, 1), 1, #row(t)) ~= row(t) then
         return false, "row key"
     end
-    if string.sub(edge("user_posts", 1, 2), 1, #edge("user_posts", 1)) ~= edge("user_posts", 1)
-        or edge_back("user_posts", 2, 1) == edge("user_posts", 2, 1) then
+    if row_pk(t, row(t, 7)) ~= 7 then
+        return false, "row pk"
+    end
+    local s = { name = "user_posts", fromId = "int", toId = "uuid" }
+    local u = barch.uuid()
+    if string.sub(edge(s, 1, u), 1, #edge(s, 1)) ~= edge(s, 1)
+        or edge_to(s, edge(s, 1, u)) ~= u or edge_from(s, edge_back(s, u, 1)) ~= 1 then
         return false, "edge keys"
+    end
+    local ut = { key = "doc", id = "uuid", fields = t.fields }
+    k, v = entry(ut, uniq, r, u)
+    if row_pk(ut, row(ut, u)) ~= u or pk_of(ut, uniq, k :: string, v) ~= u
+        or pk_of(ut, plain, (entry(ut, plain, r, u))) ~= u then
+        return false, "uuid pks"
     end
     return true
 end

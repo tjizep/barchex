@@ -36,8 +36,8 @@ ent depends on these barch behaviors. Each one shapes a decision below.
   `ent` space and run against the caller's space when required from it.
 - **Keys are text that barch may reinterpret.** A space in a key makes it a
   tuple, a key that parses as a number is stored as that number, a NUL is
-  refused, and a `\1` byte comes back cut short from `RANGE` and `KEYS`.
-  The key codec avoids all four.
+  refused, and earlier barch builds gave a key with a `\1` byte back cut short
+  from `RANGE` and `KEYS`. The key codec avoids all four.
 - **`barch.store.range` answers keys only**, at most 10,000 per call. Reading
   a row found through an index costs one more `get`.
 
@@ -52,9 +52,6 @@ ent depends on these barch behaviors. Each one shapes a decision below.
   locks a key shared, so two inserts of one unique value would both hold the
   shared lock and deadlock when they write. `ent.CLIENT` reads every key it
   is about to write with `get(key, true)`, which orders them.
-- **`SETF` keeps the first body of a name.** A second `SETF` of an existing
-  function answers `OK`, and `CALLF` still runs the first body. Tests that
-  share a server give each function its own name.
 
 ## Schema
 
@@ -130,16 +127,21 @@ ent.i<table><index><values><pk>    "" (non-unique index entry)
 ent.u<table><index><values>        pk (unique index entry)
 ent.e<edge><from><to>              "" (edge, forward)
 ent.E<edge><to><from>              "" (edge, reverse)
-ent.n<table>                       the last pk given out
+ent.n<table>                       the last pk given out, for id = "int"
 ```
 
 Every part ends itself, so a range over an encoded prefix holds exactly the
 keys that start with those values. A write reads the old row, works out which
 index keys changed, and updates the row and those keys in one transaction.
 
-Primary keys are integers from a counter per table for now, so concurrent
-creates in one table conflict and retry. An ordered UUID library will replace them;
-a UUID key will use the `string` kind, so the layout stays the same.
+A table's primary keys are `barch.uuid()` strings by default, encoded with
+the `uuid` kind as 33 bytes. barch.uuid() answers UUIDv7 ids that one server
+hands out in increasing order, so rows sort in creation order and creates in
+one table share no key. Ids from different servers are ordered only to the
+millisecond. A table declared with `id = "int"` takes integer keys from the
+`ent.n` counter, so concurrent creates in it conflict and retry. The catalog
+records each table's id kind, and `migrate` refuses to change it, since the
+stored keys and edges hold ids of that kind.
 
 Edges start as store keys because they page in key order. Graph-backed edges,
 with a row's node linked under each row that points at it, can be tried once

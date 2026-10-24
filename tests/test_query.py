@@ -82,7 +82,7 @@ function steps.desc(c)
     local back = {}
     local lo = lay.row(U.t)
     lay.scan_back(lo, kc.after(lo), function(k)
-        back[#back + 1] = tostring(kc.decode(k, #k - 16))
+        back[#back + 1] = tostring(lay.row_pk(U.t, k))
         return #back == 5
     end, 2)
     return {
@@ -112,12 +112,14 @@ function call(step, mode)
     if step == "migrate" then
         local app = ent.graph {
             ent.schema "User" {
+                id = "int",
                 fields = { ent.field.string "email":unique(), ent.field.string "name",
                            ent.field.int "age":optional() },
                 indexes = { ent.index("name", "age"), ent.index("age") },
                 edges = { ent.edge.to "posts" "Post", ent.edge.to "friends" "User" },
             },
             ent.schema "Post" {
+                id = "int",
                 fields = { ent.field.string "title", ent.field.int "stars",
                            ent.field.bool "draft":default(false) },
                 indexes = { ent.index("stars") },
