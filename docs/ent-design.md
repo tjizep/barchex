@@ -6,14 +6,16 @@ read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
 
 This page records the plan and the decisions made so far. The key and row
-codecs and the schema language are built; the remaining parts are planned.
+codecs, the schema language, the key layout and migrations are built; the
+remaining parts are planned.
 
 | part | module | status |
 |---|---|---|
 | key codec | `ent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
 | row codecs | `ent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
 | schema language and field ids | `ent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
-| graph catalog, `MIGRATE` | | planned |
+| storage layout | `ent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
+| graph catalog and migrations | `ent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
 | create, get, update and delete with index upkeep | | planned |
 | queries and edges | | planned |
 
@@ -41,12 +43,12 @@ ent depends on these barch behaviors. Each one shapes a decision below.
 - **A pessimistic transaction locks what it walks.** `RANGE`, `COUNT` and
   `barch.store.range` take a shared lock on `[lo, hi)`, so a key written
   into that range by anyone else waits for the transaction to end.
-- **`GRAPH` runs inside a transaction.** In a pessimistic transaction every
-  `GRAPH` call locks the whole graph, shared for a read and exclusive for a
-  write, so ent reads the catalog once per transaction.
-
-`barch.graph` from Luau is still refused inside a transaction (TODO 708).
-Until that changes, ent cannot read the catalog from a transaction.
+- **`GRAPH` and `barch.graph` run inside a transaction.** In a pessimistic
+  transaction every `GRAPH` call locks the whole graph, shared for a read and
+  exclusive for a write, so ent reads the catalog once per transaction.
+- **`SETF` keeps the first body of a name.** A second `SETF` of an existing
+  function answers `OK`, and `CALLF` still runs the first body. Tests that
+  share a server give each function its own name.
 
 ## Schema
 
@@ -87,18 +89,26 @@ next id.
 schema can be browsed and linked:
 
 ```
-/ent/version                            bumped by every migration
-/ent/tables/user/fields/email           leaf: type, nullable, default
-/ent/tables/user/indexes/by_email/on/1  link to the email field's node
-/ent/edges/user_posts/from              link to the user table's node
-/ent/edges/user_posts/to                link to the post table's node
+/ent/version                              bumped by every migration
+/ent/compiled                             the whole schema as JSON
+/ent/tables/user/table                    leaf: name, format, next field id
+/ent/tables/user/fields/email             leaf: kind, id, optional, unique, default
+/ent/tables/user/indexes/by_email/spec    leaf: unique
+/ent/tables/user/indexes/by_email/on/1    link to the email field's node
+/ent/edges/user_posts/from                link to the user table's node
+/ent/edges/user_posts/to                  link to the post table's node
 ```
 
-At run time ent reads the catalog inside the transaction and caches it for
-the call. Each transaction reads `/ent/version`, so a migration that commits
-during a transaction makes that transaction conflict and run again. A
-migration changes the catalog and builds new indexes in one transaction.
-Indexes on large tables are built in pages and marked `building` until the
+At run time ent reads `/ent/compiled` inside the transaction with one
+`GRAPH GET` and caches it for the call. The rest of the tree is for browsing
+and linking. A migration that commits during a transaction changes
+`/ent/compiled`, so that transaction conflicts and runs again.
+
+`MIGRATE` splits a migration into `plan`, which compares the stored schema
+with the declared one and refuses unsafe changes, and `apply`, which drops
+and builds index entries and rewrites the catalog. Both run in one
+transaction today, so an index build reads the whole table at once. Large
+tables will need builds in pages, with the index marked `building` until the
 last page commits, because one transaction has to finish within the
 function deadline.
 
@@ -143,7 +153,8 @@ Field ids stay with a field for the table's life. A row written by an older
 schema reads with the current field list: a field added since reads as nil,
 a removed field's value is skipped, and a number reads into an `int` or
 `float` field when it fits that kind. A `json` row names fields, so renaming
-a field in a `json` table needs `MIGRATE` to rewrite its rows.
+a field in a `json` table would need its rows rewritten, so `MIGRATE`
+refuses it for now.
 
 ## Queries
 

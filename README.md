@@ -48,6 +48,8 @@ ent/
   keycodec.luau    →  function KEYCODEC   (order-preserving keys for ent indexes)
   rowcodec.luau    →  function ROWCODEC   (ent rows as json, text or binary)
   schema.luau      →  function SCHEMA     (ent tables, fields, indexes and edges)
+  layout.luau      →  function LAYOUT     (the store keys of ent rows, indexes and edges)
+  migrate.luau     →  function MIGRATE    (the ent catalog and index builds)
 docs/
   ent-design.md    →  the plan for ent, an ORM over barch transactions
 ```
@@ -343,6 +345,41 @@ new table, or the first answer of the previous version's call. A field keeps
 its id under its name or its `:was` name, and new fields are numbered after
 the highest id ever used, so a dropped field's id is never reused.
 `ent.SCHEMA` runs the module's self-check and answers `ok`.
+
+LAYOUT names the store keys ent uses in the application's space: rows
+(`lay.row(t, pk)`), index entries (`lay.entry(t, ix, row, pk)`), edges and a
+table's pk counter. `lay.walk(prefix, each)` calls `each(key)` for every key
+under a prefix, a page at a time, and `each` may remove the key it is given.
+`ent.LAYOUT` runs the module's self-check and answers `ok`.
+
+MIGRATE puts a schema into the space that calls it. Call it from that space
+with the answer of `ent.graph`:
+
+```lua
+local m = require("ent.MIGRATE")
+local report = m.migrate(app)  -- { version = 2, changed = true,
+                               --   steps = { "build User.by_email" } }
+local compiled = m.load()      -- the schema in the catalog, or nil
+```
+
+`migrate` runs in one `barch.tx.run` transaction. It drops the entries of
+removed or changed indexes, builds new indexes from the stored rows, and
+writes the catalog under `/ent` in the space's graph. If it raises an error,
+nothing is written. Running it again with the same schema writes nothing and
+answers the current version.
+
+`migrate` raises an error that starts with `MIGRATE` for a change that would
+leave stored rows unreadable:
+
+- a table missing from the schema;
+- a new field that is neither `:optional()` nor has a `:default()`;
+- a kind change other than `int` to `float`;
+- a field rename in a table that has stored `json` rows;
+- a unique index whose values two stored rows already share.
+
+Index builds read the whole table in that one transaction, so a large table
+can exceed the function deadline. `ent.MIGRATE` runs the self-check of the
+planning step and answers `ok`.
 
 ## Install with FUNCTIONS SYNC
 

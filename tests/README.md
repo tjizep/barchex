@@ -23,6 +23,10 @@ beside a development server.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `ent.ids`, and
   checks the errors for a missing table and an unknown index field.
+- `test_migrate.py` runs the layout and migration self-checks, migrates a
+  space twice over stored rows, and checks the catalog, the index entries
+  built and dropped, and that a unique index broken by stored rows rolls the
+  whole migration back.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`
