@@ -66,12 +66,11 @@ local function fits(kind: string, v: any): boolean
     return type(v) == "number" and v == math.floor(v) and v <= MAX_INT and v >= -MAX_INT
 end
 
--- The time now in Unix milliseconds, for a time field. Functions have no
--- clock, so this reads the one in barch.uuid(), whose first 48 bits are the
--- server's milliseconds. One server's answers never go backwards.
+-- The time now in Unix milliseconds, for a time field: barch.time(). In a
+-- call replayed from a Raft log it is the time the entry was logged, so
+-- every member writes the same value.
 function now(): number
-    local u = barch.uuid()
-    return tonumber(string.sub(u, 1, 8) .. string.sub(u, 10, 13), 16) :: number
+    return barch.time()
 end
 
 -- Why value `v` breaks a rule of compiled field `f`, or nil when it keeps
@@ -661,7 +660,7 @@ function selftest(): (boolean, string?)
         return false, "broken"
     end
     local t1 = now()
-    if t1 < 1.7e12 or t1 ~= math.floor(t1) or now() < t1 then
+    if t1 < 1.7e12 or t1 ~= math.floor(t1) then
         return false, "now " .. t1
     end
 

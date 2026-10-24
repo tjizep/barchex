@@ -133,10 +133,9 @@ that writes another table atomic with the write. barch has no savepoints,
 so a hook's writes stay when the write it ran for is refused and the caller
 catches the error.
 
-A `time` field is an `int` of Unix milliseconds. barch gives functions no
-clock, so `ent.now()` reads the time from `barch.uuid()`, whose first 48 bits
-are the server's milliseconds and never go backwards on one server. A
-`barch.time()` call would make that unnecessary.
+A `time` field is an `int` of Unix milliseconds, and `ent.now()` answers
+`barch.time()`. A call replayed from a Raft log reads the time its entry was
+logged, so a default of `ent.now` stores the same value on every member.
 
 ## Storage layout
 

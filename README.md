@@ -353,9 +353,9 @@ kind once it has a catalog; see MIGRATE. A table's keys use its name in snake ca
 and an `ent.edge.from` reads that edge backwards.
 
 A `time` field holds Unix milliseconds as an integer. `ent.now()` answers
-the current time that way. barch gives functions no clock, so `ent.now()`
-reads the milliseconds in a new `barch.uuid()`; one server's answers never
-go backwards.
+the current time that way, from `barch.time()`. In a call replayed from a
+Raft log, it answers the time the entry was logged, so every member stores
+the same value.
 
 Value rules check each value that `create` and `update` write:
 
