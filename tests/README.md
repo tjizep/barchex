@@ -14,14 +14,14 @@ beside a development server.
 - `test_keycodec.py` runs the key codec's self-check and writes encoded ints,
   floats, strings, nulls and packed tuples into a space, then checks that
   `barch.store.range` walks them back in value order.
-- `test_ent_tx.py` checks the transaction behavior ent's unique indexes need:
+- `test_lent_tx.py` checks the transaction behavior lent's unique indexes need:
   a transaction that read a key as missing, by `GET`, `EXISTS` or an empty
   range, gets `TXCONFLICT` when another write to that key commits first.
 - `test_rowcodec.py` runs the row codec's self-check, stores rows in each
   format and reads them back, reads rows written by an older field list, and
   checks that bad rows are refused before anything is stored.
 - `test_schema.py` runs the schema self-check, declares tables from another
-  space, carries a stored row across a field rename with `ent.ids`, and
+  space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table and an unknown index field.
 - `test_migrate.py` runs the layout and migration self-checks, migrates a
   space twice over stored rows, and checks the catalog, the index entries
@@ -44,7 +44,7 @@ beside a development server.
   filters both ways and nested, loads edges with `with`, pages with
   `cursor` and `after` in each order, and checks the query and edge errors.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
-  `updateDefault`, immutable fields and hooks through `ent.open`, that a
+  `updateDefault`, immutable fields and hooks through `lent.open`, that a
   client without the graph still enforces the catalog's rules, the error
   messages, and the migrations that time fields and function defaults allow
   and refuse.
@@ -78,7 +78,7 @@ pytest -q tests
 
 The tests look for `../barch/cmake-build-release/barchd`, then
 `../barch/cmake-build-relwithdebinfo/barchd`, then `barchd` on the `PATH`.
-`test_ent_tx.py` needs a build with transactions. For another build, set
+`test_lent_tx.py` needs a build with transactions. For another build, set
 `BARCHD` to its executable path:
 
 ```sh

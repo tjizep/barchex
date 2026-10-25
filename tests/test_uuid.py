@@ -8,21 +8,21 @@ redis = pytest.importorskip("redis")
 # step answers a list of strings, with uuids replaced by A1, A2, ... in
 # creation order so the expectations stay readable.
 APP = """
-local ent = require("ent.SCHEMA")
-local m = require("ent.MIGRATE")
-local client = require("ent.CLIENT")
+local lent = require("lent.SCHEMA")
+local m = require("lent.MIGRATE")
+local client = require("lent.CLIENT")
 
 local function app(bookIds)
-    return ent.graph {
-        ent.schema "Author" {
-            fields = { ent.field.string "name":unique(), ent.field.int "born" },
-            indexes = { ent.index("born") },
-            edges = { ent.edge.to "books" "Book", ent.edge.to "fans" "Author" },
+    return lent.graph {
+        lent.schema "Author" {
+            fields = { lent.field.string "name":unique(), lent.field.int "born" },
+            indexes = { lent.index("born") },
+            edges = { lent.edge.to "books" "Book", lent.edge.to "fans" "Author" },
         },
-        ent.schema "Book" {
+        lent.schema "Book" {
             id = bookIds,
-            fields = { ent.field.string "title" },
-            edges = { ent.edge.from "author" "Author":ref "books":unique() },
+            fields = { lent.field.string "title" },
+            edges = { lent.edge.from "author" "Author":ref "books":unique() },
         },
     }
 end
@@ -107,10 +107,10 @@ end
 
 
 def setup(client, space):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau"), ("CLIENT", "ent/client.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+        install(client, "lent", name, path)
     client.execute_command("USE", space)
     client.execute_command("SETF", "UUIDAPP", APP)
     assert client.execute_command("CALLF", "UUIDAPP", "migrate") == 1
@@ -139,10 +139,10 @@ def test_uuid_rows_queries_and_edges(client, mode):
 
 
 @pytest.mark.parametrize("step, error", [
-    ("int", "ENT table Author wants a uuid id, got 1"),
-    ("upper", "ENT table Author wants a uuid id, got [0-9A-F]{8}-"),
-    ("where", "ENT table Author field id is uuid"),
-    ("book", "ENT table Book wants an integer id, got x"),
+    ("int", "LENT table Author wants a uuid id, got 1"),
+    ("upper", "LENT table Author wants a uuid id, got [0-9A-F]{8}-"),
+    ("where", "LENT table Author field id is uuid"),
+    ("book", "LENT table Book wants an integer id, got x"),
 ])
 def test_uuid_errors(client, step, error):
     setup(client, "uuid_errors")

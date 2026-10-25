@@ -5,7 +5,7 @@ from .conftest import install
 # argument positions in the order barch.store.range walks the keys back.
 ORDER = """
 function call(kind, ...)
-    local kc = require("ent.KEYCODEC")
+    local kc = require("lent.KEYCODEC")
     for _, k in barch.store.range("ord.", kc.after("ord."), 10000) do
         barch.store.remove(k)
     end
@@ -28,7 +28,7 @@ end
 # keys whose string is exactly `prefix`, found by a range over its packing.
 TUPLES = """
 function call(prefix, ...)
-    local kc = require("ent.KEYCODEC")
+    local kc = require("lent.KEYCODEC")
     local args = {...}
     local kinds = { "string", "int" }
     for i = 1, #args, 2 do
@@ -52,7 +52,7 @@ end
 
 
 def setup(client):
-    install(client, "ent", "KEYCODEC", "ent/keycodec.luau")
+    install(client, "lent", "KEYCODEC", "lent/keycodec.luau")
     client.execute_command("USE", "default")
     client.execute_command("SETF", "ORDER", ORDER)
     client.execute_command("SETF", "TUPLES", TUPLES)
@@ -64,8 +64,8 @@ def walked(client, kind, values, arg):
 
 
 def test_keycodec_selftest(client):
-    install(client, "ent", "KEYCODEC", "ent/keycodec.luau")
-    client.execute_command("USE", "ent")
+    install(client, "lent", "KEYCODEC", "lent/keycodec.luau")
+    client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "KEYCODEC") == "ok"
 
 
@@ -123,21 +123,21 @@ def test_packed_tuples_walk_in_tuple_order(client):
 
 
 def test_readme_example(client):
-    install(client, "ent", "KEYCODEC", "ent/keycodec.luau")
+    install(client, "lent", "KEYCODEC", "lent/keycodec.luau")
     client.execute_command("USE", "default")
     client.execute_command("SETF", "EXAMPLE", """
 function call()
-    local kc = require("ent.KEYCODEC")
+    local kc = require("lent.KEYCODEC")
     for _, row in { { 41, "zed" }, { 42, "ann" }, { 42, "bob" }, { 43, "al" } } do
-        barch.store.set("ent.i.user.by_age" .. kc.pack({ "int", "string" }, row), "")
+        barch.store.set("lent.i.user.by_age" .. kc.pack({ "int", "string" }, row), "")
     end
-    local key = "ent.i.user.by_age" .. kc.pack({ "int", "string" }, { 42, "ann" })
-    local values, next = kc.unpack(key, 2, #"ent.i.user.by_age" + 1)  -- { 42, "ann" }
-    local lo = "ent.i.user.by_age" .. kc.encode("int", 42)
+    local key = "lent.i.user.by_age" .. kc.pack({ "int", "string" }, { 42, "ann" })
+    local values, next = kc.unpack(key, 2, #"lent.i.user.by_age" + 1)  -- { 42, "ann" }
+    local lo = "lent.i.user.by_age" .. kc.encode("int", 42)
     local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
     local names = {}
     for _, k in keys do
-        names[#names + 1] = kc.unpack(k, 2, #"ent.i.user.by_age" + 1)[2]
+        names[#names + 1] = kc.unpack(k, 2, #"lent.i.user.by_age" + 1)[2]
     end
     return { values[1], values[2], next == #key + 1 and 1 or 0, unpack(names) }
 end

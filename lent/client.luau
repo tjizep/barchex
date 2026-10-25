@@ -1,15 +1,15 @@
 -- Creates, reads, updates, deletes and queries the rows of the tables MIGRATE
 -- put in a space, with their indexes and edges, in the caller's transaction.
 --
--- Required, not called: `local ent = require("ent.CLIENT")`. A function key
+-- Required, not called: `local lent = require("lent.CLIENT")`. A function key
 -- has to define call(), so this one answers a self-check, which migrates and
 -- writes rows inside a transaction it then rolls back:
 --
---   ent.CLIENT              -> "ok" or which check failed
+--   lent.CLIENT              -> "ok" or which check failed
 --
 -- From the application's space, after MIGRATE:
 --
---   ent.tx(function(c)
+--   lent.tx(function(c)
 --       local u = c.User:create { email = "a@b", name = "ann" }  -- u.id, a uuid
 --       c.User:get(u.id)                     -- the row, or nil
 --       c.User:by("email", "a@b")            -- the row, through by_email
@@ -24,25 +24,25 @@
 --           :withPosts():all()             -- each u.posts holds u's posts
 --   end)
 --
--- ent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
--- conflict. ent.open(app).tx(fn, pessimistic) does the same and also runs
+-- lent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
+-- conflict. lent.open(app).tx(fn, pessimistic) does the same and also runs
 -- the graph's function defaults, validate functions and hooks; the value
--- rules stored in the catalog apply either way. Inside a transaction the caller already runs, ent.client(p)
+-- rules stored in the catalog apply either way. Inside a transaction the caller already runs, lent.client(p)
 -- answers the same `c`. Each answers rows as tables of field values with
 -- the row's `id`: a barch.uuid() string, or an integer for a table declared
 -- with id = "int". A field the row lacks reads as its default.
 --
--- Errors start with ENT, or ROWCODEC for a value of the wrong kind or a
+-- Errors start with LENT, or ROWCODEC for a value of the wrong kind or a
 -- missing field that is not optional.
 
-local rc = require("ent.ROWCODEC")
-local lay = require("ent.LAYOUT")
-local kc = require("ent.KEYCODEC")
-local mig = require("ent.MIGRATE")
-local SCHEMA = require("ent.SCHEMA")
+local rc = require("lent.ROWCODEC")
+local lay = require("lent.LAYOUT")
+local kc = require("lent.KEYCODEC")
+local mig = require("lent.MIGRATE")
+local SCHEMA = require("lent.SCHEMA")
 
 local function fail(msg: string)
-    error("ENT " .. msg, 0)
+    error("LENT " .. msg, 0)
 end
 
 local Table = {}
@@ -50,7 +50,7 @@ Table.__index = Table
 
 local NO_HOOKS = { create = {}, update = {}, delete = {} }
 
--- `decl` is the table as ent.schema declared it, for the parts that stay in
+-- `decl` is the table as lent.schema declared it, for the parts that stay in
 -- code: function defaults, validate functions and hooks. nil leaves them out.
 local function bind(t: any, version: number, pessimistic: boolean?, decl: any?): any
     local byName, edgeByName, code = {}, {}, {}
@@ -1152,7 +1152,7 @@ end
 -- pessimistic) and db.client(pessimistic) work as tx and client do.
 function open(app: any): any
     if type(app) ~= "table" or type(app.tables) ~= "table" then
-        fail("open takes the graph from ent.graph")
+        fail("open takes the graph from lent.graph")
     end
     return {
         tx = function(fn: (any) -> any, pessimistic: boolean?): any
@@ -1167,20 +1167,20 @@ end
 local ROLLBACK = "CLIENT selftest rollback"
 
 local function check(): string?
-    local ent = require("ent.SCHEMA")
+    local lent = require("lent.SCHEMA")
     if mig.load() ~= nil then
         return nil -- this space has a schema of its own; leave it alone
     end
-    mig.apply(mig.plan(nil, ent.graph {
-        ent.schema "T" {
+    mig.apply(mig.plan(nil, lent.graph {
+        lent.schema "T" {
             id = "int",
-            fields = { ent.field.string "k":unique(), ent.field.int "n":default(5) },
-            indexes = { ent.index("n") },
-            edges = { ent.edge.to "us" "U" },
+            fields = { lent.field.string "k":unique(), lent.field.int "n":default(5) },
+            indexes = { lent.index("n") },
+            edges = { lent.edge.to "us" "U" },
         },
-        ent.schema "U" {
-            fields = { ent.field.int "v" },
-            edges = { ent.edge.from "t" "T":ref "us":unique() },
+        lent.schema "U" {
+            fields = { lent.field.int "v" },
+            edges = { lent.edge.from "t" "T":ref "us":unique() },
         },
     }))
     local c = client(false)

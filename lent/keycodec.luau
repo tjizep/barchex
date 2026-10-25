@@ -1,9 +1,9 @@
--- Order-preserving key encoding for ent's rows, indexes and edges.
+-- Order-preserving key encoding for lent's rows, indexes and edges.
 --
--- Required, not called: `local kc = require("ent.KEYCODEC")`. A function key
+-- Required, not called: `local kc = require("lent.KEYCODEC")`. A function key
 -- has to define call(), so this one answers a self-check of the round trips:
 --
---   ent.KEYCODEC            -> "ok" or which check failed (from any space)
+--   lent.KEYCODEC            -> "ok" or which check failed (from any space)
 --
 -- An index key is a prefix followed by encoded values, and barch.store.range
 -- walks keys in byte order. Each encoded value sorts the way its value does,
@@ -16,7 +16,7 @@
 -- a key with "\1" in it back from RANGE and KEYS cut short at that byte, and
 -- keys stored then still have to sort the same way. So an encoded value never
 -- holds a NUL, a "\1" or a space, and the caller's prefix has to start with a
--- letter, such as "ent.". barch walks every other byte in unsigned order.
+-- letter, such as "lent.". barch walks every other byte in unsigned order.
 --
 --   kind      encoded as                                   decodes to
 --   (nil)     "-"                                          nil, before any value

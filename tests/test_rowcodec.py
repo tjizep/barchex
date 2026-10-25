@@ -11,7 +11,7 @@ redis = pytest.importorskip("redis")
 # schema drops "score", adds "email" and makes "age" a float.
 ROWS = """
 function call(how, format, key, name, age, score, admin)
-    local rc = require("ent.ROWCODEC")
+    local rc = require("lent.ROWCODEC")
     local users = rc.fields({
         { name = "name", kind = "string", id = 1 },
         { name = "age", kind = "int", id = 2, optional = true },
@@ -43,14 +43,14 @@ end
 
 
 def setup(client):
-    install(client, "ent", "ROWCODEC", "ent/rowcodec.luau")
+    install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
     client.execute_command("USE", "default")
     client.execute_command("SETF", "ROWS", ROWS)
 
 
 def test_rowcodec_selftest(client):
-    install(client, "ent", "ROWCODEC", "ent/rowcodec.luau")
-    client.execute_command("USE", "ent")
+    install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
+    client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "ROWCODEC") == "ok"
 
 
@@ -69,7 +69,7 @@ def test_rows_round_trip_through_the_store(client, fmt):
 @pytest.mark.parametrize("fmt", ["text", "binary"])
 def test_text_and_binary_rows_hold_any_bytes(server, fmt):
     raw = redis.Redis(port=server.port, protocol=2)
-    install(raw, "ent", "ROWCODEC", "ent/rowcodec.luau")
+    install(raw, "lent", "ROWCODEC", "lent/rowcodec.luau")
     raw.execute_command("USE", "default")
     raw.execute_command("SETF", "ROWS", ROWS)
     name = b"\x00\x01\xff\t\\"

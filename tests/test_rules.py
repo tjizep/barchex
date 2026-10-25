@@ -7,9 +7,9 @@ redis = pytest.importorskip("redis")
 # A Post table with value rules, a time kind, function defaults and hooks.
 # The hooks log to a Log table, so each step can show what they did.
 APP = """
-local ent = require("ent.SCHEMA")
-local m = require("ent.MIGRATE")
-local client = require("ent.CLIENT")
+local lent = require("lent.SCHEMA")
+local m = require("lent.MIGRATE")
+local client = require("lent.CLIENT")
 
 local function slug(title)
     return (string.gsub(string.lower(title), "%s+", "-"))
@@ -21,39 +21,39 @@ end
 
 local function app(extra)
     local fields = {
-        ent.field.string "title":notEmpty():maxLen(20):match("^%u"),
-        ent.field.string "slug":unique():immutable(),
-        ent.field.int "stars":min(0):max(5):default(0),
-        ent.field.string "body":optional():validate(function(v)
+        lent.field.string "title":notEmpty():maxLen(20):match("^%u"),
+        lent.field.string "slug":unique():immutable(),
+        lent.field.int "stars":min(0):max(5):default(0),
+        lent.field.string "body":optional():validate(function(v)
             return not string.find(v, "spam") or "no spam"
         end):validate(function(v)
             return #v < 100
         end),
-        ent.field.time "created":default(ent.now):immutable(),
-        ent.field.time "updated":default(ent.now):updateDefault(ent.now),
+        lent.field.time "created":default(lent.now):immutable(),
+        lent.field.time "updated":default(lent.now):updateDefault(lent.now),
     }
     if extra then
         fields[#fields + 1] = extra
     end
-    return ent.graph {
-        ent.schema "Post" {
+    return lent.graph {
+        lent.schema "Post" {
             fields = fields,
-            indexes = { ent.index("created") },
+            indexes = { lent.index("created") },
             hooks = {
-                ent.hook.create(function(c, r)
+                lent.hook.create(function(c, r)
                     r.slug = r.slug or slug(r.title)
                     log(c, "create " .. r.slug)
                 end),
-                ent.hook.update(function(c, id, r, old)
+                lent.hook.update(function(c, id, r, old)
                     log(c, "update " .. old.title .. " -> " .. r.title)
                 end),
-                ent.hook.delete(function(c, id, old)
+                lent.hook.delete(function(c, id, old)
                     log(c, "delete " .. old.slug)
                 end),
             },
         },
         -- a plain table works where a builder does
-        ent.schema "Log" { id = "int", fields = { { kind = "string", name = "msg", notEmpty = true } } },
+        lent.schema "Log" { id = "int", fields = { { kind = "string", name = "msg", notEmpty = true } } },
     }
 end
 
@@ -70,10 +70,10 @@ end
 local steps = {}
 
 function steps.rows(c)
-    local t0 = ent.now()
+    local t0 = lent.now()
     local a = c.Post:create { title = "Hello world", stars = 5 }
     local b = c.Post:create { title = "Second", slug = "two", body = "short" }
-    local t1 = ent.now()
+    local t1 = lent.now()
     local made = c.Post:get(a.id)
     local u = c.Post:update(a.id, { title = "Hello again" })
     local u2 = c.Post:update(a.id, { updated = 7 })
@@ -121,7 +121,7 @@ function call(step, mode)
         return m.migrate(app()).version
     end
     if step == "newtime" then
-        return m.migrate(app(ent.field.time "published":default(ent.now))).version
+        return m.migrate(app(lent.field.time "published":default(lent.now))).version
     end
     if step == "inttime" then
         -- stars, an int, read as a time: the stored values stay as they are
@@ -133,7 +133,7 @@ function call(step, mode)
         end)
     end
     if step == "unmigrated" then
-        return client.open(app(ent.field.int "extra":optional())).tx(function() end)
+        return client.open(app(lent.field.int "extra":optional())).tx(function() end)
     end
     if step == "plain" then
         return client.tx(steps.plain, mode == "pessimistic")
@@ -150,10 +150,10 @@ end
 
 
 def setup(client, space):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau"), ("CLIENT", "ent/client.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+        install(client, "lent", name, path)
     client.execute_command("USE", space)
     client.execute_command("SETF", "RULES", APP)
     assert client.execute_command("CALLF", "RULES", "migrate") == 1
@@ -177,7 +177,7 @@ def test_rules_defaults_and_hooks(client, mode):
     assert client.execute_command("CALLF", "RULES", "plain", mode) == [
         "false ROWCODEC field created is not optional",
         "1 2",
-        "ENT table Post field stars wants at most 5, got 6",
+        "LENT table Post field stars wants at most 5, got 6",
         # the Log rows are the rows step's; this client ran no hooks
         "create hello-world; create two; update Hello world -> Hello again; "
         "update Hello again -> Hello again; delete two",
@@ -185,16 +185,16 @@ def test_rules_defaults_and_hooks(client, mode):
 
 
 ERRORS = {
-    "empty": "ENT table Post field title wants at least 1 bytes, got 0",
-    "long": "ENT table Post field title wants at most 20 bytes, got 21",
-    "lower": 'ENT table Post field title wants a value matching "^%u", got "lower"',
-    "stars": "ENT table Post field stars wants at least 0, got -1",
-    "spam": 'ENT table Post field body refuses "buy spam": no spam',
-    "huge": 'ENT table Post field body refuses "' + "x" * 100 + '"',
-    "time": "ENT table Post field created wants a time in Unix milliseconds, got 1.5",
-    "slug": "ENT table Post field slug is immutable, so update cannot change it",
-    "created": "ENT table Post field created is immutable, so update cannot change it",
-    "updstars": "ENT table Post field stars wants at most 5, got 9",
+    "empty": "LENT table Post field title wants at least 1 bytes, got 0",
+    "long": "LENT table Post field title wants at most 20 bytes, got 21",
+    "lower": 'LENT table Post field title wants a value matching "^%u", got "lower"',
+    "stars": "LENT table Post field stars wants at least 0, got -1",
+    "spam": 'LENT table Post field body refuses "buy spam": no spam',
+    "huge": 'LENT table Post field body refuses "' + "x" * 100 + '"',
+    "time": "LENT table Post field created wants a time in Unix milliseconds, got 1.5",
+    "slug": "LENT table Post field slug is immutable, so update cannot change it",
+    "created": "LENT table Post field created is immutable, so update cannot change it",
+    "updstars": "LENT table Post field stars wants at most 5, got 9",
     "kind": "ROWCODEC field slug wants string, got 3",
 }
 
@@ -209,7 +209,7 @@ def test_rule_errors(client):
     assert client.execute_command("CALLF", "RULES", "plain")[3] == ""
     with pytest.raises(redis.ResponseError) as err:
         client.execute_command("CALLF", "RULES", "unmigrated")
-    assert ("ENT table Post field extra is declared, and this space's catalog lacks it;"
+    assert ("LENT table Post field extra is declared, and this space's catalog lacks it;"
             " run MIGRATE") in str(err.value)
 
 

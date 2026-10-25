@@ -1,10 +1,10 @@
--- Row encoding for ent: a row table to a stored value and back, in one of
+-- Row encoding for lent: a row table to a stored value and back, in one of
 -- three formats a table picks.
 --
--- Required, not called: `local rc = require("ent.ROWCODEC")`. A function key
+-- Required, not called: `local rc = require("lent.ROWCODEC")`. A function key
 -- has to define call(), so this one answers a self-check of the round trips:
 --
---   ent.ROWCODEC            -> "ok" or which check failed (from any space)
+--   lent.ROWCODEC            -> "ok" or which check failed (from any space)
 --
 -- A row is checked against a field list made by fields():
 --

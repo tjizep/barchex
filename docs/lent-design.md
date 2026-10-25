@@ -1,6 +1,6 @@
-# ent design
+# lent design
 
-ent is a planned ORM for barch, written in Luau and modelled on Go's
+lent (Luau entities) is a planned ORM for barch, written in Luau and modelled on Go's
 [ent](https://entgo.io). Applications declare their schema in Luau code and
 read and write typed rows, indexes and edges inside barch transactions. Query
 builders do the work that SQL does elsewhere.
@@ -12,31 +12,31 @@ remains.
 
 | part | module | status |
 |---|---|---|
-| key codec | `ent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
-| row codecs | `ent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
-| schema language and field ids | `ent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
-| storage layout | `ent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
-| graph catalog and migrations | `ent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
-| create, get, update and delete with index upkeep | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| queries and edges | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| edge joins: `has`, `has<Edge>With` and `with` eager loading | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| cursor pagination: `cursor` and `after` | `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| value rules, `time` fields and hooks | `ent.SCHEMA`, `ent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| key codec | `lent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
+| row codecs | `lent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
+| schema language and field ids | `lent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
+| storage layout | `lent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
+| graph catalog and migrations | `lent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
+| create, get, update and delete with index upkeep | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| queries and edges | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
-ent depends on these barch behaviors. Each one shapes a decision below.
+lent depends on these barch behaviors. Each one shapes a decision below.
 
 - **An optimistic transaction is serializable.** `COMMITTX` checks every key
   the transaction read and every range it walked, so unique checks and range
   queries are safe in one. A read that finds a key missing counts too, so of
   two inserts that both find a unique key free, the second to commit gets
-  `TXCONFLICT`; `tests/test_ent_tx.py` checks this for `GET`, `EXISTS` and an
-  empty range. ent runs its work through `barch.tx.run`, which retries on
+  `TXCONFLICT`; `tests/test_lent_tx.py` checks this for `GET`, `EXISTS` and an
+  empty range. lent runs its work through `barch.tx.run`, which retries on
   `TXCONFLICT`, `TXDEADLOCK` and `TXLOCKTIMEOUT`.
-- **A transaction covers one space.** An ent client is bound to the space it
-  runs in, and every table it uses lives there. The ent modules live in the
-  `ent` space and run against the caller's space when required from it.
+- **A transaction covers one space.** A lent client is bound to the space it
+  runs in, and every table it uses lives there. The lent modules live in the
+  `lent` space and run against the caller's space when required from it.
 - **Keys are text that barch may reinterpret.** A space in a key makes it a
   tuple, a key that parses as a number is stored as that number, a NUL is
   refused, and earlier barch builds gave a key with a `\1` byte back cut short
@@ -49,46 +49,46 @@ ent depends on these barch behaviors. Each one shapes a decision below.
   into that range by anyone else waits for the transaction to end.
 - **`GRAPH` and `barch.graph` run inside a transaction.** In a pessimistic
   transaction every `GRAPH` call locks the whole graph, shared for a read and
-  exclusive for a write, so ent reads the catalog once per transaction. A
+  exclusive for a write, so lent reads the catalog once per transaction. A
   graph read conflicts like a key read, which `tests/test_client.py` checks.
 - **`get(key, true)` takes the exclusive lock at once.** A pessimistic `get`
   locks a key shared, so two inserts of one unique value would both hold the
-  shared lock and deadlock when they write. `ent.CLIENT` reads every key it
+  shared lock and deadlock when they write. `lent.CLIENT` reads every key it
   is about to write with `get(key, true)`, which orders them.
 
 ## Schema
 
 An application declares its schema in Luau code kept in git, the same way Go
-ent uses Go code:
+lent uses Go code:
 
 ```lua
-local ent = require("ent.SCHEMA")
+local lent = require("lent.SCHEMA")
 
-local User = ent.schema "User" {
+local User = lent.schema "User" {
     format = "binary",
     fields = {
-        ent.field.string "email":unique(),
-        ent.field.string "name",
-        ent.field.int "age":optional(),
+        lent.field.string "email":unique(),
+        lent.field.string "name",
+        lent.field.int "age":optional(),
     },
-    edges = { ent.edge.to "posts" "Post" },
-    indexes = { ent.index("name", "age") },
+    edges = { lent.edge.to "posts" "Post" },
+    indexes = { lent.index("name", "age") },
 }
-local Post = ent.schema "Post" {
-    fields = { ent.field.string "title" },
-    edges = { ent.edge.from "author" "User":ref "posts":unique() },
+local Post = lent.schema "Post" {
+    fields = { lent.field.string "title" },
+    edges = { lent.edge.from "author" "User":ref "posts":unique() },
 }
-return ent.graph { User, Post }
+return lent.graph { User, Post }
 ```
 
-The builders live under `ent.field` and `ent.edge`, as in Go ent's `field`
+The builders live under `lent.field` and `lent.edge`, as in Go ent's `field`
 and `edge` packages. Each field, index and edge can also be a plain table of
 the same options, such as `{ dir = "from", name = "author", target = "User",
 ref = "posts" }`, which spells out what the chained calls set and can be
 built as data. A module's global named `string` would hide the string
 library from the code that requires it.
 
-Every field gets a row codec id. `ent.ids` keeps the ids an earlier version
+Every field gets a row codec id. `lent.ids` keeps the ids an earlier version
 gave out, follows `:was("old_name")` across a rename, and numbers new fields
 after the highest id ever used, so a dropped field's old values are skipped
 rather than read as a new field. The catalog will store each table's ids and
@@ -98,20 +98,20 @@ next id.
 schema can be browsed and linked:
 
 ```
-/ent/version                              bumped by every migration
-/ent/compiled                             the whole schema as JSON
-/ent/tables/user/table                    leaf: name, format, next field id
-/ent/tables/user/fields/email             leaf: kind, id, optional, unique, default
-/ent/tables/user/indexes/by_email/spec    leaf: unique
-/ent/tables/user/indexes/by_email/on/1    link to the email field's node
-/ent/edges/user_posts/from                link to the user table's node
-/ent/edges/user_posts/to                  link to the post table's node
+/lent/version                              bumped by every migration
+/lent/compiled                             the whole schema as JSON
+/lent/tables/user/table                    leaf: name, format, next field id
+/lent/tables/user/fields/email             leaf: kind, id, optional, unique, default
+/lent/tables/user/indexes/by_email/spec    leaf: unique
+/lent/tables/user/indexes/by_email/on/1    link to the email field's node
+/lent/edges/user_posts/from                link to the user table's node
+/lent/edges/user_posts/to                  link to the post table's node
 ```
 
-At run time ent reads `/ent/compiled` inside the transaction with one
+At run time lent reads `/lent/compiled` inside the transaction with one
 `GRAPH GET` and caches it for the call. The rest of the tree is for browsing
 and linking. A migration that commits during a transaction changes
-`/ent/compiled`, so that transaction conflicts and runs again.
+`/lent/compiled`, so that transaction conflicts and runs again.
 
 `MIGRATE` splits a migration into `plan`, which compares the stored schema
 with the declared one and refuses unsafe changes, and `apply`, which drops
@@ -128,7 +128,7 @@ A schema's rules come in two parts. Rules that are values, `min`, `max`,
 the field, so every client of the space checks them, including one in
 another function that never loaded the schema code. Functions cannot be
 stored, so `validate`, `updateDefault`, a function `default` and hooks run
-only in a client made with `ent.open(app)`. Go ent compiles both into
+only in a client made with `lent.open(app)`. Go ent compiles both into
 generated code; here the catalog keeps what it can.
 
 Hooks run before the write in the caller's transaction, which makes a hook
@@ -136,9 +136,9 @@ that writes another table atomic with the write. barch has no savepoints,
 so a hook's writes stay when the write it ran for is refused and the caller
 catches the error.
 
-A `time` field is an `int` of Unix milliseconds, and `ent.now()` answers
+A `time` field is an `int` of Unix milliseconds, and `lent.now()` answers
 `barch.time()`. A call replayed from a Raft log reads the time its entry was
-logged, so a default of `ent.now` stores the same value on every member.
+logged, so a default of `lent.now` stores the same value on every member.
 
 ## Storage layout
 
@@ -147,12 +147,12 @@ space. `<table>`, `<index>` and `<edge>` are encoded strings, and the other
 parts are encoded with the column's kind:
 
 ```
-ent.r<table><pk>                   row
-ent.i<table><index><values><pk>    "" (non-unique index entry)
-ent.u<table><index><values>        pk (unique index entry)
-ent.e<edge><from><to>              "" (edge, forward)
-ent.E<edge><to><from>              "" (edge, reverse)
-ent.n<table>                       the last pk given out, for id = "int"
+lent.r<table><pk>                   row
+lent.i<table><index><values><pk>    "" (non-unique index entry)
+lent.u<table><index><values>        pk (unique index entry)
+lent.e<edge><from><to>              "" (edge, forward)
+lent.E<edge><to><from>              "" (edge, reverse)
+lent.n<table>                       the last pk given out, for id = "int"
 ```
 
 Every part ends itself, so a range over an encoded prefix holds exactly the
@@ -164,7 +164,7 @@ the `uuid` kind as 33 bytes. barch.uuid() answers UUIDv7 ids that one server
 hands out in increasing order, so rows sort in creation order and creates in
 one table share no key. Ids from different servers are ordered only to the
 millisecond. A table declared with `id = "int"` takes integer keys from the
-`ent.n` counter, so concurrent creates in it conflict and retry. The catalog
+`lent.n` counter, so concurrent creates in it conflict and retry. The catalog
 records each table's id kind, and `migrate` refuses to change it, since the
 stored keys and edges hold ids of that kind.
 
@@ -194,7 +194,7 @@ refuses it for now.
 ## Queries
 
 ```lua
-ent.tx(function(c)
+lent.tx(function(c)
     local u = c.User:create { email = "a@b", name = "A" }
     c.Post:create { title = "hi", author = u }
     return c.User:query():where("email", "=", "a@b")
@@ -202,7 +202,7 @@ ent.tx(function(c)
 end)
 ```
 
-Luau metatables build the clients at run time, so ent needs no code
+Luau metatables build the clients at run time, so lent needs no code
 generation step; `queryPosts` is looked up when it is called. A query uses
 the index with the longest prefix matched by its equality filters plus one
 range filter. Without a matching index it scans the table and filters each

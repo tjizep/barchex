@@ -7,20 +7,20 @@ redis = pytest.importorskip("redis")
 
 # Each call(which) runs one step against the default space's User table.
 APP = """
-local ent = require("ent.SCHEMA")
-local m = require("ent.MIGRATE")
-local client = require("ent.CLIENT")
-local lay = require("ent.LAYOUT")
+local lent = require("lent.SCHEMA")
+local m = require("lent.MIGRATE")
+local client = require("lent.CLIENT")
+local lay = require("lent.LAYOUT")
 
 local function schema(admin)
-    local fields = { ent.field.string "email":unique(), ent.field.string "name",
-                     ent.field.int "age":optional() }
-    local indexes = { ent.index("name") }
+    local fields = { lent.field.string "email":unique(), lent.field.string "name",
+                     lent.field.int "age":optional() }
+    local indexes = { lent.index("name") }
     if admin then
-        fields[#fields + 1] = ent.field.bool "admin":default(false)
-        indexes[#indexes + 1] = ent.index("admin", "name")
+        fields[#fields + 1] = lent.field.bool "admin":default(false)
+        indexes[#indexes + 1] = lent.index("admin", "name")
     end
-    return ent.graph { ent.schema "User" { id = "int", fields = fields, indexes = indexes } }
+    return lent.graph { lent.schema "User" { id = "int", fields = fields, indexes = indexes } }
 end
 
 local function entries()
@@ -98,7 +98,7 @@ end
 
 # Reads the schema in the caller's transaction and creates a row.
 WRITE = """
-local client = require("ent.CLIENT")
+local client = require("lent.CLIENT")
 function call()
     return client.client().User:create { email = "w@x", name = "w" }.id
 end
@@ -106,10 +106,10 @@ end
 
 
 def setup(client):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau"), ("CLIENT", "ent/client.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+        install(client, "lent", name, path)
 
 
 def app(client, space):
@@ -121,7 +121,7 @@ def app(client, space):
 
 def test_client_selftest(client):
     setup(client)
-    client.execute_command("USE", "ent")
+    client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "CLIENT") == "ok"
 
 
@@ -138,7 +138,7 @@ def test_client_rows_and_indexes(client, mode):
         "by_email=2 by_name=2",
     ]
     out = run("dup")
-    assert out[0] == "ENT table User index by_email is unique, and row 2 already has email=c@d"
+    assert out[0] == "LENT table User index by_email is unique, and row 2 already has email=c@d"
     # the refused create did not take id 3 or leave index entries
     assert out[1:] == ["3:g@h,dee,nil", "by_email=3 by_name=3"]
     assert run("delete") == ["true", "false", "nil", "by_email=2 by_name=2"]
@@ -149,11 +149,11 @@ def test_client_rows_and_indexes(client, mode):
 
 
 @pytest.mark.parametrize("which, error", [
-    ("table", "ENT this space's schema has no table Users"),
-    ("field", "ENT table User has no field nick"),
+    ("table", "LENT this space's schema has no table Users"),
+    ("field", "LENT table User has no field nick"),
     ("kind", "ROWCODEC field name wants string, got 3"),
-    ("missing", "ENT table User has no row 99"),
-    ("id", "ENT table User gives out ids itself, so a row cannot set id"),
+    ("missing", "LENT table User has no row 99"),
+    ("id", "LENT table User gives out ids itself, so a row cannot set id"),
 ])
 def test_client_errors(client, which, error):
     app(client, "client_errors")
@@ -164,7 +164,7 @@ def test_client_errors(client, which, error):
 
 def test_client_without_schema(client):
     app(client, "client_empty")
-    with pytest.raises(redis.ResponseError, match="ENT this space has no schema; run MIGRATE first"):
+    with pytest.raises(redis.ResponseError, match="LENT this space has no schema; run MIGRATE first"):
         client.execute_command("CALLF", "CLIENTAPP", "crud")
 
 

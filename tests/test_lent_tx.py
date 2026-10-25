@@ -1,4 +1,4 @@
-"""The transaction guarantees ent's unique indexes depend on.
+"""The transaction guarantees lent's unique indexes depend on.
 
 A unique insert reads the index key, finds it missing, and writes it. Two
 inserts of the same value at once both find it missing, so COMMITTX has to

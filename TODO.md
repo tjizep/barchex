@@ -1,7 +1,7 @@
-# ent TODO
+# lent TODO
 
-This page lists the work that remains on ent, the ORM described in
-[docs/ent-design.md](docs/ent-design.md). The schema language, migrations,
+This page lists the work that remains on lent, the ORM described in
+[docs/lent-design.md](docs/lent-design.md). The schema language, migrations,
 row reads and writes with index upkeep, queries, edges, edge joins, cursor
 pages, value rules, `time` fields and hooks are built.
 
@@ -25,7 +25,7 @@ pages, value rules, `time` fields and hooks are built.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
   order the two calls.
 - **Hooks as plain tables.** Fields, indexes and edges take plain tables;
-  hooks still need `ent.hook.create(fn)` and the like. A form such as
+  hooks still need `lent.hook.create(fn)` and the like. A form such as
   `hooks = { create = { fn } }` would match.
 
 ## Features
@@ -49,4 +49,4 @@ pages, value rules, `time` fields and hooks are built.
   the `get` for each row read through an index.
 - **Savepoints.** When a write is refused and the caller catches the error,
   the writes its hooks made stay in the transaction. A savepoint would let
-  ent roll back to the start of the call.
+  lent roll back to the start of the call.

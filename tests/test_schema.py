@@ -9,36 +9,36 @@ redis = pytest.importorskip("redis")
 # version renames a field and adds one.
 APP = """
 function call()
-    local ent = require("ent.SCHEMA")
-    local rc = require("ent.ROWCODEC")
-    local User = ent.schema "User" {
+    local lent = require("lent.SCHEMA")
+    local rc = require("lent.ROWCODEC")
+    local User = lent.schema "User" {
         fields = {
-            ent.field.string "email":unique(),
-            ent.field.string "name",
-            ent.field.int "age":optional(),
+            lent.field.string "email":unique(),
+            lent.field.string "name",
+            lent.field.int "age":optional(),
         },
-        edges = { ent.edge.to "posts" "Post" },
-        indexes = { ent.index("name", "age") },
+        edges = { lent.edge.to "posts" "Post" },
+        indexes = { lent.index("name", "age") },
     }
-    local Post = ent.schema "Post" {
+    local Post = lent.schema "Post" {
         format = "text",
-        fields = { ent.field.string "title" },
-        edges = { ent.edge.from "author" "User":ref "posts":unique() },
+        fields = { lent.field.string "title" },
+        edges = { lent.edge.from "author" "User":ref "posts":unique() },
     }
-    local app = ent.graph { User, Post }
+    local app = lent.graph { User, Post }
 
-    local v1, fields1 = ent.ids(User)
+    local v1, fields1 = lent.ids(User)
     barch.store.set("u.1", rc.encode(rc.fields(fields1), User.format, 1,
         { email = "a@b", name = "ann", age = 41 }))
 
-    local User2 = ent.schema "User" {
+    local User2 = lent.schema "User" {
         fields = {
-            ent.field.string "email":unique(),
-            ent.field.string "full_name":was("name"),
-            ent.field.string "nick":optional(),
+            lent.field.string "email":unique(),
+            lent.field.string "full_name":was("name"),
+            lent.field.string "nick":optional(),
         },
     }
-    local v2, fields2 = ent.ids(User2, v1)
+    local v2, fields2 = lent.ids(User2, v1)
     local row, version = rc.decode(rc.fields(fields2), barch.store.get("u.1"))
 
     local out = {}
@@ -56,26 +56,26 @@ end
 
 BAD = """
 function call(which)
-    local ent = require("ent.SCHEMA")
+    local lent = require("lent.SCHEMA")
     if which == "edge" then
-        ent.graph { ent.schema "A" { fields = { ent.field.int "n" },
-                                     edges = { ent.edge.to "bs" "B" } } }
+        lent.graph { lent.schema "A" { fields = { lent.field.int "n" },
+                                     edges = { lent.edge.to "bs" "B" } } }
     else
-        ent.schema "A" { fields = { ent.field.int "n" }, indexes = { ent.index("m") } }
+        lent.schema "A" { fields = { lent.field.int "n" }, indexes = { lent.index("m") } }
     end
 end
 """
 
 
 def setup(client):
-    install(client, "ent", "SCHEMA", "ent/schema.luau")
-    install(client, "ent", "ROWCODEC", "ent/rowcodec.luau")
+    install(client, "lent", "SCHEMA", "lent/schema.luau")
+    install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
     client.execute_command("USE", "default")
 
 
 def test_schema_selftest(client):
-    install(client, "ent", "SCHEMA", "ent/schema.luau")
-    client.execute_command("USE", "ent")
+    install(client, "lent", "SCHEMA", "lent/schema.luau")
+    client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "SCHEMA") == "ok"
 
 

@@ -3,30 +3,30 @@
 --
 --   SCHEMA                  -> the table names, a check that the schema builds
 
-local ent = require("ent.SCHEMA")
+local lent = require("lent.SCHEMA")
 
 function app(): any
-    return ent.graph {
-        ent.schema "User" {
+    return lent.graph {
+        lent.schema "User" {
             fields = {
-                ent.field.string "email":unique(),
-                ent.field.string "name",
-                ent.field.string "bio":optional(),
+                lent.field.string "email":unique(),
+                lent.field.string "name",
+                lent.field.string "bio":optional(),
             },
             edges = {
-                ent.edge.to "posts" "Post",
-                ent.edge.to "follows" "User",
+                lent.edge.to "posts" "Post",
+                lent.edge.to "follows" "User",
             },
         },
-        ent.schema "Post" {
+        lent.schema "Post" {
             format = "json",
             fields = {
-                ent.field.string "title",
-                ent.field.string "body",
-                ent.field.int "stars":default(0),
+                lent.field.string "title",
+                lent.field.string "body",
+                lent.field.int "stars":default(0),
             },
-            indexes = { ent.index("stars") },
-            edges = { ent.edge.from "author" "User":ref "posts":unique() },
+            indexes = { lent.index("stars") },
+            edges = { lent.edge.from "author" "User":ref "posts":unique() },
         },
     }
 end

@@ -8,9 +8,9 @@ redis = pytest.importorskip("redis")
 # "label value" strings, where value is the ids a query answers and the
 # plan it used.
 APP = """
-local ent = require("ent.SCHEMA")
-local m = require("ent.MIGRATE")
-local client = require("ent.CLIENT")
+local lent = require("lent.SCHEMA")
+local m = require("lent.MIGRATE")
+local client = require("lent.CLIENT")
 
 local function ids(q)
     return table.concat(q:ids(), ",") .. " " .. q:explain()
@@ -153,7 +153,7 @@ function steps.desc(c)
         return got .. " " .. n
     end
     local U = c.User
-    local lay, kc = require("ent.LAYOUT"), require("ent.KEYCODEC")
+    local lay, kc = require("lent.LAYOUT"), require("lent.KEYCODEC")
     local back = {}
     local lo = lay.row(U.t)
     lay.scan_back(lo, kc.after(lo), function(k)
@@ -201,20 +201,20 @@ local errors = {
 
 function call(step, mode)
     if step == "migrate" then
-        local app = ent.graph {
-            ent.schema "User" {
+        local app = lent.graph {
+            lent.schema "User" {
                 id = "int",
-                fields = { ent.field.string "email":unique(), ent.field.string "name",
-                           ent.field.int "age":optional() },
-                indexes = { ent.index("name", "age"), ent.index("age") },
-                edges = { ent.edge.to "posts" "Post", ent.edge.to "friends" "User" },
+                fields = { lent.field.string "email":unique(), lent.field.string "name",
+                           lent.field.int "age":optional() },
+                indexes = { lent.index("name", "age"), lent.index("age") },
+                edges = { lent.edge.to "posts" "Post", lent.edge.to "friends" "User" },
             },
-            ent.schema "Post" {
+            lent.schema "Post" {
                 id = "int",
-                fields = { ent.field.string "title", ent.field.int "stars",
-                           ent.field.bool "draft":default(false) },
-                indexes = { ent.index("stars") },
-                edges = { ent.edge.from "author" "User":ref "posts":unique() },
+                fields = { lent.field.string "title", lent.field.int "stars",
+                           lent.field.bool "draft":default(false) },
+                indexes = { lent.index("stars") },
+                edges = { lent.edge.from "author" "User":ref "posts":unique() },
             },
         }
         return m.migrate(app).version
@@ -231,10 +231,10 @@ end
 
 
 def setup(client, space):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau"), ("CLIENT", "ent/client.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+        install(client, "lent", name, path)
     client.execute_command("USE", space)
     client.execute_command("SETF", "QUERYAPP", APP)
     assert client.execute_command("CALLF", "QUERYAPP", "migrate") == 1
@@ -339,23 +339,23 @@ def test_cursor_pages(client, mode):
 
 
 @pytest.mark.parametrize("step, error", [
-    ("field", "ENT table User has no field nick"),
-    ("op", "ENT table User query has no operator like"),
-    ("kind", "ENT table User field age is int, got x"),
-    ("bool", "ENT table Post field draft is bool, which has no order"),
-    ("unique", "ENT table User index by_email is unique, so a query using it needs = on each"),
-    ("edge", "ENT table User has no edge likes"),
-    ("one", "ENT table Post edge author links one row, got 2"),
-    ("taken", "ENT edge user_posts allows one User per Post, and Post row 1 has one"),
-    ("missing", "ENT table User has no row 99"),
-    ("hasorder", "ENT table User query has posts filters rows with where, has and using"),
-    ("hasfn", "ENT table User query hasPostsWith takes a function, got nil"),
-    ("hasedge", "ENT table User has no edge likes"),
-    ("withfn", "ENT table User query with takes a function, got 3"),
-    ("cursor", "ENT table User query after takes a cursor from cursor\\(\\), got zz"),
-    ("cursororder", "ENT table User query cursor follows order age asc, and the query orders by name asc"),
-    ("cursorrow", "ENT table User query cursor takes a row, got 3"),
-    ("hasafter", "ENT table User query has posts filters rows with where, has and using; order, limit, offset, after"),
+    ("field", "LENT table User has no field nick"),
+    ("op", "LENT table User query has no operator like"),
+    ("kind", "LENT table User field age is int, got x"),
+    ("bool", "LENT table Post field draft is bool, which has no order"),
+    ("unique", "LENT table User index by_email is unique, so a query using it needs = on each"),
+    ("edge", "LENT table User has no edge likes"),
+    ("one", "LENT table Post edge author links one row, got 2"),
+    ("taken", "LENT edge user_posts allows one User per Post, and Post row 1 has one"),
+    ("missing", "LENT table User has no row 99"),
+    ("hasorder", "LENT table User query has posts filters rows with where, has and using"),
+    ("hasfn", "LENT table User query hasPostsWith takes a function, got nil"),
+    ("hasedge", "LENT table User has no edge likes"),
+    ("withfn", "LENT table User query with takes a function, got 3"),
+    ("cursor", "LENT table User query after takes a cursor from cursor\\(\\), got zz"),
+    ("cursororder", "LENT table User query cursor follows order age asc, and the query orders by name asc"),
+    ("cursorrow", "LENT table User query cursor takes a row, got 3"),
+    ("hasafter", "LENT table User query has posts filters rows with where, has and using; order, limit, offset, after"),
 ])
 def test_query_and_edge_errors(client, step, error):
     setup(client, "query_errors_" + step)

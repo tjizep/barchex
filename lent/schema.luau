@@ -1,29 +1,29 @@
--- ent's schema language: tables, fields, indexes and edges declared in Luau.
+-- lent's schema language: tables, fields, indexes and edges declared in Luau.
 --
--- Required, not called: `local ent = require("ent.SCHEMA")`. A function key
+-- Required, not called: `local lent = require("lent.SCHEMA")`. A function key
 -- has to define call(), so this one answers a self-check:
 --
---   ent.SCHEMA              -> "ok" or which check failed (from any space)
+--   lent.SCHEMA              -> "ok" or which check failed (from any space)
 --
 -- A table is declared with builders named after Go ent's field and edge
 -- packages:
 --
---   local User = ent.schema "User" {
+--   local User = lent.schema "User" {
 --       format = "binary",                       -- "json", "text" or "binary"
 --       id = "uuid",                             -- or "int"
 --       fields = {
---           ent.field.string "email":unique(),
---           ent.field.string "name",
---           ent.field.int "age":optional(),
+--           lent.field.string "email":unique(),
+--           lent.field.string "name",
+--           lent.field.int "age":optional(),
 --       },
---       edges = { ent.edge.to "posts" "Post" },
---       indexes = { ent.index("name", "age") },
+--       edges = { lent.edge.to "posts" "Post" },
+--       indexes = { lent.index("name", "age") },
 --   }
---   local Post = ent.schema "Post" {
---       fields = { ent.field.string "title" },
---       edges = { ent.edge.from "author" "User":ref "posts":unique() },
+--   local Post = lent.schema "Post" {
+--       fields = { lent.field.string "title" },
+--       edges = { lent.edge.from "author" "User":ref "posts":unique() },
 --   }
---   local app = ent.graph { User, Post }
+--   local app = lent.graph { User, Post }
 --
 -- A table's ids are barch.uuid() strings by default, which sort by the time
 -- they were made. id = "int" numbers the rows 1, 2, 3 from a counter key
@@ -74,7 +74,7 @@ function now(): number
 end
 
 -- Why value `v` breaks a rule of compiled field `f`, or nil when it keeps
--- them all. ent.CLIENT checks every value it writes with this.
+-- them all. lent.CLIENT checks every value it writes with this.
 function broken(f: any, v: any): string?
     if f.kind == "time" and not fits("int", v) then
         return "wants a time in Unix milliseconds, got " .. tostring(v)
@@ -119,7 +119,7 @@ function Field:unique()
 end
 
 -- The value create() writes when the row leaves the field nil. A function
--- is called for each create, as in :default(ent.now); a value is also what
+-- is called for each create, as in :default(lent.now); a value is also what
 -- older rows read for a field added later.
 function Field:default(v: any)
     self.default_ = v
@@ -128,7 +128,7 @@ function Field:default(v: any)
 end
 
 -- A function update() calls for the field's value when the update leaves
--- it unchanged, as in :updateDefault(ent.now) for an updated_at field.
+-- it unchanged, as in :updateDefault(lent.now) for an updated_at field.
 function Field:updateDefault(fn: () -> any)
     self.updateDefault_ = fn
     return self
@@ -279,7 +279,7 @@ local function hook_builder(op: string)
     end
 end
 
--- Functions ent.CLIENT calls inside the transaction before it writes:
+-- Functions lent.CLIENT calls inside the transaction before it writes:
 --   hook.create(function(c, row) end)        row: the new row's fields
 --   hook.update(function(c, id, row, old) end)
 --   hook.delete(function(c, id, old) end)
@@ -301,7 +301,7 @@ hook = {
 
 local function plain(where: string, what: string, t: any, keys: { [string]: string })
     if type(t) ~= "table" then
-        fail(where .. " " .. what .. " must be a table or made with ent." .. what
+        fail(where .. " " .. what .. " must be a table or made with lent." .. what
             .. ", got " .. tostring(t))
     end
     for k, v in t do
@@ -424,14 +424,14 @@ local function rules(where: string, f: any, out: any)
 end
 
 -- One table:
--- `ent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
+-- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match? } },
 --     indexes = { { name, on, unique } },
 --     edges = { { name, dir, target, unique, ref } } }
--- plus the parts that stay in code, which ent.CLIENT reads from the graph
--- given to ent.open: each field's `code` = { default?, update?, validate }
+-- plus the parts that stay in code, which lent.CLIENT reads from the graph
+-- given to lent.open: each field's `code` = { default?, update?, validate }
 -- and the table's `hooks` = { create, update, delete } lists of functions.
 function schema(name: string)
     ident(name, "table")
@@ -555,7 +555,7 @@ function schema(name: string)
         t.hooks = { create = {}, update = {}, delete = {} }
         for _, h in spec.hooks or {} do
             if getmetatable(h) ~= Hook then
-                fail(where .. " hooks must be made with ent.hook")
+                fail(where .. " hooks must be made with lent.hook")
             end
             table.insert(t.hooks[h.op], h.fn)
         end
@@ -574,7 +574,7 @@ function graph(list: { any })
     local tables, order, keys = {}, {}, {}
     for _, t in list do
         if type(t) ~= "table" or type(t.fields) ~= "table" then
-            fail("graph takes tables made with ent.schema")
+            fail("graph takes tables made with lent.schema")
         end
         if tables[t.name] then
             fail("table " .. t.name .. " is declared twice")
@@ -802,7 +802,7 @@ function selftest(): (boolean, string?)
         { function() schema "User" { fields = { field.int "a":min(2):default(1) } } end, "at least 2" },
         { function() schema "User" { fields = { field.time "a":immutable():updateDefault(now) } } end,
           "takes no updateDefault" },
-        { function() schema "User" { fields = { field.int "a" }, hooks = { 1 } } end, "ent.hook" },
+        { function() schema "User" { fields = { field.int "a" }, hooks = { 1 } } end, "lent.hook" },
         { function() hook.create(nil) end, "takes a function" },
         { function() schema "U" { fields = { { kind = "int", name = "a", uniqe = true } } } end,
           "field a has no option uniqe" },

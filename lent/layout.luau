@@ -1,20 +1,20 @@
--- Where ent keeps rows, index entries and edges in a space's store.
+-- Where lent keeps rows, index entries and edges in a space's store.
 --
--- Required, not called: `local lay = require("ent.LAYOUT")`. A function key
+-- Required, not called: `local lay = require("lent.LAYOUT")`. A function key
 -- has to define call(), so this one answers a self-check:
 --
---   ent.LAYOUT              -> "ok" or which check failed (from any space)
+--   lent.LAYOUT              -> "ok" or which check failed (from any space)
 --
 -- Tables, indexes and edges are named by KEYCODEC strings and values are
 -- encoded with their field's kind, so each prefix below holds exactly the
 -- keys that start with it:
 --
---   ent.r<table><pk>                   the row, as ROWCODEC wrote it
---   ent.i<table><index><values><pk>    "" for each row of a plain index
---   ent.u<table><index><values>        the pk, for each row of a unique index
---   ent.e<edge><from pk><to pk>        "" for each edge, read forwards
---   ent.E<edge><to pk><from pk>        "" for each edge, read backwards
---   ent.n<table>                       the last pk given out, for id = "int"
+--   lent.r<table><pk>                   the row, as ROWCODEC wrote it
+--   lent.i<table><index><values><pk>    "" for each row of a plain index
+--   lent.u<table><index><values>        the pk, for each row of a unique index
+--   lent.e<edge><from pk><to pk>        "" for each edge, read forwards
+--   lent.E<edge><to pk><from pk>        "" for each edge, read backwards
+--   lent.n<table>                       the last pk given out, for id = "int"
 --
 -- A pk is encoded with its table's id kind, "uuid" or "int", and takes the
 -- same number of bytes in every key of the table, so a key's pk is read
@@ -25,7 +25,7 @@
 -- any number of rows can leave a unique field nil. A plain index keeps those
 -- rows, and nil sorts first.
 
-local kc = require("ent.KEYCODEC")
+local kc = require("lent.KEYCODEC")
 
 local function name(s: string): string
     return kc.encode("string", s)
@@ -49,7 +49,7 @@ end
 
 -- The key of row `pk` in table `t`, or with pk nil, the prefix of them all.
 function row(t: any, pk: any): string
-    local key = "ent.r" .. name(t.key)
+    local key = "lent.r" .. name(t.key)
     return pk == nil and key or key .. kc.encode(id_kind(t), pk)
 end
 
@@ -68,7 +68,7 @@ local function index_prefix(t: any, ix: any): (string, { string })
             end
         end
     end
-    return (ix.unique and "ent.u" or "ent.i") .. name(t.key) .. name(ix.name), kinds
+    return (ix.unique and "lent.u" or "lent.i") .. name(t.key) .. name(ix.name), kinds
 end
 
 -- The prefix of every key of index `ix`, or of the keys that start with
@@ -126,13 +126,13 @@ end
 -- The forward key of edge `s` from `from` to `to`; with `to` nil, the prefix
 -- of every edge from `from`.
 function edge(s: any, from: any, to: any): string
-    local key = "ent.e" .. name(s.name) .. kc.encode(s.fromId or "int", from)
+    local key = "lent.e" .. name(s.name) .. kc.encode(s.fromId or "int", from)
     return to == nil and key or key .. kc.encode(s.toId or "int", to)
 end
 
 -- The backward key, or with `from` nil the prefix of every edge into `to`.
 function edge_back(s: any, to: any, from: any): string
-    local key = "ent.E" .. name(s.name) .. kc.encode(s.toId or "int", to)
+    local key = "lent.E" .. name(s.name) .. kc.encode(s.toId or "int", to)
     return from == nil and key or key .. kc.encode(s.fromId or "int", from)
 end
 
@@ -148,7 +148,7 @@ end
 
 -- The key that holds a table's next pk.
 function counter(t: any): string
-    return "ent.n" .. name(t.key)
+    return "lent.n" .. name(t.key)
 end
 
 -- Every key under `prefix`, `limit` at a time: calls each(key) for each and

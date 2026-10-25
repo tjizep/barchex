@@ -1,4 +1,4 @@
--- A small blog on ent: users, posts, follows and stars. Each command runs in
+-- A small blog on lent: users, posts, follows and stars. Each command runs in
 -- one transaction in the space BLOG is installed in.
 --
 --   CALLF BLOG migrate                       -> the schema version
@@ -14,8 +14,8 @@
 -- lines. n defaults to 10.
 
 local blog = require("blog.SCHEMA")
-local m = require("ent.MIGRATE")
-local ent = require("ent.CLIENT")
+local m = require("lent.MIGRATE")
+local lent = require("lent.CLIENT")
 
 local function fail(msg: string)
     error("BLOG " .. msg, 0)
@@ -93,7 +93,7 @@ function call(command: string?, ...: string)
         fail("has no command " .. tostring(command))
     end
     local args = { ... }
-    return ent.tx(function(c)
+    return lent.tx(function(c)
         return run(c, table.unpack(args))
     end)
 end

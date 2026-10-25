@@ -14,13 +14,13 @@ function setup()
             vectors  = {},
             s3       = {},
             watchdog = {},
-            ent      = {},
+            lent     = {},
         },
         load = {
             { path = "vectors",  space = "vectors" },
             { path = "s3",       space = "s3" },
             { path = "watchdog", space = "watchdog" },
-            { path = "ent",      space = "ent" },
+            { path = "lent",     space = "lent" },
         },
     }
 end

@@ -1,11 +1,11 @@
 # Blog example
 
-A small blog built on ent: users write posts, follow each other and star
+A small blog built on lent: users write posts, follow each other and star
 posts. It shows a schema module, `MIGRATE`, `CLIENT` writes in a transaction,
 and queries that follow edges.
 
-`package.luau` does not load `examples/`, so install it yourself. The ent
-modules must be in the `ent` space first, which `barchd -g` or
+`package.luau` does not load `examples/`, so install it yourself. The lent
+modules must be in the `lent` space first, which `barchd -g` or
 `FUNCTIONS SYNC` gives you.
 
 ## Install
@@ -59,9 +59,9 @@ CALLF BLOG timeline cy@x         -> 1) "019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50 1 h
 |---|---|
 | `BLOG has no user <email>` | no user has that email |
 | `BLOG has no post <id>` | `star` names a post that does not exist |
-| `ENT table Post wants a uuid id, got <id>` | `star` names something that is not a lowercase uuid |
+| `LENT table Post wants a uuid id, got <id>` | `star` names something that is not a lowercase uuid |
 | `BLOG wants a count of 1 or more, got <n>` | `n` is not a whole number of 1 or more |
 | `BLOG has no command <name>` | the first argument is not a command above |
-| `ENT table User index by_email is unique, and row <id> already has email=<email>` | `user` reuses an email |
+| `LENT table User index by_email is unique, and row <id> already has email=<email>` | `user` reuses an email |
 
 A command that fails changes nothing.

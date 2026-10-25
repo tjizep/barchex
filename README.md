@@ -12,7 +12,7 @@ barchd --port 14000 --dir data -g https://github.com/tjizep/barchex
 ```
 
 `package.luau` at the root of the repository says what goes where. Each sync
-creates the `vectors`, `s3`, `watchdog` and `ent` key spaces and loads each
+creates the `vectors`, `s3`, `watchdog` and `lent` key spaces and loads each
 folder of the same name into its space.
 
 The space viewer that used to be part of barchex is a repository of its own now,
@@ -44,17 +44,17 @@ s3/
   backup.luau      →  function BACKUP     (a key space to a bucket and back)
 watchdog/
   watchdog.luau    →  function WATCHDOG   (mail or webhook when error rates climb)
-ent/
-  keycodec.luau    →  function KEYCODEC   (order-preserving keys for ent indexes)
-  rowcodec.luau    →  function ROWCODEC   (ent rows as json, text or binary)
-  schema.luau      →  function SCHEMA     (ent tables, fields, indexes and edges)
-  layout.luau      →  function LAYOUT     (the store keys of ent rows, indexes and edges)
-  migrate.luau     →  function MIGRATE    (the ent catalog and index builds)
-  client.luau      →  function CLIENT     (ent rows, edges and queries)
+lent/
+  keycodec.luau    →  function KEYCODEC   (order-preserving keys for lent indexes)
+  rowcodec.luau    →  function ROWCODEC   (lent rows as json, text or binary)
+  schema.luau      →  function SCHEMA     (lent tables, fields, indexes and edges)
+  layout.luau      →  function LAYOUT     (the store keys of lent rows, indexes and edges)
+  migrate.luau     →  function MIGRATE    (the lent catalog and index builds)
+  client.luau      →  function CLIENT     (lent rows, edges and queries)
 docs/
-  ent-design.md    →  the plan for ent, an ORM over barch transactions
+  lent-design.md   →  the plan for lent, an ORM over barch transactions
 examples/
-  blog/            →  a blog on ent, installed by hand (see its README)
+  blog/            →  a blog on lent, installed by hand (see its README)
 ```
 
 
@@ -243,14 +243,14 @@ An install from `package.luau` opens `watchdog` on every sync, including the
 first one after a restart.
 
 KEYCODEC encodes values as key text that `barch.store.range` walks in value
-order. It is the first part of ent, an ORM planned in
-[docs/ent-design.md](docs/ent-design.md). Require it from any space:
+order. It is the first part of lent (Luau entities), an ORM planned in
+[docs/lent-design.md](docs/lent-design.md). Require it from any space:
 
 ```lua
-local kc = require("ent.KEYCODEC")
-local key = "ent.i.user.by_age" .. kc.pack({ "int", "string" }, { 42, "ann" })
-local values, next = kc.unpack(key, 2, #"ent.i.user.by_age" + 1)  -- { 42, "ann" }
-local lo = "ent.i.user.by_age" .. kc.encode("int", 42)
+local kc = require("lent.KEYCODEC")
+local key = "lent.i.user.by_age" .. kc.pack({ "int", "string" }, { 42, "ann" })
+local values, next = kc.unpack(key, 2, #"lent.i.user.by_age" + 1)  -- { 42, "ann" }
+local lo = "lent.i.user.by_age" .. kc.encode("int", 42)
 local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
 ```
 
@@ -269,22 +269,22 @@ raises an error for a value of the wrong kind, a fractional or out-of-range
 contain no space, NUL or `\1` byte, which barch would otherwise read as a
 tuple separator or refuse, and which earlier barch builds cut short in a
 range. Start each key with a prefix that begins with a letter, such as
-`ent.`, so barch keeps the whole key as text. `after(prefix)` answers the
+`lent.`, so barch keeps the whole key as text. `after(prefix)` answers the
 exclusive upper bound for a range over every key that starts with `prefix`.
-`ent.KEYCODEC` runs the module's self-check and answers `ok`.
+`lent.KEYCODEC` runs the module's self-check and answers `ok`.
 
 ROWCODEC turns a row table into a stored value and back. Compile the
 table's fields once with `fields`, then call `encode` with a format and the
 schema version, and `decode` with the stored value:
 
 ```lua
-local rc = require("ent.ROWCODEC")
+local rc = require("lent.ROWCODEC")
 local users = rc.fields({
     { name = "email", kind = "string", id = 1 },
     { name = "age", kind = "int", id = 2, optional = true },
 })
-barch.store.set("ent.r.user.1", rc.encode(users, "binary", 3, { email = "a@b", age = 41 }))
-local row, version, format = rc.decode(users, barch.store.get("ent.r.user.1"))
+barch.store.set("lent.r.user.1", rc.encode(users, "binary", 3, { email = "a@b", age = 41 }))
+local row, version, format = rc.decode(users, barch.store.get("lent.r.user.1"))
 ```
 
 | field key | required | values |
@@ -307,47 +307,47 @@ row, the schema version it was written with and the format. A row written
 with an older field list reads with the current one: added fields are nil,
 values for removed fields are skipped, an `int` value reads into a `float`
 field, and a whole-number `float` value in range reads into an `int` field.
-Other kind changes raise an error until the rows are rewritten. `ent.ROWCODEC` runs the module's self-check and answers `ok`.
+Other kind changes raise an error until the rows are rewritten. `lent.ROWCODEC` runs the module's self-check and answers `ok`.
 
-SCHEMA declares ent tables in Luau. `ent.schema` checks one table and
-`ent.graph` checks the tables together; each raises an error that starts with
+SCHEMA declares lent tables in Luau. `lent.schema` checks one table and
+`lent.graph` checks the tables together; each raises an error that starts with
 `SCHEMA` and names the problem:
 
 ```lua
-local ent = require("ent.SCHEMA")
-local User = ent.schema "User" {
+local lent = require("lent.SCHEMA")
+local User = lent.schema "User" {
     format = "json",                              -- default "binary"
     fields = {
-        ent.field.string "email":unique(),        -- adds unique index by_email
-        ent.field.string "name",
-        ent.field.int "age":optional(),
-        ent.field.bool "admin":default(false),
+        lent.field.string "email":unique(),        -- adds unique index by_email
+        lent.field.string "name",
+        lent.field.int "age":optional(),
+        lent.field.bool "admin":default(false),
     },
-    edges = { ent.edge.to "posts" "Post" },
-    indexes = { ent.index("name", "age") },       -- index by_name_age
+    edges = { lent.edge.to "posts" "Post" },
+    indexes = { lent.index("name", "age") },       -- index by_name_age
 }
-local Post = ent.schema "Post" {
+local Post = lent.schema "Post" {
     id = "int",                                   -- ids 1, 2, 3, ...
-    fields = { ent.field.string "title" },
-    edges = { ent.edge.from "author" "User":ref "posts":unique() },
+    fields = { lent.field.string "title" },
+    edges = { lent.edge.from "author" "User":ref "posts":unique() },
 }
-local app = ent.graph { User, Post }
-local version, fields = ent.ids(User, previous)   -- fields for rc.fields
+local app = lent.graph { User, Post }
+local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 ```
 
 | builder | modifiers |
 |---|---|
-| `ent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
-| `ent.index(field, ...)` | `:unique()`, `:name("by_x")` |
-| `ent.edge.to "name" "Table"` | `:unique()` |
-| `ent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
+| `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
+| `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
+| `lent.edge.to "name" "Table"` | `:unique()` |
+| `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
 
 Fields, indexes and edges can also be plain tables of the same options.
 Each option takes the modifier's name, and `true` stands for a modifier
 without an argument. This declares the same `Post` as above:
 
 ```lua
-local Post = ent.schema "Post" {
+local Post = lent.schema "Post" {
     id = "int",
     fields = { { kind = "string", name = "title" } },
     edges = {
@@ -373,10 +373,10 @@ order, and creates in one table never conflict over the id. Set
 `id = "int"` for ids 1, 2, 3 and so on from a counter per table, which makes
 concurrent creates in that table conflict and retry. A table keeps its id
 kind once it has a catalog; see MIGRATE. A table's keys use its name in snake case, so `BlogPost` stores as
-`blog_post`. `ent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
-and an `ent.edge.from` reads that edge backwards.
+`blog_post`. `lent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
+and an `lent.edge.from` reads that edge backwards.
 
-A `time` field holds Unix milliseconds as an integer. `ent.now()` answers
+A `time` field holds Unix milliseconds as an integer. `lent.now()` answers
 the current time that way, from `barch.time()`. In a call replayed from a
 Raft log, it answers the time the entry was logged, so every member stores
 the same value.
@@ -384,19 +384,19 @@ the same value.
 Value rules check each value that `create` and `update` write:
 
 ```lua
-ent.schema "Post" {
+lent.schema "Post" {
     fields = {
-        ent.field.string "title":notEmpty():maxLen(80),
-        ent.field.string "slug":match("^[%l%d-]+$"):unique():immutable(),
-        ent.field.int "stars":min(0):max(5):default(0),
-        ent.field.string "body":validate(function(v)
+        lent.field.string "title":notEmpty():maxLen(80),
+        lent.field.string "slug":match("^[%l%d-]+$"):unique():immutable(),
+        lent.field.int "stars":min(0):max(5):default(0),
+        lent.field.string "body":validate(function(v)
             return not string.find(v, "spam") or "no spam"   -- the refusal's reason
         end),
-        ent.field.time "created_at":default(ent.now):immutable(),
-        ent.field.time "updated_at":default(ent.now):updateDefault(ent.now),
+        lent.field.time "created_at":default(lent.now):immutable(),
+        lent.field.time "updated_at":default(lent.now):updateDefault(lent.now),
     },
     hooks = {
-        ent.hook.create(function(c, row)
+        lent.hook.create(function(c, row)
             row.slug = row.slug or (string.gsub(string.lower(row.title), "%W+", "-"))
         end),
     },
@@ -421,11 +421,11 @@ run. A new rule applies to later writes; it leaves stored rows as they are.
 
 Functions stay in code: `:validate`, `:updateDefault`, a function
 `:default`, and hooks run only in a client opened with the graph; see
-`ent.open` under CLIENT. A function default fills only new rows, so a new
+`lent.open` under CLIENT. A function default fills only new rows, so a new
 required field also needs a value default, or `:optional()`, for the rows
 stored before it.
 
-`ent.hook.create(fn)`, `ent.hook.update(fn)` and `ent.hook.delete(fn)` run
+`lent.hook.create(fn)`, `lent.hook.update(fn)` and `lent.hook.delete(fn)` run
 before the write, inside its transaction, in the order they are listed:
 
 | hook | called as | runs |
@@ -439,26 +439,26 @@ An error it raises refuses the write. Writes a hook made before a refusal
 stay in the transaction, so a caller that catches the error and goes on
 keeps them.
 
-`ent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
+`lent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
 new table, or the first answer of the previous version's call. A field keeps
 its id under its name or its `:was` name, and new fields are numbered after
 the highest id ever used, so a dropped field's id is never reused.
-`ent.SCHEMA` runs the module's self-check and answers `ok`.
+`lent.SCHEMA` runs the module's self-check and answers `ok`.
 
-LAYOUT names the store keys ent uses in the application's space: rows
+LAYOUT names the store keys lent uses in the application's space: rows
 (`lay.row(t, pk)`), index entries (`lay.entry(t, ix, row, pk)`), edges and a
 table's pk counter. `lay.walk(prefix, each)` calls `each(key)` for every key
 under a prefix, a page at a time, and `each` may remove the key it is given.
 `lay.scan(lo, hi, each)` and `lay.scan_back(lo, hi, each)` call `each(key)`
 for the keys in `[lo, hi)`, in key order or highest first, and stop when
 `each` answers `true`.
-`ent.LAYOUT` runs the module's self-check and answers `ok`.
+`lent.LAYOUT` runs the module's self-check and answers `ok`.
 
 MIGRATE puts a schema into the space that calls it. Call it from that space
-with the answer of `ent.graph`:
+with the answer of `lent.graph`:
 
 ```lua
-local m = require("ent.MIGRATE")
+local m = require("lent.MIGRATE")
 local report = m.migrate(app)  -- { version = 2, changed = true,
                                --   steps = { "build User.by_email" } }
 local compiled = m.load()      -- the schema in the catalog, or nil
@@ -466,7 +466,7 @@ local compiled = m.load()      -- the schema in the catalog, or nil
 
 `migrate` runs in one `barch.tx.run` transaction. It drops the entries of
 removed or changed indexes, builds new indexes from the stored rows, and
-writes the catalog under `/ent` in the space's graph. If it raises an error,
+writes the catalog under `/lent` in the space's graph. If it raises an error,
 nothing is written. Running it again with the same schema writes nothing and
 answers the current version.
 
@@ -481,15 +481,15 @@ leave stored rows unreadable:
 - a change to a table's `id` kind.
 
 Index builds read the whole table in that one transaction, so a large table
-can exceed the function deadline. `ent.MIGRATE` runs the self-check of the
+can exceed the function deadline. `lent.MIGRATE` runs the self-check of the
 planning step and answers `ok`.
 
 CLIENT reads and writes the rows of a migrated space and keeps their indexes
-current. Call `ent.tx` from the application's space:
+current. Call `lent.tx` from the application's space:
 
 ```lua
-local ent = require("ent.CLIENT")
-ent.tx(function(c)
+local lent = require("lent.CLIENT")
+lent.tx(function(c)
     local u = c.User:create { email = "a@b", name = "ann" }  -- u.id, a uuid
     c.User:get(u.id)                         -- the row, or nil
     c.User:by("email", "a@b")                -- the row, through by_email
@@ -514,19 +514,19 @@ To run a schema's function defaults, `:validate` functions and hooks, open
 the client with the graph the space was migrated with:
 
 ```lua
-local db = ent.open(app)        -- app: the answer of ent.graph
+local db = lent.open(app)        -- app: the answer of lent.graph
 db.tx(function(c) ... end)      -- db.client(pessimistic) inside a transaction
 ```
 
-`ent.open` raises an error when the graph declares a table or field that the
+`lent.open` raises an error when the graph declares a table or field that the
 space's catalog lacks; run `migrate` first. Value rules stored in the catalog
 apply with or without it.
 
-`ent.tx(fn, pessimistic)` runs `fn(c)` in `barch.tx.run`, which retries on
+`lent.tx(fn, pessimistic)` runs `fn(c)` in `barch.tx.run`, which retries on
 a conflict, and answers what `fn` answers. With `pessimistic` true, a row or
 unique entry about to be written is read with the exclusive lock, so two
 writers of one value wait for each other. Inside a transaction you already
-run, `ent.client(pessimistic)` answers the same `c`. A table with
+run, `lent.client(pessimistic)` answers the same `c`. A table with
 `id = "int"` takes each new id from one counter, so concurrent creates in
 that table conflict and retry. A refused call writes nothing apart from what
 its hooks wrote, so `fn` can catch its error and go on.
@@ -624,8 +624,8 @@ and only for `all` and `first`. An edge with one row at its far end loads a
 row or `nil`; any other edge loads a list. Loaded edges are extra keys on
 the row, so pass `update` only the fields to change.
 
-Errors start with `ENT`, or with `ROWCODEC` for a value of the wrong kind or
-a missing required field. `ent.CLIENT` runs a self-check inside a
+Errors start with `LENT`, or with `ROWCODEC` for a value of the wrong kind or
+a missing required field. `lent.CLIENT` runs a self-check inside a
 transaction it rolls back and answers `ok`.
 
 ## Install with FUNCTIONS SYNC

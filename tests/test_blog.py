@@ -9,10 +9,10 @@ redis = pytest.importorskip("redis")
 
 @pytest.fixture
 def blog(client, request):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau"), ("CLIENT", "ent/client.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+        install(client, "lent", name, path)
     install(client, "blog", "SCHEMA", "examples/blog/schema.luau")
     # BLOG requires blog.SCHEMA, and keeps its rows in the space it runs in,
     # so each test gets a space of its own
@@ -48,8 +48,8 @@ def test_blog_example(client, blog):
 
 @pytest.mark.parametrize("args, error", [
     (("post", "zed@x", "t", "b"), "BLOG has no user zed@x"),
-    (("user", "ann@x", "Again"), "ENT table User index by_email is unique, and row "),
-    (("star", "9"), "ENT table Post wants a uuid id, got 9"),
+    (("user", "ann@x", "Again"), "LENT table User index by_email is unique, and row "),
+    (("star", "9"), "LENT table Post wants a uuid id, got 9"),
     (("star", "01890000-0000-7000-8000-000000000000"), "BLOG has no post 0189"),
     (("top", "0"), "BLOG wants a count of 1 or more, got 0"),
     (("tweet",), "BLOG has no command tweet"),

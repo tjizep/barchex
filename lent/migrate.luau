@@ -1,10 +1,10 @@
--- Puts a declared ent schema into a space: the catalog in the graph, and the
+-- Puts a declared lent schema into a space: the catalog in the graph, and the
 -- index entries a change of indexes needs, in one transaction.
 --
--- Required, not called: `local m = require("ent.MIGRATE")`. A function key
+-- Required, not called: `local m = require("lent.MIGRATE")`. A function key
 -- has to define call(), so this one answers a self-check of plan():
 --
---   ent.MIGRATE             -> "ok" or which check failed (from any space)
+--   lent.MIGRATE             -> "ok" or which check failed (from any space)
 --
 -- From the application's space, with the tables SCHEMA's graph() checked:
 --
@@ -17,17 +17,17 @@
 --
 -- The catalog, in the space's graph:
 --
---   /ent/version                           the version, bumped by each change
---   /ent/compiled                          the whole schema as JSON, which
+--   /lent/version                           the version, bumped by each change
+--   /lent/compiled                          the whole schema as JSON, which
 --                                          load() reads: one GRAPH GET
---   /ent/tables/<table>/table              name, format, id kind and next
+--   /lent/tables/<table>/table              name, format, id kind and next
 --                                          field id
---   /ent/tables/<table>/fields/<field>     kind, id, optional, unique, default
+--   /lent/tables/<table>/fields/<field>     kind, id, optional, unique, default
 --                                          and the value rules: immutable,
 --                                          min, max, minLen, maxLen, match
---   /ent/tables/<table>/indexes/<ix>/spec  unique
---   /ent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
---   /ent/edges/<edge>/from, /to            links to the two tables' nodes
+--   /lent/tables/<table>/indexes/<ix>/spec  unique
+--   /lent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
+--   /lent/edges/<edge>/from, /to            links to the two tables' nodes
 --
 -- plan() refuses a change that would leave stored rows unreadable or wrong:
 --   - dropping a table;
@@ -39,9 +39,9 @@
 --   - two tables that store under one key.
 -- apply() refuses a unique index that two rows' values already break.
 
-local SCHEMA = require("ent.SCHEMA")
-local rc = require("ent.ROWCODEC")
-local lay = require("ent.LAYOUT")
+local SCHEMA = require("lent.SCHEMA")
+local rc = require("lent.ROWCODEC")
+local lay = require("lent.LAYOUT")
 
 local function fail(msg: string)
     error("MIGRATE " .. msg, 0)
@@ -95,7 +95,7 @@ end
 -- The compiled schema in this space's catalog, or nil before the first
 -- migration.
 function load(): any
-    local s = barch.graph.get("/ent/compiled")
+    local s = barch.graph.get("/lent/compiled")
     if s == nil then
         return nil
     end
@@ -257,8 +257,8 @@ end
 
 local function write_catalog(c: any)
     local g = barch.graph
-    mkdir("/ent")
-    for _, dir in { "/ent/tables", "/ent/edges" } do
+    mkdir("/lent")
+    for _, dir in { "/lent/tables", "/lent/edges" } do
         if g.stat(dir) then
             g.remove(dir, true)
         end
@@ -266,7 +266,7 @@ local function write_catalog(c: any)
     end
     local nodes = {}
     for key, t in c.tables do
-        local base = "/ent/tables/" .. key
+        local base = "/lent/tables/" .. key
         g.mkdir(base)
         g.put(base .. "/table", simdjson.encode({ name = t.name, format = t.format, id = t.id,
                                                   next = t.next }), "json")
@@ -290,13 +290,13 @@ local function write_catalog(c: any)
         end
     end
     for store, e in c.edges do
-        local dir = "/ent/edges/" .. store
+        local dir = "/lent/edges/" .. store
         g.mkdir(dir)
         g.link(nodes[e.from], dir .. "/from")
         g.link(nodes[e.to], dir .. "/to")
     end
-    g.put("/ent/compiled", simdjson.encode(c), "json")
-    g.put("/ent/version", tostring(c.version))
+    g.put("/lent/compiled", simdjson.encode(c), "json")
+    g.put("/lent/version", tostring(c.version))
 end
 
 -- Writes the plan: index drops and builds, then the catalog.
@@ -332,13 +332,13 @@ local function raises(fn: () -> (), want: string): boolean
 end
 
 function selftest(): (boolean, string?)
-    local ent = SCHEMA
+    local lent = SCHEMA
     local function v1()
-        return ent.graph { ent.schema "User" {
+        return lent.graph { lent.schema "User" {
             format = "json",
-            fields = { ent.field.string "email":unique(), ent.field.string "name",
-                       ent.field.int "age":optional() },
-            indexes = { ent.index("name") },
+            fields = { lent.field.string "email":unique(), lent.field.string "name",
+                       lent.field.int "age":optional() },
+            indexes = { lent.index("name") },
         } }
     end
     local p1 = plan(nil, v1())
@@ -351,10 +351,10 @@ function selftest(): (boolean, string?)
     if plan(stored, v1()).changed then
         return false, "an unchanged schema planned a change"
     end
-    local p2 = plan(stored, ent.graph { ent.schema "User" {
-        fields = { ent.field.string "email", ent.field.string "name",
-                   ent.field.float "age":optional(), ent.field.bool "admin":default(false) },
-        indexes = { ent.index("name", "age") },
+    local p2 = plan(stored, lent.graph { lent.schema "User" {
+        fields = { lent.field.string "email", lent.field.string "name",
+                   lent.field.float "age":optional(), lent.field.bool "admin":default(false) },
+        indexes = { lent.index("name", "age") },
     } })
     local ops = {}
     for _, s in p2.steps do
@@ -368,21 +368,21 @@ function selftest(): (boolean, string?)
     end
 
     local refused = {
-        { { ent.field.string "email", ent.field.string "name", ent.field.int "age":optional(),
-            ent.field.int "score" }, "is new" },
-        { { ent.field.string "email", ent.field.int "name", ent.field.int "age":optional() },
+        { { lent.field.string "email", lent.field.string "name", lent.field.int "age":optional(),
+            lent.field.int "score" }, "is new" },
+        { { lent.field.string "email", lent.field.int "name", lent.field.int "age":optional() },
           "changes kind from string to int" },
-        { { ent.field.string "email", ent.field.string "full":was("name"),
-            ent.field.int "age":optional() }, "has stored json rows" },
+        { { lent.field.string "email", lent.field.string "full":was("name"),
+            lent.field.int "age":optional() }, "has stored json rows" },
     }
     for i, case in refused do
-        local app = ent.graph { ent.schema "User" { fields = case[1] } }
+        local app = lent.graph { lent.schema "User" { fields = case[1] } }
         if not raises(function() plan(stored, app) end, case[2]) then
             return false, "refusal " .. i
         end
     end
-    local ints = ent.graph { ent.schema "User" { id = "int", fields = {
-        ent.field.string "email", ent.field.string "name", ent.field.int "age":optional() } } }
+    local ints = lent.graph { lent.schema "User" { id = "int", fields = {
+        lent.field.string "email", lent.field.string "name", lent.field.int "age":optional() } } }
     if not raises(function() plan(stored, ints) end, "needs id = \"uuid\"") then
         return false, "changed the id kind"
     end
@@ -391,7 +391,7 @@ function selftest(): (boolean, string?)
     if not raises(function() plan(legacy, v1()) end, "has int ids") then
         return false, "read a catalog without id kinds as uuid"
     end
-    local other = ent.graph { ent.schema "Post" { fields = { ent.field.string "t" } } }
+    local other = lent.graph { lent.schema "Post" { fields = { lent.field.string "t" } } }
     if not raises(function() plan(stored, other) end, "dropping a table") then
         return false, "dropped a table"
     end

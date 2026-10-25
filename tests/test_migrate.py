@@ -8,34 +8,34 @@ redis = pytest.importorskip("redis")
 # LAYOUT and ROWCODEC, then migrates to a version that adds a unique index and
 # drops the name index, and answers what the store and catalog hold.
 APP = """
-local ent = require("ent.SCHEMA")
-local rc = require("ent.ROWCODEC")
-local lay = require("ent.LAYOUT")
-local m = require("ent.MIGRATE")
+local lent = require("lent.SCHEMA")
+local rc = require("lent.ROWCODEC")
+local lay = require("lent.LAYOUT")
+local m = require("lent.MIGRATE")
 
 local function v1()
-    return ent.graph {
-        ent.schema "User" {
+    return lent.graph {
+        lent.schema "User" {
             id = "int",
-            fields = { ent.field.string "email", ent.field.string "name" },
-            edges = { ent.edge.to "posts" "Post" },
-            indexes = { ent.index("name") },
+            fields = { lent.field.string "email", lent.field.string "name" },
+            edges = { lent.edge.to "posts" "Post" },
+            indexes = { lent.index("name") },
         },
-        ent.schema "Post" { id = "int", fields = { ent.field.string "title" } },
+        lent.schema "Post" { id = "int", fields = { lent.field.string "title" } },
     }
 end
 
 local function v2(unique)
-    local email = ent.field.string "email"
-    return ent.graph {
-        ent.schema "User" {
+    local email = lent.field.string "email"
+    return lent.graph {
+        lent.schema "User" {
             id = "int",
-            fields = { unique and email:unique() or email, ent.field.string "name",
-                       ent.field.int "age":optional() },
-            edges = { ent.edge.to "posts" "Post" },
-            indexes = { ent.index("email", "name") },
+            fields = { unique and email:unique() or email, lent.field.string "name",
+                       lent.field.int "age":optional() },
+            edges = { lent.edge.to "posts" "Post" },
+            indexes = { lent.index("email", "name") },
         },
-        ent.schema "Post" { id = "int", fields = { ent.field.string "title" } },
+        lent.schema "Post" { id = "int", fields = { lent.field.string "title" } },
     }
 end
 
@@ -58,9 +58,9 @@ function call(which)
         end)
         return { r.version, tostring(r.changed), table.concat(r.steps, ","),
                  again.version, tostring(again.changed),
-                 barch.graph.get("/ent/version"),
-                 barch.graph.stat("/ent/tables/user/indexes/by_name/on/1").refs,
-                 barch.graph.stat("/ent/edges/user_posts/to").type }
+                 barch.graph.get("/lent/version"),
+                 barch.graph.stat("/lent/tables/user/indexes/by_name/on/1").refs,
+                 barch.graph.stat("/lent/edges/user_posts/to").type }
     end
     if which == "dup" then
         return m.migrate(v2(true))
@@ -68,24 +68,24 @@ function call(which)
     local r = m.migrate(v2(false))
     local u = m.load().tables.user
     return { r.version, table.concat(r.steps, ","),
-             count("ent.i"), count(lay.index(u, u.indexes[1], { "a@b" })),
-             tostring(barch.graph.stat("/ent/tables/user/indexes/by_name") == nil),
-             barch.graph.stat("/ent/tables/user/fields/age") and "age" or "no age" }
+             count("lent.i"), count(lay.index(u, u.indexes[1], { "a@b" })),
+             tostring(barch.graph.stat("/lent/tables/user/indexes/by_name") == nil),
+             barch.graph.stat("/lent/tables/user/fields/age") and "age" or "no age" }
 end
 """
 
 
 def setup(client):
-    for name, path in [("KEYCODEC", "ent/keycodec.luau"), ("ROWCODEC", "ent/rowcodec.luau"),
-                       ("SCHEMA", "ent/schema.luau"), ("LAYOUT", "ent/layout.luau"),
-                       ("MIGRATE", "ent/migrate.luau")]:
-        install(client, "ent", name, path)
+    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+                       ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
+                       ("MIGRATE", "lent/migrate.luau")]:
+        install(client, "lent", name, path)
 
 
 @pytest.mark.parametrize("name", ["LAYOUT", "MIGRATE"])
 def test_selftest(client, name):
     setup(client)
-    client.execute_command("USE", "ent")
+    client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", name) == "ok"
 
 
