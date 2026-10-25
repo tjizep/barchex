@@ -342,6 +342,30 @@ local version, fields = ent.ids(User, previous)   -- fields for rc.fields
 | `ent.edge.to "name" "Table"` | `:unique()` |
 | `ent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
 
+Fields, indexes and edges can also be plain tables of the same options.
+Each option takes the modifier's name, and `true` stands for a modifier
+without an argument. This declares the same `Post` as above:
+
+```lua
+local Post = ent.schema "Post" {
+    id = "int",
+    fields = { { kind = "string", name = "title" } },
+    edges = {
+        { dir = "from", name = "author", target = "User", ref = "posts", unique = true },
+    },
+}
+```
+
+| plain table | keys |
+|---|---|
+| field | `kind` and `name` (required), `optional`, `unique`, `default`, `was`, and the value rules below; `validate` takes a function or a list of them |
+| index | `on`, a list of field names (required), `unique`, `name` |
+| edge | `dir`, `"to"` or `"from"`, `name` and `target` (required), `ref`, `unique` |
+
+A plain table goes through the same checks as the builder, and a key it
+does not recognise raises an error, so a misspelt option fails when the
+schema loads. The two forms can be mixed in one table.
+
 Every table has a primary key named `id`, so a field cannot use that name.
 By default each new row's id is a `barch.uuid()` string, such as
 `019a1f3c-7d2e-7a41-9b3c-5e6f7a8b9c0d`. Ids from one server sort in creation

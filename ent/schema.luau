@@ -293,6 +293,95 @@ hook = {
 
 -- tables ----------------------------------------------------------------------
 
+-- plain tables ----------------------------------------------------------------
+
+-- A field, index or edge may also be a plain table of its options, such as
+-- { dir = "from", name = "author", target = "User", ref = "posts" }. Each is
+-- made with the builders, so both forms get the same checks.
+
+local function plain(where: string, what: string, t: any, keys: { [string]: string })
+    if type(t) ~= "table" then
+        fail(where .. " " .. what .. " must be a table or made with ent." .. what
+            .. ", got " .. tostring(t))
+    end
+    for k, v in t do
+        local want = keys[k]
+        if want == nil then
+            fail(where .. " " .. what .. " " .. tostring(t.name) .. " has no option " .. tostring(k))
+        end
+        if want ~= "any" and type(v) ~= want then
+            fail(where .. " " .. what .. " " .. tostring(t.name) .. " option " .. k .. " takes a "
+                .. want .. ", got " .. tostring(v))
+        end
+    end
+end
+
+local FIELD_KEYS = {
+    kind = "string", name = "string", optional = "boolean", unique = "boolean",
+    default = "any", was = "string", immutable = "boolean", min = "number",
+    max = "number", minLen = "number", maxLen = "number", notEmpty = "boolean",
+    match = "string", validate = "any", updateDefault = "function",
+}
+
+local function plain_field(where: string, t: any): any
+    if getmetatable(t) == Field then
+        return t
+    end
+    plain(where, "field", t, FIELD_KEYS)
+    if not KINDS[t.kind] then
+        fail(where .. " field " .. tostring(t.name) .. " has no kind " .. tostring(t.kind))
+    end
+    local f = field[t.kind](t.name)
+    if t.optional then f:optional() end
+    if t.unique then f:unique() end
+    if t.immutable then f:immutable() end
+    if t.notEmpty then f:notEmpty() end
+    if t.default ~= nil then f:default(t.default) end
+    if t.was then f:was(t.was) end
+    if t.updateDefault then f:updateDefault(t.updateDefault) end
+    for _, k in { "min", "max", "minLen", "maxLen", "match" } do
+        if t[k] ~= nil then
+            f[k](f, t[k])
+        end
+    end
+    -- one function, or a list of them
+    local fns = type(t.validate) == "table" and t.validate or { t.validate }
+    for _, fn in fns do
+        f:validate(fn)
+    end
+    return f
+end
+
+local function plain_index(where: string, t: any): any
+    if getmetatable(t) == Index then
+        return t
+    end
+    plain(where, "index", t, { on = "table", unique = "boolean", name = "string" })
+    if t.on == nil then
+        fail(where .. " index needs on, the list of its fields")
+    end
+    local ix = index(table.unpack(t.on))
+    if t.unique then ix:unique() end
+    if t.name then ix:name(t.name) end
+    return ix
+end
+
+local function plain_edge(where: string, t: any): any
+    if getmetatable(t) == Edge then
+        return t
+    end
+    plain(where, "edge", t, { dir = "string", name = "string", target = "string",
+                              ref = "string", unique = "boolean" })
+    if t.dir ~= "to" and t.dir ~= "from" then
+        fail(where .. " edge " .. tostring(t.name) .. " dir is \"to\" or \"from\", got "
+            .. tostring(t.dir))
+    end
+    local e = edge[t.dir](t.name)(t.target)
+    if t.ref then e:ref(t.ref) end
+    if t.unique then e:unique() end
+    return e
+end
+
 local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true,
                   hooks = true }
 
@@ -369,9 +458,7 @@ function schema(name: string)
 
         local byName, was = {}, {}
         for _, f in spec.fields or {} do
-            if getmetatable(f) ~= Field then
-                fail(where .. " fields must be made with ent.field")
-            end
+            f = plain_field(where, f)
             local fname = f.name
             if fname == "id" then
                 fail(where .. " field id is the primary key, which every table has")
@@ -432,9 +519,7 @@ function schema(name: string)
             end
         end
         for _, ix in spec.indexes or {} do
-            if getmetatable(ix) ~= Index then
-                fail(where .. " indexes must be made with ent.index")
-            end
+            ix = plain_index(where, ix)
             local seen = {}
             for _, fname in ix.on do
                 if byName[fname] == nil then
@@ -451,9 +536,7 @@ function schema(name: string)
 
         local edges = {}
         for _, e in spec.edges or {} do
-            if getmetatable(e) ~= Edge then
-                fail(where .. " edges must be made with ent.edge")
-            end
+            e = plain_edge(where, e)
             if edges[e.name] or byName[e.name] then
                 fail(where .. " edge " .. e.name .. " has the name of another edge or field")
             end
@@ -664,6 +747,42 @@ function selftest(): (boolean, string?)
         return false, "now " .. t1
     end
 
+    -- plain tables compile to what the builders do
+    local Plain = schema "Post" {
+        id = "int",
+        fields = {
+            { kind = "string", name = "title", notEmpty = true, maxLen = 5 },
+            { kind = "int", name = "rank", min = 1, default = 2, was = "score" },
+        },
+        indexes = { { on = { "rank", "title" }, unique = true, name = "by_both" } },
+        edges = { { dir = "from", name = "author", target = "User", ref = "posts", unique = true } },
+    }
+    local Built = schema "Post" {
+        id = "int",
+        fields = { field.string "title":notEmpty():maxLen(5),
+                   field.int "rank":min(1):default(2):was("score") },
+        indexes = { index("rank", "title"):unique():name("by_both") },
+        edges = { edge.from "author" "User":ref "posts":unique() },
+    }
+    local function shape(t)
+        local out = {}
+        for i, f in t.fields do
+            out[#out + 1] = string.format("%s %s %s %s %s %s %s", f.name, f.kind, tostring(f.min),
+                tostring(f.minLen), tostring(f.maxLen), tostring(f.default), tostring(f.was))
+        end
+        for _, ix in t.indexes do
+            out[#out + 1] = ix.name .. " " .. table.concat(ix.on, ",") .. " " .. tostring(ix.unique)
+        end
+        for _, e in t.edges do
+            out[#out + 1] = e.name .. " " .. e.dir .. " " .. e.target .. " " .. e.ref .. " "
+                .. tostring(e.unique)
+        end
+        return table.concat(out, "; ")
+    end
+    if shape(Plain) ~= shape(Built) then
+        return false, "plain tables: " .. shape(Plain) .. " vs " .. shape(Built)
+    end
+
     local refused = {
         { function() schema "User" { fields = {} } end, "needs at least one field" },
         { function() schema "User" { fields = { field.int "id" } } end, "primary key" },
@@ -685,6 +804,18 @@ function selftest(): (boolean, string?)
           "takes no updateDefault" },
         { function() schema "User" { fields = { field.int "a" }, hooks = { 1 } } end, "ent.hook" },
         { function() hook.create(nil) end, "takes a function" },
+        { function() schema "U" { fields = { { kind = "int", name = "a", uniqe = true } } } end,
+          "field a has no option uniqe" },
+        { function() schema "U" { fields = { { kind = "date", name = "a" } } } end, "no kind date" },
+        { function() schema "U" { fields = { { kind = "int", name = "a", min = "1" } } } end,
+          "option min takes a number" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            { dir = "back", name = "x", target = "Y" } } } end, "dir is \"to\" or \"from\"" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            { dir = "from", name = "x", target = "Y" } } } end, "needs :ref" },
+        { function() schema "U" { fields = { field.int "a" }, indexes = { { unique = true } } } end,
+          "index needs on" },
+        { function() schema "U" { fields = { "a" } } end, "field must be a table" },
     }
     for i, case in refused do
         if not raises(case[1], case[2]) then

@@ -52,7 +52,8 @@ local function app(extra)
                 end),
             },
         },
-        ent.schema "Log" { id = "int", fields = { ent.field.string "msg" } },
+        -- a plain table works where a builder does
+        ent.schema "Log" { id = "int", fields = { { kind = "string", name = "msg", notEmpty = true } } },
     }
 end
 

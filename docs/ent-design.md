@@ -82,7 +82,10 @@ return ent.graph { User, Post }
 ```
 
 The builders live under `ent.field` and `ent.edge`, as in Go ent's `field`
-and `edge` packages. A module's global named `string` would hide the string
+and `edge` packages. Each field, index and edge can also be a plain table of
+the same options, such as `{ dir = "from", name = "author", target = "User",
+ref = "posts" }`, which spells out what the chained calls set and can be
+built as data. A module's global named `string` would hide the string
 library from the code that requires it.
 
 Every field gets a row codec id. `ent.ids` keeps the ids an earlier version
