@@ -24,8 +24,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
 
 - **Privacy rules:** read and write policies per table, as in Go ent. They
   could build on hooks.
-- **Edge fields in more queries:** `follow`, `groupBy` and aggregates read
-  only the linked rows; they could also read a link's values.
 
 ## barch
 

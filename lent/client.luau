@@ -970,7 +970,7 @@ local OPS = { ["="] = true, ["~="] = true, ["<"] = true, ["<="] = true, [">"] = 
 local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
 
 local function kind_of(tbl: any, field: string): string
-    if field == "id" then
+    if field == "id" and tbl.linksOf == nil then
         return lay.id_kind(tbl.t)
     end
     local f = tbl.byName[field] or tbl.computedByName[field]
@@ -995,6 +995,14 @@ end
 function Table:query(): any
     return setmetatable({ tbl = self, conds = {}, preds = {}, checks = {}, loads = {}, skip = 0 },
         Query)
+end
+
+-- Raises an error when q is a links query, whose rows are links.
+local function rows_only(q: any, what: string)
+    if q.tbl.linksOf then
+        fail(q.tbl.where .. " query " .. what .. " reads table rows; a links query takes where,"
+            .. " order, limit, offset, groupBy and aggregates")
+    end
 end
 
 -- Keeps the rows where `field op value` holds, op being one of = ~= < <= >
@@ -1073,6 +1081,7 @@ end
 -- after() on the same query to read the next page.
 function Query:cursor(row: any): string
     local tbl = self.tbl
+    rows_only(self, "cursor")
     if type(row) ~= "table" or row.id == nil then
         fail(tbl.where .. " query cursor takes a row, got " .. tostring(row))
     end
@@ -1088,6 +1097,7 @@ end
 -- order when the query sets none. The cursor comes from cursor().
 function Query:after(cursor: string): any
     local tbl = self.tbl
+    rows_only(self, "after")
     local ok, values = false, nil
     if type(cursor) == "string" and #cursor % 2 == 0 and not string.find(cursor, "[^0-9a-f]") then
         local raw = string.gsub(cursor, "..", function(h)
@@ -1120,6 +1130,7 @@ end
 
 -- Reads through the index named `name`, or "id" for the table itself.
 function Query:using(name: string): any
+    rows_only(self, "using")
     self.use = name
     return self
 end
@@ -1463,13 +1474,82 @@ local function load(q: any, list: { any })
     end
 end
 
+-- The rows of links query q, one per link from the rows of the query it
+-- came from, in from then to id order unless q orders them, after offset
+-- and limit. Without an order the read stops at the limit.
+local function link_rows(q: any): { any }
+    local l = q.tbl.linksOf
+    local tbl, e = l.tbl, l.e
+    local s = tbl.allEdges[e.store]
+    local forward = e.dir == "to"
+    local want = q.lim and q.skip + q.lim
+    local early = q.sortField == nil and want ~= nil
+    local from = l.q:ids()
+    table.sort(from)
+    local out = {}
+    for _, pk in from do
+        if want == 0 or (early and #out >= want) then
+            break
+        end
+        linked(s, forward, pk, function(other)
+            local r = link_values(tbl, e, pk, other)
+            r.from, r.to = pk, other
+            if matches(q, r) then
+                out[#out + 1] = r
+            end
+            return early and #out >= want
+        end)
+    end
+    local f = q.sortField
+    if f then
+        table.sort(out, function(a, b)
+            if a[f] ~= b[f] then
+                return less(a[f], b[f])
+            elseif a.from ~= b.from then
+                return a.from < b.from
+            end
+            return a.to < b.to
+        end)
+        if q.desc then
+            local n = #out
+            for i = 1, n // 2 do
+                out[i], out[n + 1 - i] = out[n + 1 - i], out[i]
+            end
+        end
+    end
+    if q.skip ~= 0 or (want ~= nil and #out > want) then
+        out = table.move(out, q.skip + 1, math.min(#out, want or #out), 1, {})
+    end
+    return out
+end
+
 -- The matching rows, in order, after offset and limit, with their eager
 -- loaded edges when `loading`.
 local function rows(q: any, loading: boolean?): { any }
+    if q.tbl.linksOf then
+        return link_rows(q)
+    end
     local tbl = q.tbl
     local p = plan(q)
     prepare(q)
     local idset = q.idset
+    local l = q.edgeOf
+    if idset and l and l.from and l.q then
+        -- after follow, whereEdge keeps the rows that a matching link of the
+        -- last edge reaches
+        local s, forward, seen = l.tbl.allEdges[l.e.store], l.e.dir == "to", {}
+        idset = {}
+        for _, pk in l.from do
+            linked(s, forward, pk, function(other)
+                if not seen[other] and link_ok(l.tbl, l.e, l, pk, other) then
+                    seen[other] = true
+                    idset[#idset + 1] = other
+                end
+                return false
+            end)
+        end
+        table.sort(idset)
+    end
     if p.via then
         idset = {}
         for pk in p.via.set do
@@ -1580,6 +1660,7 @@ end
 
 -- The ids of the rows the query matches.
 function Query:ids(): { number }
+    rows_only(self, "ids")
     local list = rows(self)
     for i, r in list do
         list[i] = r.id
@@ -1691,7 +1772,7 @@ local function group_key(tbl: any, name: any): any
     if type(name) ~= "string" then
         fail(tbl.where .. " query groupBy takes field or edge names, got " .. tostring(name))
     end
-    if name == "id" or tbl.byName[name] or tbl.computedByName[name] then
+    if (name == "id" and tbl.linksOf == nil) or tbl.byName[name] or tbl.computedByName[name] then
         local kind = kind_of(tbl, name)
         if kind == "json" then
             fail(tbl.where .. " field " .. name .. " is json, so groupBy cannot use it")
@@ -1833,6 +1914,7 @@ end
 -- or change which rows match. Answers how many rows were updated.
 function Query:update(values: { [string]: any }?, clear: { string }?): number
     local tbl = self.tbl
+    rows_only(self, "update")
     if values ~= nil and type(values) ~= "table" then
         fail(tbl.where .. " query update takes a table of values")
     end
@@ -1853,6 +1935,7 @@ end
 -- Deletes the selected rows in query order and answers how many were removed.
 -- Capture all ids before deleting rows or their edges changes the selection.
 function Query:delete(): number
+    rows_only(self, "delete")
     local ids, n = self:ids(), 0
     for _, id in ids do
         if self.tbl:delete(id) then
@@ -1865,6 +1948,10 @@ end
 -- How the query reads: the index, the fields it matches with = and the
 -- range field, and "then sort" when the rows are sorted after reading.
 function Query:explain(): string
+    local l = self.tbl.linksOf
+    if l then
+        return "links " .. l.e.store .. " from (" .. l.q:explain() .. ")"
+    end
     return plan(self).name
 end
 
@@ -1885,18 +1972,46 @@ function Query:follow(...: string): any
     if #names == 0 then
         fail(tbl.where .. " query follow takes at least one edge name")
     end
-    local ids, stores = self:ids(), {}
+    rows_only(self, "follow")
+    local ids, stores, last = self:ids(), {}, nil
     for _, name in names do
         local e = find_edge(tbl, name)
         for _, h in hops(tbl, e) do
             stores[#stores + 1] = h.e.store
         end
+        -- whereEdge on the answer filters the links of the last edge
+        last = { tbl = tbl, e = e, from = ids }
         ids = reach(tbl, e, ids)
         tbl = tbl.peers[e.target]
     end
     local q = tbl:query()
-    q.idset, q.via = ids, table.concat(stores, "/")
+    q.idset, q.via, q.edgeOf = ids, table.concat(stores, "/"), last
     return q
+end
+
+-- A query over the links through edge `name` from the matching rows, one
+-- row per link: the matching row's id in `from`, the linked row's id in
+-- `to`, and the link's values filled with defaults. where, order, limit,
+-- offset, groupBy and the aggregates work on these rows.
+function Query:links(name: string): any
+    local tbl = self.tbl
+    rows_only(self, "links")
+    local e = find_edge(tbl, name)
+    if e.dir == "through" then
+        fail(tbl.where .. " edge " .. name .. " is an edge.through; links reads the links of an"
+            .. " edge.to or edge.from")
+    end
+    local byName = {
+        from = { name = "from", kind = lay.id_kind(tbl.t) },
+        to = { name = "to", kind = lay.id_kind(tbl.peers[e.target].t) },
+    }
+    local es = tbl.links[e.store]
+    for fname, f in es and es.byName or {} do
+        byName[fname] = f
+    end
+    return Table.query({ where = tbl.where .. " links " .. name, byName = byName,
+                         computedByName = {}, edgeByName = {}, t = tbl.t,
+                         linksOf = { tbl = tbl, e = e, q = self } })
 end
 
 -- Keeps the rows that link to at least one row through edge `name`. With
@@ -1904,6 +2019,7 @@ end
 -- has and using calls; fn may answer q or nothing.
 function Query:has(name: string, fn: ((any) -> any)?): any
     local tbl = self.tbl
+    rows_only(self, "has")
     local e = find_edge(tbl, name)
     local sub
     if fn ~= nil then
@@ -1926,6 +2042,7 @@ end
 -- row[name]: a row or nil for an edge with one row at its far end, else a
 -- list. fn(q) may filter, order and limit each row's list.
 function Query:with(name: string, fn: ((any) -> any)?): any
+    rows_only(self, "with")
     local e = find_edge(self.tbl, name)
     if fn ~= nil and type(fn) ~= "function" then
         fail(self.tbl.where .. " query with takes a function, got " .. tostring(fn))
@@ -1934,13 +2051,16 @@ function Query:with(name: string, fn: ((any) -> any)?): any
     return self
 end
 
--- Inside has(name, fn) and with(name, fn): keeps the linked rows whose link
--- through that edge holds `field op value`, as where does for a row's
--- fields. whereEdge(fn) keeps the links for which fn(values) answers true.
+-- Inside has(name, fn) and with(name, fn), and on the answer of follow:
+-- keeps the linked rows whose link through that edge holds `field op
+-- value`, as where does for a row's fields. After follow, a row stays when
+-- one of the links of the last edge that reach it matches. whereEdge(fn)
+-- keeps the links for which fn(values) answers true.
 function Query:whereEdge(field: any, op: string?, value: any): any
     local l = self.edgeOf
     if l == nil then
-        fail(self.tbl.where .. " query whereEdge works inside the function given to has or with")
+        fail(self.tbl.where .. " query whereEdge works inside the function given to has or"
+            .. " with, and after follow")
     end
     local es = l.tbl.links[l.e.store]
     if es == nil then

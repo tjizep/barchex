@@ -656,12 +656,16 @@ local function stored_field(where: string, f: any): any
 end
 
 -- The stored fields of an edge.to, checked as a table's fields are. An edge
--- has no indexes and no computed fields.
+-- has no indexes and no computed fields, and the rows of a links query hold
+-- the link's ends in `from` and `to`.
 local function edge_fields(where: string, list: { any }): { any }
     local out, byName, was = {}, {}, {}
     for _, f in list do
         f = plain_field(where, f)
         local fname = f.name
+        if fname == "from" or fname == "to" then
+            fail(where .. " field " .. fname .. " names an end of the link in links queries")
+        end
         if byName[fname] then
             fail(where .. " field " .. fname .. " is declared twice")
         end
@@ -1281,6 +1285,8 @@ function selftest(): (boolean, string?)
             edge.to "x" "Y":fields { field.int "n":computed(now) } } } end, "edge holds stored fields only" },
         { function() schema "U" { fields = { field.int "a" }, edges = {
             edge.to "x" "Y":fields { field.int "n", field.int "n" } } } end, "edge x field n is declared twice" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.to "x" "Y":fields { field.int "to" } } } end, "field to names an end of the link" },
         { function() schema "U" { fields = { field.int "a" }, edges = { edge.to "x" "Y":fields {} } } end,
           "fields takes at least one field" },
         { function() edge.to "x" "Y":fields(1) end, "fields takes a list of fields" },

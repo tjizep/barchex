@@ -80,6 +80,9 @@ beside a development server.
   reads them from both ends, filters with `whereEdge` in `has` and `with`,
   migrates an edge from no fields to fields and refuses a new required
   field, and checks the errors for bad edge values.
+- `test_edge_links.py` reads links with `links` from both ends of an edge,
+  filters, orders, pages and aggregates them, filters a `follow` with
+  `whereEdge`, and checks the errors for methods a links query refuses.
 - `test_follow_index.py` follows an edge with filters and orders that an
   index on the target serves, makes every row outside the expected set
   unreadable to show which rows each read touches, and checks the fallback

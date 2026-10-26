@@ -255,6 +255,11 @@ linked rows among them. It gives up on the index after as many keys as there
 are linked ids, so the index read costs at most as many keys as the follow
 has links.
 
+A link's values live in the value of its forward edge key. A links query
+scans the edge keys of each matching row and reads that value for each
+link, and `whereEdge` after a follow walks the last hop again from the rows
+before it, keeping the far ends of the links that match.
+
 A path edge (`edge.through`) names a chain of edges. Following it collects
 the distinct ids at each hop before the next, so its cost grows with the
 distinct rows along the path. A stored path edge keeps one link per pair of

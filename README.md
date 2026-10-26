@@ -818,7 +818,8 @@ the values given and runs `:updateDefault` functions; with no values it
 leaves the link as it is. Edge fields take the value rules, `:validate`,
 `:immutable` and `:was`, and `migrate` checks their changes as it checks a
 table's fields. An edge has no indexes, so its fields take no `:unique()`,
-and they take no `:computed`. `migrate` accepts fields on an edge that already has links
+and they take no `:computed`. The names `from` and `to` hold the ends of a
+link in `links` queries, so an edge field cannot use them. `migrate` accepts fields on an edge that already has links
 when each new field is optional or has a stored default.
 
 A path edge, declared with `lent.edge.through`, reaches the rows at the end
@@ -909,7 +910,8 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
-| `whereEdge(field, op, value)`, `whereEdge(fn)` | inside the `fn` of `has` or `with`, keeps the linked rows whose link values match, as `where` does for fields |
+| `whereEdge(field, op, value)`, `whereEdge(fn)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
+| `links(edge)` | a query over the links of the matches through an `edge.to` or `edge.from`, one row per link holding `from`, `to` and the link's values |
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
@@ -1091,6 +1093,45 @@ in `_edge`, and `whereEdge` filters on them:
 c.User:query():withLikes(function(p) p:whereEdge("weight", ">=", 3) end):all()
 -- u.likes[1]._edge.weight is the weight of the first loaded like
 ```
+
+After `follow`, `whereEdge` filters the links of the last edge followed. A
+row stays when at least one link that reaches it matches:
+
+```lua
+-- the posts ann liked with weight 3 or more
+c.User:query():where("name", "=", "ann"):queryLikes():whereEdge("weight", ">=", 3):all()
+-- the posts that the users cy follows liked with weight 3 or more
+c.User:query():where("name", "=", "cy"):follow("follows", "likes")
+    :whereEdge("weight", ">=", 3):all()
+```
+
+To read the values themselves, or to count and sum over links, call
+`links(edge)`. It answers a query with one row per link from the matching
+rows: `from` holds the matching row's id, `to` the linked row's id, and the
+other keys hold the link's values, filled with defaults. From an
+`edge.from`, `from` is the row of the table that declares the `edge.from`.
+An edge without fields gives rows with only `from` and `to`.
+
+```lua
+local likes = c.User:query():links("likes")
+likes:where("weight", ">=", 3):order("weight", "desc"):limit(10):all()
+-- { { from = 2, to = 3, weight = 5 }, { from = 3, to = 2, weight = 4 }, ... }
+likes:sum("weight")
+-- per post: how many users liked it and their total weight
+likes:groupBy("to"):aggregate {
+    likers = { fn = "count" },
+    weight = { fn = "sum", field = "weight" },
+}
+```
+
+A links query takes `where`, `order`, `limit`, `offset`, `groupBy`, the
+aggregates, `all`, `first`, `count` and `explain`; other query methods raise
+an error. It reads the links of each matching row in id order and reads
+each link's values, so its cost grows with the number of links. Without
+`order`, links come in `from` then `to` order and the read stops at the
+limit. With `order`, it reads every link, sorts them, and puts links with
+equal values in `from` then `to` order. `explain` shows the plan of the
+query the links come from, as in `links user_likes from (id)`.
 
 Errors start with `LENT`, or with `ROWCODEC` for a value of the wrong kind or
 a missing required field. `lent.CLIENT` runs a self-check inside a
