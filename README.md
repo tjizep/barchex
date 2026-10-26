@@ -353,7 +353,7 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | `lent.field.bytes` | the same modifiers and byte-length rules |
 | `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
 | `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
-| `lent.edge.to "name" "Table"` | `:unique()` |
+| `lent.edge.to "name" "Table"` | `:unique()`, `:fields { ... }` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
 
 Fields, indexes and edges can also be plain tables of the same options.
@@ -374,7 +374,7 @@ local Post = lent.schema "Post" {
 |---|---|
 | field | `kind` and `name` (required), `values` (required for `enum`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `unique`, `name` |
-| edge | `dir`, `"to"` or `"from"`, `name` and `target` (required), `ref`, `unique` |
+| edge | `dir`, `"to"` or `"from"`, `name` and `target` (required), `ref`, `unique`, `fields` |
 
 A plain table goes through the same checks as the builder, and a key it
 does not recognise raises an error, so a misspelt option fails when the
@@ -744,6 +744,31 @@ A `:unique()` edge links each row to at most one row, and `create` and
 `link` refuse a second one. `delete` removes the row's edges in both
 directions, including edges that only the other table declares.
 
+An `edge.to` can store values on each link. Declare them with `:fields`, as
+a table's fields, and the `edge.from` that refs the edge reads the same
+values:
+
+```lua
+lent.edge.to "likes" "Post":fields {
+    lent.field.time "at":default(lent.now):immutable(),
+    lent.field.int "weight":default(1):min(1),
+}
+
+c.User:link("likes", u.id, p.id, { weight = 3 })  -- answers { at = ..., weight = 3 }
+c.User:link("likes", u.id, p.id, { weight = 5 })  -- changes weight, keeps at
+c.User:edge("likes", u.id, p.id)                  -- the values, or nil if not linked
+c.Post:edge("likers", p.id, u.id)                 -- the same values from the edge.from
+```
+
+A new link fills missing values with defaults, so `create` with an edge
+value links with the defaults. Linking an existing link again changes only
+the values given and runs `:updateDefault` functions; with no values it
+leaves the link as it is. Edge fields take the value rules, `:validate`,
+`:immutable` and `:was`, and `migrate` checks their changes as it checks a
+table's fields. An edge has no indexes, so its fields take no `:unique()`,
+and they take no `:computed`. `migrate` accepts fields on an edge that already has links
+when each new field is optional or has a stored default.
+
 Queries read through the best index for their filters:
 
 ```lua
@@ -769,6 +794,7 @@ c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
+| `whereEdge(field, op, value)`, `whereEdge(fn)` | inside the `fn` of `has` or `with`, keeps the linked rows whose link values match, as `where` does for fields |
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
@@ -910,6 +936,15 @@ filter with `order`, `limit`, `offset` or `with` raises an error.
 and only for `all` and `first`. An edge with one row at its far end loads a
 row or `nil`; any other edge loads a list. Loaded edges are extra keys on
 the row, so pass `update` only the fields to change.
+
+For an edge with fields, each row `with` loads also holds its link's values
+in `_edge`, and `whereEdge` filters on them:
+
+```lua
+-- each user with the posts they liked with weight 3 or more
+c.User:query():withLikes(function(p) p:whereEdge("weight", ">=", 3) end):all()
+-- u.likes[1]._edge.weight is the weight of the first loaded like
+```
 
 Errors start with `LENT`, or with `ROWCODEC` for a value of the wrong kind or
 a missing required field. `lent.CLIENT` runs a self-check inside a

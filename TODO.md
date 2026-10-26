@@ -4,8 +4,8 @@ This page lists the work that remains on lent, the ORM described in
 [docs/lent-design.md](docs/lent-design.md). The schema language, migrations
 with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates and `groupBy`, edges, edge
-joins, cursor pages, value rules, `time`, `enum`, `json` and `bytes`
-fields, computed fields and hooks are built.
+joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
+`bytes` fields, computed fields and hooks are built.
 
 ## Limits of what is built
 
@@ -29,7 +29,8 @@ fields, computed fields and hooks are built.
   for a one-off value that does not belong in the schema.
 - **Privacy rules:** read and write policies per table, as in Go ent. They
   could build on hooks.
-- **Edge fields:** values stored on a link.
+- **Edge fields in more queries:** `follow`, `groupBy` and aggregates read
+  only the linked rows; they could also read a link's values.
 - **Faster edge follows:** intersect the linked ids with an index on the
   target table, so a follow reads only the rows its filters keep.
 

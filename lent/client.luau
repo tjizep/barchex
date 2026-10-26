@@ -21,6 +21,8 @@
 --
 --       local p = c.Post:create { title = "hi", author = u }    -- links the edge
 --       c.User:link("posts", u.id, p.id)     -- or unlink
+--       c.User:link("likes", u.id, p.id, { weight = 3 })  -- an edge with fields
+--       c.User:edge("likes", u.id, p.id)     -- the link's values, or nil
 --       c.User:query():where("name", "=", "ann")
 --           :queryPosts():order("title", "desc"):limit(10):all()
 --       c.User:query():hasPostsWith(function(q) q:where("title", "=", "hi") end)
@@ -400,22 +402,92 @@ local function check_link(self: any, e: any, pk: any, other: any)
     end
 end
 
-local function write_link(self: any, e: any, pk: any, other: any)
+-- The values on the link from row pk to row `other` through edge `e`,
+-- filled with defaults: an empty table for an edge without fields, and nil
+-- when the rows are not linked.
+local function link_values(self: any, e: any, pk: any, other: any, exclusive: boolean?): any
     local s = self.allEdges[e.store]
     local from, to = ends(e, pk, other)
-    barch.store.set(lay.edge(s, from, to), "")
+    local v = get(self, lay.edge(s, from, to), exclusive)
+    if v == nil then
+        return nil
+    end
+    local es = self.links[e.store]
+    if es == nil then
+        return {}
+    end
+    -- a link stored before its edge had fields holds ""
+    return lay.fill(es.t, v == "" and {} or (rc.decode(es.fields, v)))
+end
+
+-- The stored value of a link through edge `e` that sets `values` over the
+-- link's `old` values (nil for a new link), and the values it holds.
+local function link_value(self: any, e: any, values: any, old: any): (string, any)
+    local es = self.links[e.store]
+    if values ~= nil and type(values) ~= "table" then
+        fail(self.where .. " edge " .. e.name .. " values must be a table, got "
+            .. tostring(values))
+    end
+    if es == nil then
+        if values ~= nil and next(values) ~= nil then
+            fail(self.where .. " edge " .. e.name .. " has no fields")
+        end
+        return "", {}
+    end
+    local r = old and table.clone(old) or {}
+    values = values or {}
+    set_fields(es, r, values)
+    for name, code in es.code do
+        if old == nil and r[name] == nil and code.default then
+            r[name] = code.default()
+        elseif old and code.update and values[name] == nil then
+            r[name] = code.update()
+        end
+    end
+    lay.fill(es.t, r)
+    r = clone_row(es, r)
+    check_row(es, r, old)
+    return rc.encode(es.fields, "binary", es.version, r), r
+end
+
+local function write_link(self: any, e: any, pk: any, other: any, value: string?)
+    local s = self.allEdges[e.store]
+    local from, to = ends(e, pk, other)
+    barch.store.set(lay.edge(s, from, to), value or "")
     barch.store.set(lay.edge_back(s, to, from), "")
 end
 
--- Links row pk to row `other` through edge `name`. Linking twice is
--- harmless.
-function Table:link(name: string, pk: any, other: any)
+-- Links row pk to row `other` through edge `name` and answers the link's
+-- values. `values` sets the edge's fields: a new link fills the rest with
+-- defaults, and an existing link keeps the rest. Linking again without
+-- values leaves the link as it is.
+function Table:link(name: string, pk: any, other: any, values: { [string]: any }?): any
     local e = find_edge(self, name)
     if not exists(self, pk) then
         fail(self.where .. " has no row " .. pk)
     end
     check_link(self, e, pk, other)
-    write_link(self, e, pk, other)
+    local old = link_values(self, e, pk, other, true)
+    if old and values == nil then
+        return old
+    end
+    local value, r = link_value(self, e, values, old)
+    if old then
+        local from, to = ends(e, pk, other)
+        barch.store.set(lay.edge(self.allEdges[e.store], from, to), value)
+    else
+        write_link(self, e, pk, other, value)
+    end
+    return r
+end
+
+-- The values on the link from row pk to row `other` through edge `name`,
+-- or nil when the rows are not linked.
+function Table:edge(name: string, pk: any, other: any): any
+    local e = find_edge(self, name)
+    check_pk(self, pk)
+    check_pk(self.peers[e.target], other)
+    return link_values(self, e, pk, other)
 end
 
 -- Removes the link from row pk to row `other`. Answers whether there was one.
@@ -493,14 +565,16 @@ function Table:create(values: { [string]: any }): any
         if #l[2] > 1 and one(self, l[1]) then
             fail(self.where .. " edge " .. l[1].name .. " links one row, got " .. #l[2])
         end
-        for _, other in l[2] do
+        l[3] = {}
+        for i, other in l[2] do
             check_link(self, l[1], pk, other)
+            l[3][i] = (link_value(self, l[1], nil, nil))
         end
     end
     store(self, pk, nil, r, counter)
     for _, l in links do
-        for _, other in l[2] do
-            write_link(self, l[1], pk, other)
+        for i, other in l[2] do
+            write_link(self, l[1], pk, other, l[3][i])
         end
     end
     return compute(self, r)
@@ -868,6 +942,16 @@ end
 
 local matches
 
+-- Whether the link from row pk to row `other` through edge `e` matches the
+-- whereEdge conditions in `edgeOf` (a sub query's edge, or nil).
+local function link_ok(tbl: any, e: any, edgeOf: any, pk: any, other: any): boolean
+    if edgeOf == nil or edgeOf.q == nil then
+        return true
+    end
+    local values = link_values(tbl, e, pk, other)
+    return values ~= nil and matches(edgeOf.q, values)
+end
+
 -- Whether row pk has a link through check h, and when h has a filter, one
 -- to a row that matches it.
 local function has_link(q: any, h: any, pk: any): boolean
@@ -881,6 +965,9 @@ local function has_link(q: any, h: any, pk: any): boolean
     end
     local target = q.tbl.peers[h.e.target]
     return linked(s, forward, pk, function(other)
+        if not link_ok(q.tbl, h.e, h.sub.edgeOf, pk, other) then
+            return false
+        end
         local m = h.memo[other]
         if m == nil then
             local r = read(target, other)
@@ -1096,7 +1183,9 @@ local function prepare(q: any)
             local s = q.tbl.allEdges[h.e.store]
             for _, other in h.sub:ids() do
                 linked(s, h.e.dir ~= "to", other, function(pk)
-                    set[pk] = true
+                    if link_ok(q.tbl, h.e, h.sub.edgeOf, pk, other) then
+                        set[pk] = true
+                    end
                     return false
                 end)
             end
@@ -1115,22 +1204,28 @@ local function load(q: any, list: { any })
         local forward = w.e.dir == "to"
         local single = one(tbl, w.e)
         local target = tbl.peers[w.e.target]
+        local fielded = tbl.links[w.e.store] ~= nil
         for _, r in list do
-            local ids = {}
-            linked(s, forward, r.id, function(other)
-                ids[#ids + 1] = other
-                return false
-            end)
             local sub = target:query()
-            sub.idset, sub.via = ids, w.e.store
+            sub.edgeOf = { tbl = tbl, e = w.e }
             if w.fn then
                 sub = w.fn(sub) or sub
             end
-            if single then
-                r[w.e.name] = sub:first()
-            else
-                r[w.e.name] = sub:all()
+            local ids = {}
+            linked(s, forward, r.id, function(other)
+                if link_ok(tbl, w.e, sub.edgeOf, r.id, other) then
+                    ids[#ids + 1] = other
+                end
+                return false
+            end)
+            sub.idset, sub.via = ids, w.e.store
+            local got = single and { sub:first() } or sub:all()
+            if fielded then
+                for _, x in got do
+                    x._edge = link_values(tbl, w.e, r.id, x.id)
+                end
             end
+            r[w.e.name] = if single then got[1] else got
         end
     end
 end
@@ -1505,6 +1600,7 @@ function Query:has(name: string, fn: ((any) -> any)?): any
             fail(tbl.where .. " query has takes a function, got " .. tostring(fn))
         end
         sub = tbl.peers[e.target]:query()
+        sub.edgeOf = { tbl = tbl, e = e }
         sub = fn(sub) or sub
         if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 or sub.cur then
             fail(tbl.where .. " query has " .. name .. " filters rows with where, has and"
@@ -1524,6 +1620,23 @@ function Query:with(name: string, fn: ((any) -> any)?): any
         fail(self.tbl.where .. " query with takes a function, got " .. tostring(fn))
     end
     self.loads[#self.loads + 1] = { e = e, fn = fn }
+    return self
+end
+
+-- Inside has(name, fn) and with(name, fn): keeps the linked rows whose link
+-- through that edge holds `field op value`, as where does for a row's
+-- fields. whereEdge(fn) keeps the links for which fn(values) answers true.
+function Query:whereEdge(field: any, op: string?, value: any): any
+    local l = self.edgeOf
+    if l == nil then
+        fail(self.tbl.where .. " query whereEdge works inside the function given to has or with")
+    end
+    local es = l.tbl.links[l.e.store]
+    if es == nil then
+        fail(l.tbl.where .. " edge " .. l.e.name .. " has no fields")
+    end
+    l.q = l.q or es:query()
+    l.q:where(field, op, value)
     return self
 end
 
@@ -1553,9 +1666,23 @@ function client(pessimistic: boolean?, app: any?): any
                 .. " run MIGRATE")
         end
     end
+    -- each edge with fields reads and checks its values as a table does
+    local links = {}
+    for store, s in compiled.edges do
+        if s.fields then
+            local es = bind({ name = store, key = store, format = "binary", id = "int",
+                              fields = s.fields, indexes = {}, edges = {} }, compiled.version,
+                            pessimistic, app and app.edges[store])
+            for _, e in c[s.from].t.edges do
+                if e.store == store then es.where = c[s.from].where .. " edge " .. e.name end
+            end
+            links[store] = es
+        end
+    end
     for _, b in c do
         b.peers = c
         b.allEdges = compiled.edges
+        b.links = links
     end
     return setmetatable(c, {
         __index = function(_, name)

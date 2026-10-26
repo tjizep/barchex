@@ -68,6 +68,10 @@ beside a development server.
   filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
   ignores them and that a client without the graph lacks them, and checks
   the errors for writing one and for a value of the wrong kind.
+- `test_edge_fields.py` stores values on links through `create` and `link`,
+  reads them from both ends, filters with `whereEdge` in `has` and `with`,
+  migrates an edge from no fields to fields and refuses a new required
+  field, and checks the errors for bad edge values.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order

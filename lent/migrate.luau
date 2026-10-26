@@ -27,6 +27,7 @@
 --   /lent/tables/<table>/indexes/<ix>/spec  unique, state = "building" until ready
 --   /lent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
 --   /lent/edges/<edge>/from, /to            links to the two tables' nodes
+--   /lent/edges/<edge>/fields/<field>       an edge field, as a table's field
 --
 -- plan() refuses a change that would leave stored rows unreadable or wrong:
 --   - dropping a table;
@@ -72,6 +73,19 @@ local function field_data(f: any): any
     return out
 end
 
+local function logical_edges(edges: any): any
+    local out = {}
+    for store, e in edges do
+        local copy = table.clone(e)
+        if e.fields then
+            copy.fields = {}
+            for i, f in e.fields do copy.fields[i] = field_data(f) end
+        end
+        out[store] = copy
+    end
+    return out
+end
+
 local function catalog_data(c: any): any
     local out = table.clone(c)
     out.tables = {}
@@ -81,6 +95,7 @@ local function catalog_data(c: any): any
         for i, f in t.fields do copy.fields[i] = field_data(f) end
         out.tables[key] = copy
     end
+    out.edges = logical_edges(c.edges)
     return out
 end
 
@@ -148,6 +163,29 @@ local function logical_tables(tables: any): any
     return out
 end
 
+-- Gives the fields of catalog table or edge `t` their Luau values back.
+local function load_fields(t: any)
+    t.next = num(t.next)
+    for _, f in t.fields or {} do
+        f.id = num(f.id)
+        f.default = num(f.default)
+        if f.defaultEncoding == "json" then
+            f.default = VALUES.parse_json(f.default)
+        elseif f.defaultEncoding == "hex" then
+            f.default = VALUES.unhex(f.default)
+        elseif f.defaultEncoding ~= nil then
+            fail("field " .. f.name .. " has unknown default encoding " .. tostring(f.defaultEncoding))
+        end
+        f.defaultEncoding = nil
+        for _, k in RULES do
+            f[k] = num(f[k])
+        end
+    end
+    for k, id in t.ids do
+        t.ids[k] = num(id)
+    end
+end
+
 -- The compiled schema in this space's catalog, or nil before the first
 -- migration.
 function load(): any
@@ -159,25 +197,78 @@ function load(): any
     c.version = num(c.version)
     if c.migration then c.migration.at = num(c.migration.at) end
     for _, t in c.tables do
-        t.next = num(t.next)
-        for _, f in t.fields do
-            f.id = num(f.id)
-            f.default = num(f.default)
-            if f.defaultEncoding == "json" then
-                f.default = VALUES.parse_json(f.default)
-            elseif f.defaultEncoding == "hex" then
-                f.default = VALUES.unhex(f.default)
-            elseif f.defaultEncoding ~= nil then
-                fail("field " .. f.name .. " has unknown default encoding " .. tostring(f.defaultEncoding))
-            end
-            f.defaultEncoding = nil
-            for _, k in RULES do
-                f[k] = num(f[k])
+        load_fields(t)
+    end
+    for _, e in c.edges do
+        if e.ids then load_fields(e) end
+    end
+    return c
+end
+
+local function by_name(list: { any }?): any
+    local out = {}
+    for _, f in list or {} do
+        out[f.name] = f
+    end
+    return out
+end
+
+-- Checks the change from `old` (the catalog's table or edge, or nil when it
+-- is new) to the declared `t`, and answers the catalog's fields for `t` and
+-- the field ids SCHEMA.ids gave out.
+local function check_fields(where: string, old: any, t: any, before: any): (any, any)
+    for _, f in t.fields do
+        local was = before[f.name] or (f.was and before[f.was])
+        if old and was == nil and not f.optional and f.default == nil then
+            fail(where .. " field " .. f.name .. " is new, so " .. (t.dir and "links" or "rows")
+                .. " stored before it have no value; make it :optional() or give it a"
+                .. " :default() value (a function default fills only new "
+                .. (t.dir and "links" or "rows") .. ")")
+        end
+        if was and was.kind ~= f.kind and not SAME_STORE[was.kind .. ">" .. f.kind] then
+            fail(where .. " field " .. f.name .. " changes kind from " .. was.kind
+                .. " to " .. f.kind)
+        end
+        if was and was.kind == "enum" and f.kind == "enum" then
+            local allowed = {}
+            for _, value in f.values do allowed[value] = true end
+            for _, value in was.values do
+                if not allowed[value] then
+                    fail(where .. " field " .. f.name .. " removes enum value " .. VALUES.json(value))
+                end
             end
         end
-        for k, id in t.ids do
-            t.ids[k] = num(id)
+        if was and was.name ~= f.name and old.jsonRows then
+            fail(where .. " field " .. f.name .. " renames " .. was.name .. ", but the"
+                .. " table has stored json rows, which name their fields")
         end
+    end
+    local ver, list = SCHEMA.ids(t, old and { ids = old.ids, next = old.next })
+    local fields = {}
+    for i, f in t.fields do
+        fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
+                      unique = f.unique, default = f.default, immutable = f.immutable,
+                      match = f.match, values = f.values and table.clone(f.values) }
+        for _, k in RULES do
+            fields[i][k] = f[k]
+        end
+    end
+    return fields, ver
+end
+
+-- The catalog's record of edge store `s` from the graph, with field ids
+-- when the edge stores fields. `old` is the catalog's previous record.
+local function edge_record(s: any, old: any): any
+    local c = { name = s.name, from = s.from, to = s.to, fromId = s.fromId, toId = s.toId,
+                unique = s.unique, inverseUnique = s.inverseUnique }
+    if s.fields then
+        local decl = { name = s.name, dir = "to", fields = s.fields }
+        local fields, ver = check_fields("edge " .. s.name, old, decl,
+                                          by_name(old and old.fields))
+        c.fields, c.ids, c.next = fields, ver.ids, ver.next
+    elseif old and old.ids then
+        -- links keep the values of removed fields, so their ids stay used
+        c.ids, c.next = old.ids, old.next
     end
     return c
 end
@@ -200,49 +291,9 @@ function plan(prev: any, app: any): any
             fail(where .. " has " .. (old.id or "int") .. " ids, so its schema needs id = \""
                 .. (old.id or "int") .. "\"; a table keeps the id kind its rows were stored with")
         end
-        local before = {}
-        if old then
-            for _, f in old.fields do
-                before[f.name] = f
-            end
-        end
-        for _, f in t.fields do
-            local was = before[f.name] or (f.was and before[f.was])
-            if old and was == nil and not f.optional and f.default == nil then
-                fail(where .. " field " .. f.name .. " is new, so rows stored before it have"
-                    .. " no value; make it :optional() or give it a :default() value"
-                    .. " (a function default fills only new rows)")
-            end
-            if was and was.kind ~= f.kind and not SAME_STORE[was.kind .. ">" .. f.kind] then
-                fail(where .. " field " .. f.name .. " changes kind from " .. was.kind
-                    .. " to " .. f.kind)
-            end
-            if was and was.kind == "enum" and f.kind == "enum" then
-                local allowed = {}
-                for _, value in f.values do allowed[value] = true end
-                for _, value in was.values do
-                    if not allowed[value] then
-                        fail(where .. " field " .. f.name .. " removes enum value " .. VALUES.json(value))
-                    end
-                end
-            end
-            if was and was.name ~= f.name and old.jsonRows then
-                fail(where .. " field " .. f.name .. " renames " .. was.name .. ", but the"
-                    .. " table has stored json rows, which name their fields")
-            end
-        end
-
-        local ver, list = SCHEMA.ids(t, old and { ids = old.ids, next = old.next })
-        local fields, after = {}, {}
-        for i, f in t.fields do
-            fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
-                          unique = f.unique, default = f.default, immutable = f.immutable,
-                          match = f.match, values = f.values and table.clone(f.values) }
-            for _, k in RULES do
-                fields[i][k] = f[k]
-            end
-            after[f.name] = fields[i]
-        end
+        local before = by_name(old and old.fields)
+        local fields, ver = check_fields(where, old, t, before)
+        local after = by_name(fields)
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
@@ -288,9 +339,14 @@ function plan(prev: any, app: any): any
         return a.op == "drop" and b.op == "build"
     end)
 
-    local compiled = { tables = tables, edges = app.edges }
-    local prevShape = { tables = logical_tables(prev.tables), edges = prev.edges }
-    local changed = canon({ tables = logical_tables(tables), edges = app.edges }) ~= canon(prevShape)
+    local edges = {}
+    for store, s in app.edges do
+        edges[store] = edge_record(s, prev.edges[store])
+    end
+    local compiled = { tables = tables, edges = edges }
+    local prevShape = { tables = logical_tables(prev.tables), edges = logical_edges(prev.edges) }
+    local changed = canon({ tables = logical_tables(tables), edges = logical_edges(edges) })
+        ~= canon(prevShape)
     compiled.version = changed and prev.version + 1 or prev.version
     return { version = compiled.version, changed = changed, compiled = compiled, steps = steps }
 end
@@ -374,6 +430,12 @@ local function write_catalog(c: any)
         g.mkdir(dir)
         g.link(nodes[e.from], dir .. "/from")
         g.link(nodes[e.to], dir .. "/to")
+        if e.fields then
+            g.mkdir(dir .. "/fields")
+            for _, f in e.fields do
+                g.put(dir .. "/fields/" .. f.name, simdjson.encode(field_data(f)), "json")
+            end
+        end
     end
     g.put("/lent/compiled", simdjson.encode(catalog_data(c)), "json")
     g.put("/lent/version", tostring(c.version))
@@ -557,6 +619,24 @@ function selftest(): (boolean, string?)
     if not raises(function() plan(legacy, v1()) end, "has int ids") then
         return false, "read a catalog without id kinds as uuid"
     end
+    local function liked(fields)
+        return lent.graph { lent.schema "U" { fields = { lent.field.int "a" }, edges = {
+            lent.edge.to "likes" "U":fields(fields) } } }
+    end
+    local l1 = plan(nil, liked { lent.field.time "at":default(lent.now) })
+    local likes = l1.compiled.edges.u_likes
+    if likes.fields[1].id ~= 1 or likes.next ~= 2 then
+        return false, "edge field ids"
+    end
+    local linked = simdjson.parse(simdjson.encode(l1.compiled))
+    if plan(linked, liked { lent.field.time "at":default(lent.now) }).changed then
+        return false, "unchanged edge fields planned a change"
+    end
+    if not raises(function() plan(linked, liked { lent.field.time "at", lent.field.int "n" }) end,
+        "edge u_likes field n is new, so links stored before it have no value") then
+        return false, "added a required edge field"
+    end
+
     local other = lent.graph { lent.schema "Post" { fields = { lent.field.string "t" } } }
     if not raises(function() plan(stored, other) end, "dropping a table") then
         return false, "dropped a table"

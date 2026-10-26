@@ -29,6 +29,11 @@
 -- they were made. id = "int" numbers the rows 1, 2, 3 from a counter key
 -- that every create in the table writes.
 --
+-- An edge.to may store values on each link, declared as a table's fields
+-- are; the edge.from that refs it reads the same values:
+--
+--   lent.edge.to "likes" "Post":fields { lent.field.time "at":default(lent.now) }
+--
 -- schema() checks one table and graph() checks the tables together: every
 -- edge names a declared table, and every edge.from names the edge.to it is
 -- the inverse of. Both raise an error naming what is wrong.
@@ -282,6 +287,16 @@ function Edge:unique()
     return self
 end
 
+-- For edge.to: the fields each link stores, declared as a table's fields
+-- are. The edge.from that refs this edge reads the same values.
+function Edge:fields(list: { any })
+    if type(list) ~= "table" then
+        fail("edge " .. self.name .. " fields takes a list of fields, got " .. tostring(list))
+    end
+    self.fields_ = list
+    return self
+end
+
 -- For edge.from: the edge.to on the target table this edge reads backwards.
 function Edge:ref(name: string)
     ident(name, "edge ref")
@@ -413,7 +428,7 @@ local function plain_edge(where: string, t: any): any
         return t
     end
     plain(where, "edge", t, { dir = "string", name = "string", target = "string",
-                              ref = "string", unique = "boolean" })
+                              ref = "string", unique = "boolean", fields = "table" })
     if t.dir ~= "to" and t.dir ~= "from" then
         fail(where .. " edge " .. tostring(t.name) .. " dir is \"to\" or \"from\", got "
             .. tostring(t.dir))
@@ -421,6 +436,7 @@ local function plain_edge(where: string, t: any): any
     local e = edge[t.dir](t.name)(t.target)
     if t.ref then e:ref(t.ref) end
     if t.unique then e:unique() end
+    if t.fields then e:fields(t.fields) end
     return e
 end
 
@@ -537,13 +553,83 @@ local function computed_field(where: string, f: any): any
     return out
 end
 
+-- The plain data of a stored field `f` of the table or edge at `where`.
+local function stored_field(where: string, f: any): any
+    local fname = f.name
+    local fn = type(f.default_) == "function"
+    if f.hasDefault and not fn and not fits(f.kind, f.default_) then
+        fail(where .. " field " .. fname .. " default is not of kind " .. f.kind)
+    end
+    local out = { name = fname, kind = f.kind, optional = f.optional_ == true,
+                  unique = f.unique_ == true, was = f.was_,
+                  code = { update = f.updateDefault_,
+                            validate = table.clone(f.validate_ or {}) } }
+    if f.kind == "enum" then
+        out.values = VALUES.enum_values(f.values_, "SCHEMA " .. where .. " field " .. fname)
+    elseif f.values_ ~= nil then
+        fail(where .. " field " .. fname .. " is a " .. f.kind .. " field, which takes no values")
+    end
+    if fn then
+        out.code.default = f.default_
+    elseif f.kind == "json" and f.default_ ~= nil then
+        out.default = VALUES.copy_json(f.default_)
+    else
+        out.default = f.default_
+    end
+    rules(where .. " field " .. fname, f, out)
+    if out.default ~= nil then
+        local why = broken(out, out.default)
+        if why then
+            fail(where .. " field " .. fname .. " default " .. why)
+        end
+    end
+    return out
+end
+
+-- The stored fields of an edge.to, checked as a table's fields are. An edge
+-- has no indexes and no computed fields.
+local function edge_fields(where: string, list: { any }): { any }
+    local out, byName, was = {}, {}, {}
+    for _, f in list do
+        f = plain_field(where, f)
+        local fname = f.name
+        if byName[fname] then
+            fail(where .. " field " .. fname .. " is declared twice")
+        end
+        if f.computed_ ~= nil then
+            fail(where .. " field " .. fname .. " is computed; an edge holds stored fields only")
+        end
+        if f.unique_ then
+            fail(where .. " field " .. fname .. " is unique, and an edge has no indexes")
+        end
+        if f.was_ then
+            if was[f.was_] then
+                fail(where .. " fields " .. was[f.was_] .. " and " .. fname
+                    .. " both were " .. f.was_)
+            end
+            was[f.was_] = fname
+        end
+        byName[fname] = stored_field(where, f)
+        out[#out + 1] = byName[fname]
+    end
+    if #out == 0 then
+        fail(where .. " fields takes at least one field")
+    end
+    for old, new in was do
+        if byName[old] then
+            fail(where .. " field " .. new .. " was " .. old .. ", which is still declared")
+        end
+    end
+    return out
+end
+
 -- One table:
 -- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
 --     indexes = { { name, on, unique } },
---     edges = { { name, dir, target, unique, ref } } }
+--     edges = { { name, dir, target, unique, ref, fields? } } }
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
 -- given to lent.open: each field's `code` = { default?, update?, validate },
 -- the table's `hooks` = { create, update, delete } lists of functions, and
@@ -586,10 +672,6 @@ function schema(name: string)
                 t.computed[#t.computed + 1] = computed_field(where .. " field " .. fname, f)
                 continue
             end
-            local fn = type(f.default_) == "function"
-            if f.hasDefault and not fn and not fits(f.kind, f.default_) then
-                fail(where .. " field " .. fname .. " default is not of kind " .. f.kind)
-            end
             if f.was_ then
                 if was[f.was_] then
                     fail(where .. " fields " .. was[f.was_] .. " and " .. fname
@@ -597,29 +679,7 @@ function schema(name: string)
                 end
                 was[f.was_] = fname
             end
-            local out = { name = fname, kind = f.kind, optional = f.optional_ == true,
-                          unique = f.unique_ == true, was = f.was_,
-                          code = { update = f.updateDefault_,
-                                    validate = table.clone(f.validate_ or {}) } }
-            if f.kind == "enum" then
-                out.values = VALUES.enum_values(f.values_, "SCHEMA " .. where .. " field " .. fname)
-            elseif f.values_ ~= nil then
-                fail(where .. " field " .. fname .. " is a " .. f.kind .. " field, which takes no values")
-            end
-            if fn then
-                out.code.default = f.default_
-            elseif f.kind == "json" and f.default_ ~= nil then
-                out.default = VALUES.copy_json(f.default_)
-            else
-                out.default = f.default_
-            end
-            rules(where .. " field " .. fname, f, out)
-            if out.default ~= nil then
-                local why = broken(out, out.default)
-                if why then
-                    fail(where .. " field " .. fname .. " default " .. why)
-                end
-            end
+            local out = stored_field(where, f)
             byName[fname] = out
             t.fields[#t.fields + 1] = out
         end
@@ -682,6 +742,13 @@ function schema(name: string)
             end
             local out = { name = e.name, dir = e.dir, target = e.target,
                           unique = e.unique_ == true, ref = e.ref_ }
+            if e.fields_ then
+                if e.dir == "from" then
+                    fail(where .. " edge " .. e.name .. " is an edge.from, which takes no"
+                        .. " fields; declare them on the edge.to it refs")
+                end
+                out.fields = edge_fields(where .. " edge " .. e.name, e.fields_)
+            end
             edges[e.name] = out
             t.edges[#t.edges + 1] = out
         end
@@ -695,8 +762,8 @@ end
 
 -- Checks tables together and answers { tables = { [name] = table },
 -- order = { names }, edges = { [store name] = { name, from, to, fromId,
--- toId, unique, inverseUnique } } }, where fromId and toId are the id kinds
--- of the two tables. An edge.to on User named posts is stored as
+-- toId, unique, inverseUnique, fields? } } }, where fromId and toId are the
+-- id kinds of the two tables and fields are the edge.to's fields. An edge.to on User named posts is stored as
 -- "user_posts"; its edge.from reads the same keys backwards.
 function graph(list: { any })
     local tables, order, keys = {}, {}, {}
@@ -727,7 +794,8 @@ function graph(list: { any })
                 e.store = t.key .. "_" .. e.name
                 stored[e.store] = { name = e.store, from = name, to = e.target,
                                     fromId = t.id, toId = target.id,
-                                    unique = e.unique, inverseUnique = false }
+                                    unique = e.unique, inverseUnique = false,
+                                    fields = e.fields }
             end
         end
     end
@@ -937,6 +1005,16 @@ function selftest(): (boolean, string?)
         return false, "computed fields"
     end
 
+    local Liker = schema "Liker" { fields = { field.int "a" }, edges = {
+        edge.to "likes" "Liker":fields { field.time "at":default(now), field.int "n":min(1):optional() },
+        { dir = "to", name = "tags", target = "Liker", fields = { { kind = "string", name = "tag" } } },
+    } }
+    local likes = graph({ Liker }).edges.liker_likes
+    if likes.fields[1].code.default ~= now or likes.fields[2].min ~= 1
+        or Liker.edges[2].fields[1].kind ~= "string" then
+        return false, "edge fields"
+    end
+
     local refused = {
         { function() schema "User" { fields = {} } end, "needs at least one field" },
         { function() schema "User" { fields = { field.int "id" } } end, "primary key" },
@@ -982,6 +1060,17 @@ function selftest(): (boolean, string?)
         { function() schema "U" { fields = { field.int "a" }, indexes = { { unique = true } } } end,
           "index needs on" },
         { function() schema "U" { fields = { "a" } } end, "field must be a table" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.from "x" "Y":ref "y":fields { field.int "n" } } } end, "edge.from, which takes no fields" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.to "x" "Y":fields { field.int "n":unique() } } } end, "an edge has no indexes" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.to "x" "Y":fields { field.int "n":computed(now) } } } end, "edge holds stored fields only" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.to "x" "Y":fields { field.int "n", field.int "n" } } } end, "edge x field n is declared twice" },
+        { function() schema "U" { fields = { field.int "a" }, edges = { edge.to "x" "Y":fields {} } } end,
+          "fields takes at least one field" },
+        { function() edge.to "x" "Y":fields(1) end, "fields takes a list of fields" },
     }
     for i, case in refused do
         if not raises(case[1], case[2]) then
