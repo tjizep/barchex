@@ -967,10 +967,9 @@ and then only the linked rows among them; `explain` shows this as
 `edge customer_likes in (by_color = color)`. If the index range holds more
 keys than there are linked ids, the query stops reading the index and reads
 each linked row, so the index read costs at most as many keys as the
-follow has links. `using(name)` reads the named index to the end of its range. A
-`desc` order without a narrowing filter reads each linked row. Without
-`order`, rows come in index order when the index is read and in id order
-otherwise.
+follow has links. `using(name)` reads the named index to the end of its range.
+Without `order`, rows come in index order when the index is read and in id
+order otherwise.
 
 Use `cursor` and `after` to page through a query. Each page starts where the
 last one ended, so later pages cost the same as the first, and rows added or

@@ -276,9 +276,10 @@ path after a new edge is added, and change what an existing query means.
 
 Cursor pages replace `offset` for paging. A cursor holds the order's field
 and direction, the last row's value and its id, so a page whose index read
-comes in that order starts at the key the cursor names. That avoids the
-offset walk inside a transaction for `asc` pages. A `desc` page still
-counts the span below the cursor to read it from the end.
+comes in that order starts at the key the cursor names, while `offset`
+reads and skips the rows before the page. A `desc` page counts the keys
+below the cursor and reads them from the end; barch answers that count from
+node counts, inside a transaction too.
 
 Joins go through edges, as in Go ent, and each is an index nested loop over
 edge keys. `has<Edge>With(fn)` picks one of two ways to run. When the
@@ -295,15 +296,5 @@ a relationship worth joining on is declared as an edge.
   with a range read, which takes a shared lock. Two links to one row at once
   can both hold it and deadlock; `barch.tx.run` retries on `TXDEADLOCK`. An
   exclusive range read would order them instead.
-- **Counts and offsets inside a transaction.** `order(..., "desc")` reads
-  pages from the end with `barch.store.count` and the offset of
-  `barch.store.range`. Outside a transaction barch answers both from node
-  counts. Inside one, every shard reads through the transaction's overlay,
-  so both walk every key in the range: over 20,000 rows a `desc` query with
-  a limit of 5 takes about 10 ms, against 2 ms for `asc`. It still reads
-  only the rows it answers. Counting the overlay's keys on top of the node
-  counts would make both cheap again. To do: try barch's ordered sharded key
-  space configuration, which may keep counts and offsets cheap inside a
-  transaction.
 - **Range with values.** A range that answers keys and values would remove
   the `get` per row.

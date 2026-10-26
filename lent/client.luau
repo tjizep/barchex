@@ -1235,7 +1235,7 @@ local function index_plan(q: any, keys: boolean?): any
         -- limit stops early, can find the linked rows by their index keys
         local ix = index_plan(q, true)
         local sorted = q.sortField ~= nil and q.sortField ~= "id"
-        if q.use or not ix.full or (sorted and ix.ordered and q.lim and not q.desc) then
+        if q.use or not ix.full or (sorted and ix.ordered and q.lim) then
             p.within = ix
             p.name = "edge " .. q.via .. " in (" .. ix.name .. ")"
         end

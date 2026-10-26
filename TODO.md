@@ -27,11 +27,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
 
 ## barch
 
-- **Counts and offsets inside a transaction.** Inside a transaction,
-  `barch.store.count` and the offset of `barch.store.range` walk every key in
-  the range: about 8 to 10 ms against 1 to 2 ms over 20,000 keys. `desc`
-  pages and `offset` pay this. Try barch's ordered sharded key space
-  configuration, which may keep both cheap.
 - **Range with values.** A range that answers keys and values would remove
   the `get` for each row read through an index.
 - **Savepoints.** When a write is refused and the caller catches the error,

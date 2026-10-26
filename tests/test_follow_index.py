@@ -83,7 +83,7 @@ function steps.reads(c)
     local function red(q) return q:where("color", "=", "red") end
     local first = likes("ann"):order("rank"):limit(2)
     local page = first:all()
-    local odd, redOdd = range(1, 59, 2), range(3, 57, 6)
+    local redOdd = range(3, 57, 6)
     return {
         -- the unique name finds the one row
         reading(c, { 7 }, likes("ann"):where("name", "=", "p07")),
@@ -98,7 +98,9 @@ function steps.reads(c)
         reading(c, { 59, 57, 55 }, likes("ann"):order("rank"):limit(3)),
         -- bob's products come after more rank keys than he has links
         reading(c, { 1, 2 }, likes("bob"):order("rank"):limit(1)),
-        reading(c, odd, likes("ann"):order("rank", "desc"):limit(3)),
+        -- desc reads the index from the end: p01, p02, p03, p04, p05
+        reading(c, { 1, 3, 5 }, likes("ann"):order("rank", "desc"):limit(3)),
+        reading(c, { 1 }, likes("bob"):order("rank", "desc"):limit(1)),
         -- the index bound starts at rank 50, so p11 is read and filtered out
         reading(c, range(1, 11, 2), likes("ann"):where("rank", ">", 50)),
         -- a read that leaves the index's rows out of keep fails
@@ -147,7 +149,8 @@ def test_follow_reads_through_an_index(run):
         " | edge customer_likes in (by_color = color)",
         "p59,p57,p55 | edge customer_likes in (by_rank)",
         "p02 | edge customer_likes in (by_rank)",
-        "p01,p03,p05 | edge customer_likes then sort",
+        "p01,p03,p05 | edge customer_likes in (by_rank)",
+        "p01 | edge customer_likes in (by_rank)",
         "p09,p07,p05,p03,p01 | edge customer_likes in (by_rank range rank)",
         "read a row outside keep",
         "p59,p57 p55,p53",
