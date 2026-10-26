@@ -4,9 +4,9 @@ This page lists the work that remains on lent, the ORM described in
 [docs/lent-design.md](docs/lent-design.md). The schema language, migrations
 with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
-`groupBy`, edges, path edges, edge joins, edge fields, cursor pages, value rules,
-`time`, `enum`, `json` and `bytes` fields, computed fields, stored or
-not, and hooks are built.
+`groupBy`, edges, path edges and computed fields (each stored or not), edge
+joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
+`bytes` fields, and hooks are built.
 
 ## Limits of what is built
 
@@ -28,9 +28,6 @@ not, and hooks are built.
   only the linked rows; they could also read a link's values.
 - **Faster edge follows:** intersect the linked ids with an index on the
   target table, so a follow reads only the rows its filters keep.
-- **Stored path edges:** keep a path edge's links in its own store, each
-  with a count of the paths behind it, updated when a hop links or unlinks.
-  Reads would cost one scan; writes to every hop would cost more.
 
 ## barch
 

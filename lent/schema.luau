@@ -353,6 +353,13 @@ function Edge:via(...: string)
     return self
 end
 
+-- For edge.through: keep the edge's links in its own store, which every
+-- link change on its hops updates, so reading it costs one scan.
+function Edge:stored()
+    self.stored_ = true
+    return self
+end
+
 local function edge_builder(dir: string)
     return function(name: string)
         ident(name, "edge")
@@ -483,7 +490,7 @@ local function plain_edge(where: string, t: any): any
     end
     plain(where, "edge", t, { dir = "string", name = "string", target = "string",
                               ref = "string", unique = "boolean", fields = "table",
-                              via = "any" })
+                              via = "any", stored = "boolean" })
     if t.dir ~= "to" and t.dir ~= "from" and t.dir ~= "through" then
         fail(where .. " edge " .. tostring(t.name) .. " dir is \"to\", \"from\" or"
             .. " \"through\", got " .. tostring(t.dir))
@@ -494,6 +501,7 @@ local function plain_edge(where: string, t: any): any
     if t.via ~= nil then
         e:via(table.unpack(type(t.via) == "table" and t.via or { t.via }))
     end
+    if t.stored then e:stored() end
     if t.unique then e:unique() end
     if t.fields then e:fields(t.fields) end
     return e
@@ -690,7 +698,7 @@ end
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
 --     indexes = { { name, on, unique } },
---     edges = { { name, dir, target, unique, ref?, fields?, via? } } }
+--     edges = { { name, dir, target, unique, ref?, fields?, via?, stored? } } }
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
 -- given to lent.open: each field's `code` = { default?, update?, validate,
 -- computed? }, the table's `hooks` = { create, update, delete } lists of
@@ -825,14 +833,15 @@ function schema(name: string)
                 end
                 if e.ref_ or e.fields_ or e.unique_ then
                     fail(where .. " edge " .. e.name .. " is an edge.through, which takes only"
-                        .. " :via; it is unique when each edge it follows is")
+                        .. " :via and :stored; it is unique when each edge it follows is")
                 end
-            elseif e.via_ then
-                fail(where .. " edge " .. e.name .. " is an edge." .. e.dir .. ", which takes no :via")
+            elseif e.via_ or e.stored_ then
+                fail(where .. " edge " .. e.name .. " is an edge." .. e.dir .. ", which takes no "
+                    .. (e.via_ and ":via" or ":stored"))
             end
             local out = { name = e.name, dir = e.dir, target = e.target,
                           unique = e.unique_ == true, ref = e.ref_,
-                          via = e.via_ and table.clone(e.via_) }
+                          via = e.via_ and table.clone(e.via_), stored = e.stored_ }
             if e.fields_ then
                 if e.dir == "from" then
                     fail(where .. " edge " .. e.name .. " is an edge.from, which takes no"
@@ -855,9 +864,11 @@ end
 -- order = { names }, edges = { [store name] = { name, from, to, fromId,
 -- toId, unique, inverseUnique, fields? } } }, where fromId and toId are the
 -- id kinds of the two tables and fields are the edge.to's fields. An edge.to on User named posts is stored as
--- "user_posts"; its edge.from reads the same keys backwards. An edge.through
--- stores nothing: graph() checks that its hops lead to its target and sets
--- its unique when every hop is unique.
+-- "user_posts"; its edge.from reads the same keys backwards. graph() checks
+-- that an edge.through's hops lead to its target and sets its unique when
+-- every hop is unique. A stored one gets a store named as an edge.to's,
+-- whose record adds edge, its name, and path = { { store, forward } }, the
+-- stored edges it follows with their direction.
 function graph(list: { any })
     local tables, order, keys = {}, {}, {}
     for _, t in list do
@@ -910,18 +921,19 @@ function graph(list: { any })
             end
         end
     end
-    -- each through edge's end table and uniqueness, by "Table.edge"
+    -- each through edge's end table, uniqueness and stored hops, by
+    -- "Table.edge"
     local done, visiting = {}, {}
-    local function resolve(name: string, e: any): (string, boolean)
+    local function resolve(name: string, e: any): (string, boolean, { any })
         local id = name .. "." .. e.name
         if done[id] then
-            return done[id][1], done[id][2]
+            return done[id][1], done[id][2], done[id][3]
         end
         if visiting[id] then
             fail("table " .. name .. " edge " .. e.name .. " goes through itself")
         end
         visiting[id] = true
-        local at, unique = name, true
+        local at, unique, path = name, true, {}
         for _, hop in e.via do
             local h
             for _, o in tables[at].edges do
@@ -932,10 +944,12 @@ function graph(list: { any })
                     .. table.concat(e.via, ".") .. ", and table " .. at .. " has no edge " .. hop)
             end
             if h.dir == "through" then
-                local _, u = resolve(at, h)
+                local _, u, inner = resolve(at, h)
                 unique = unique and u
+                table.move(inner, 1, #inner, #path + 1, path)
             else
                 unique = unique and h.unique
+                path[#path + 1] = { store = h.store, forward = h.dir == "to" }
             end
             at = h.target
         end
@@ -945,14 +959,22 @@ function graph(list: { any })
                 .. ", and the edge names table " .. e.target)
         end
         visiting[id] = nil
-        done[id] = { at, unique }
-        return at, unique
+        done[id] = { at, unique, path }
+        return at, unique, path
     end
     for _, name in order do
-        for _, e in tables[name].edges do
+        local t = tables[name]
+        for _, e in t.edges do
             if e.dir == "through" then
-                local _, unique = resolve(name, e)
+                local _, unique, path = resolve(name, e)
                 e.unique = unique
+                if e.stored then
+                    e.store = t.key .. "_" .. e.name
+                    stored[e.store] = { name = e.store, from = name, to = e.target,
+                                        fromId = t.id, toId = tables[e.target].id,
+                                        unique = unique, inverseUnique = false,
+                                        edge = e.name, path = path }
+                end
             end
         end
     end
@@ -1051,12 +1073,20 @@ function selftest(): (boolean, string?)
         edge.through "writer" "User":via "author",
         edge.through "peers" "Post":via("author", "posts"),
         { dir = "through", name = "again", target = "Post", via = { "writer.posts" } },
-        { dir = "through", name = "twice", target = "Post", via = "peers.writer.posts" },
+        { dir = "through", name = "twice", target = "Post", via = "peers.writer.posts",
+          stored = true },
     }
     local pe = pg.tables.Post.edges
     if not pe[2].unique or pe[3].unique or pe[4].unique or pe[3].via[2] ~= "posts"
         or pe[5].via[3] ~= "posts" or pe[2].store ~= nil then
         return false, "through edges"
+    end
+    -- peers.writer.posts flattens to author, posts, author, posts
+    local twice = pg.edges.post_twice
+    if twice == nil or pe[5].store ~= "post_twice" or #twice.path ~= 4
+        or twice.path[1].store ~= "user_posts" or twice.path[1].forward
+        or not twice.path[4].forward or twice.edge ~= "twice" then
+        return false, "stored through edge"
     end
     local author = edge.from "author" "User":ref "posts":unique()
     local missing = { function() paths { author, edge.through "x" "User":via "author.nope" } end,
@@ -1261,6 +1291,8 @@ function selftest(): (boolean, string?)
             edge.through "x" "Y":via "y":unique() } } end, "edge.through, which takes only :via" },
         { function() schema "U" { fields = { field.int "a" }, edges = {
             edge.to "x" "Y":via "y" } } end, "edge.to, which takes no :via" },
+        { function() schema "U" { fields = { field.int "a" }, edges = {
+            edge.to "x" "Y":stored() } } end, "edge.to, which takes no :stored" },
         { function() edge.through "x" "Y":via "a..b" end, "edge x via needs a name" },
     }
     for i, case in refused do

@@ -356,7 +356,7 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
 | `lent.edge.to "name" "Table"` | `:unique()`, `:fields { ... }` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
-| `lent.edge.through "name" "Table"` | `:via "edge.edge"` (required); see path edges below |
+| `lent.edge.through "name" "Table"` | `:via "edge.edge"` (required), `:stored()`; see path edges below |
 
 Fields, indexes and edges can also be plain tables of the same options.
 Each option takes the modifier's name, and `true` stands for a modifier
@@ -376,7 +376,7 @@ local Post = lent.schema "Post" {
 |---|---|
 | field | `kind` and `name` (required), `values` (required for `enum`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `unique`, `name` |
-| edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names) |
+| edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names), `stored` |
 
 A plain table goes through the same checks as the builder, and a key it
 does not recognise raises an error, so a misspelt option fails when the
@@ -630,7 +630,7 @@ row, including rows whose missing values leave them out of a unique index.
 | `changed` | `true` when this call installs a schema or advances pending work |
 | `done` | `true` when every index drop, fill and build is complete |
 | `processed` | row visits plus removed index entries in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order; empty for an unchanged, completed schema |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
@@ -680,7 +680,9 @@ changes or a unique-index conflict:
 - a unique index whose values two stored rows already share;
 - a stored computed field whose function answers a value that does not fit
   the field for a stored row;
-- a change to a table's `id` kind.
+- a change to a table's `id` kind;
+- an `edge.to` or `edge.from` that takes the name of a stored path edge in
+  the same migration.
 
 Adding enum choices preserves stored rows and their indexes. Byte and JSON
 defaults are preserved in the catalog, including binary bytes, JSON null
@@ -844,11 +846,11 @@ table the path edge names. A hop may be another path edge. `graph` raises an
 error naming the hop that does not fit, or a path edge that goes through
 itself.
 
-A path edge stores nothing: it reads the links of its hops, so it reflects
-every `link`, `unlink` and `delete` at once, and `migrate` only records it in
-the catalog. Change its links through its hops; `link`, `unlink`, `edge` and
-a value under its name in `create` or `update` raise an error. It has no
-fields, so `whereEdge` inside its `has` or `with` raises an error too.
+A path edge reads the links of its hops, so it reflects every `link`,
+`unlink` and `delete` at once, and `migrate` only records it in the catalog.
+Change its links through its hops; `link`, `unlink`, `edge` and a value
+under its name in `create` or `update` raise an error. It has no fields, so
+`whereEdge` inside its `has` or `with` raises an error too.
 
 Each row a path reaches comes once, however many paths lead to it. Each hop
 scans the edges of the distinct rows the hop before it reached, so the cost
@@ -856,6 +858,30 @@ grows with the number of distinct rows along the path, and a path from a few
 rows stays cheap. A path edge is unique when every hop is unique, as a
 line's `order.customer` is. A unique path edge loads a row or `nil` in
 `with`, and `groupBy` can use it.
+
+Add `:stored()` to keep a path edge's links in a store of its own:
+
+```lua
+lent.edge.through "products" "Product":via "orders.lines.product":stored()
+```
+
+Each stored link holds the number of paths between its two rows. Every
+`link`, `unlink` and `delete` on a hop updates those numbers in the same
+transaction, and a link goes when its last path does. Reading the edge then
+scans one store, as an `edge.to` does, and `explain` names it, as in
+`edge customer_products`. Writes pay for this: a link change on a hop walks
+the path from that link to both ends, once for each stored path edge that
+follows the hop. Store a path edge that queries read often across hops that
+change rarely.
+
+`migrate` fills a new stored path edge, or one whose `:via` changed, in
+pages. It drops the store's old links, then counts the paths from each row
+of the declaring table, and reports the steps as `drop Customer.products`
+and `fill Customer.products`. Until the fill finishes, queries walk the
+hops, and link changes keep the store current. Removing the edge or its
+`:stored()` drops the store. To give an `edge.to` or `edge.from` the name of
+a stored path edge, migrate once without the edge first; `migrate` raises
+an error for the change in one step.
 
 Queries read through the best index for their filters:
 

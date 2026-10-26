@@ -84,7 +84,11 @@ beside a development server.
   products, follows them both ways and through another path edge, filters
   with `has` by probing and by walking back from an index, loads them with
   `with`, groups by a unique one, sees links change underneath, and checks
-  that writes through a path edge raise errors.
+  that writes through a path edge raise errors. It also stores them: it
+  fills their stores in small migrate pages, checks every stored count
+  against a walk of the hops after links, unlinks and deletes on each hop,
+  reads the hops while a fill runs, drops the stores when the edges are
+  unstored, and refuses an `edge.to` that takes a stored path edge's name.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order

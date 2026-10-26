@@ -444,10 +444,17 @@ end
 
 -- The stored edges that edge `e` of table `tbl` follows, as { tbl, e } in
 -- order: `e` itself, or the hops of each edge an edge.through goes through.
+-- A stored edge.through whose store is filled is read as one edge.to.
 local function hops(tbl: any, e: any, out: { any }?): { any }
     local list = out or {}
     if e.dir ~= "through" then
         list[#list + 1] = { tbl = tbl, e = e }
+        return list
+    end
+    local s = e.store and tbl.allEdges[e.store]
+    if s and s.state == nil then
+        list[#list + 1] = { tbl = tbl, e = { name = e.name, dir = "to", target = e.target,
+                                             store = e.store } }
         return list
     end
     for _, name in e.via do
@@ -581,11 +588,64 @@ local function link_value(self: any, e: any, values: any, old: any): (string, an
     return rc.encode(es.fields, "binary", es.version, r), r
 end
 
+-- Adds `d` to the number of paths from row `from` to row `to` in the store
+-- of stored edge.through `p`. Its forward key holds the number, and both
+-- keys go when it reaches 0. A pessimistic transaction locks the number.
+local function bump(self: any, p: any, from: any, to: any, d: number)
+    if d == 0 then
+        return
+    end
+    local key = lay.edge(p, from, to)
+    local n = (tonumber(get(self, key, true)) or 0) + d
+    if n > 0 then
+        barch.store.set(key, tostring(n))
+        barch.store.set(lay.edge_back(p, to, from), "")
+    else
+        barch.store.remove(key)
+        barch.store.remove(lay.edge_back(p, to, from))
+    end
+end
+
+-- Runs apply(), which adds (sign 1) or removes (sign -1) the link from row
+-- `from` to row `to` in edge store `s`, and updates the stores of the stored
+-- edge.through paths that follow `s`. A path through the link at hop i
+-- changes by the paths that reach `from` through the hops before i, after
+-- the change, times the paths from `to` through the hops after i, before
+-- it; summed over each hop that follows `s`, that is the exact change even
+-- when a path follows `s` more than once.
+local function change_link(self: any, s: any, from: any, to: any, sign: number,
+                           apply: () -> ())
+    local uses = self.pathUses[s.name]
+    if uses == nil then
+        apply()
+        return
+    end
+    local right = {}
+    for j, u in uses do
+        local path = u.p.path
+        local start = path[u.i].forward and to or from
+        right[j] = lay.path_counts(self.allEdges, path, { [start] = 1 }, u.i + 1, #path)
+    end
+    apply()
+    for j, u in uses do
+        local path = u.p.path
+        local start = path[u.i].forward and from or to
+        local left = lay.path_counts(self.allEdges, path, { [start] = 1 }, u.i - 1, 1, true)
+        for a, l in left do
+            for b, r in right[j] do
+                bump(self, u.p, a, b, sign * l * r)
+            end
+        end
+    end
+end
+
 local function write_link(self: any, e: any, pk: any, other: any, value: string?)
     local s = self.allEdges[e.store]
     local from, to = ends(e, pk, other)
-    barch.store.set(lay.edge(s, from, to), value or "")
-    barch.store.set(lay.edge_back(s, to, from), "")
+    change_link(self, s, from, to, 1, function()
+        barch.store.set(lay.edge(s, from, to), value or "")
+        barch.store.set(lay.edge_back(s, to, from), "")
+    end)
 end
 
 -- Links row pk to row `other` through edge `name` and answers the link's
@@ -632,28 +692,35 @@ function Table:unlink(name: string, pk: any, other: any): boolean
     if not barch.store.exists(key) then
         return false
     end
-    barch.store.remove(key)
-    barch.store.remove(lay.edge_back(s, to, from))
+    change_link(self, s, from, to, -1, function()
+        barch.store.remove(key)
+        barch.store.remove(lay.edge_back(s, to, from))
+    end)
     return true
 end
 
 -- Removes every edge into or out of row pk, including edges declared only
--- by the table at the other end.
+-- by the table at the other end. The paths of stored edge.through edges
+-- through row pk go with the links they follow.
 local function unlink_all(self: any, pk: any)
     local name = self.t.name
     for _, s in self.allEdges do
-        if s.from == name then
+        if s.path == nil and s.from == name then
             lay.walk(lay.edge(s, pk), function(k)
                 local to = lay.edge_to(s, k)
-                barch.store.remove(k)
-                barch.store.remove(lay.edge_back(s, to, pk))
+                change_link(self, s, pk, to, -1, function()
+                    barch.store.remove(k)
+                    barch.store.remove(lay.edge_back(s, to, pk))
+                end)
             end)
         end
-        if s.to == name then
+        if s.path == nil and s.to == name then
             lay.walk(lay.edge_back(s, pk), function(k)
                 local from = lay.edge_from(s, k)
-                barch.store.remove(k)
-                barch.store.remove(lay.edge(s, from, pk))
+                change_link(self, s, from, pk, -1, function()
+                    barch.store.remove(k)
+                    barch.store.remove(lay.edge(s, from, pk))
+                end)
             end)
         end
     end
@@ -1854,7 +1921,7 @@ function client(pessimistic: boolean?, app: any?): any
         local work = compiled.migration
         for i = work.at, #work.steps do
             local step = work.steps[i]
-            if step.op == "drop" then dropping[step.table] = true end
+            if step.op == "drop" and step.index then dropping[step.table] = true end
         end
     end
     for _, t in compiled.tables do
@@ -1880,10 +1947,20 @@ function client(pessimistic: boolean?, app: any?): any
             links[store] = es
         end
     end
+    -- for each edge store, the stored edge.through paths that follow it, as
+    -- { p = the path's store, i = the hop }
+    local pathUses = {}
+    for _, s in compiled.edges do
+        for i, h in s.path or {} do
+            pathUses[h.store] = pathUses[h.store] or {}
+            table.insert(pathUses[h.store], { p = s, i = i })
+        end
+    end
     for _, b in c do
         b.peers = c
         b.allEdges = compiled.edges
         b.links = links
+        b.pathUses = pathUses
     end
     return setmetatable(c, {
         __index = function(_, name)

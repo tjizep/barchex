@@ -138,6 +138,11 @@ function edge_back(s: any, to: any, from: any): string
     return from == nil and key or key .. kc.encode(s.fromId or "int", from)
 end
 
+-- The prefixes of every forward and every backward key of edge store `s`.
+function edge_store(s: any): (string, string)
+    return "lent.e" .. name(s.name), "lent.E" .. name(s.name)
+end
+
 -- The far end of a forward edge key: its `to` pk.
 function edge_to(s: any, key: string): any
     return tail(s.toId or "int", key)
@@ -151,6 +156,31 @@ end
 -- The key that holds a table's next pk.
 function counter(t: any): string
     return "lent.n" .. name(t.key)
+end
+
+-- Counts the paths from the rows in `start`, a map of pk to count, through
+-- hops first to last of `path`, a list of { store, forward } naming stores
+-- in `edges`, and answers them as a map of the pk each path ends at to the
+-- number of paths. `backward` walks the hops from last down to first
+-- against their direction. With first past last it answers `start`.
+function path_counts(edges: any, path: { any }, start: any, first: number, last: number,
+                     backward: boolean?): any
+    local at = start
+    for i = first, last, backward and -1 or 1 do
+        local h = path[i]
+        local s = edges[h.store]
+        local forward = h.forward ~= (backward == true)
+        local pick = forward and edge_to or edge_from
+        local found = {}
+        for pk, n in at do
+            walk(forward and edge(s, pk) or edge_back(s, pk), function(k)
+                local other = pick(s, k)
+                found[other] = (found[other] or 0) + n
+            end)
+        end
+        at = found
+    end
+    return at
 end
 
 -- Every key under `prefix`, `limit` at a time: calls each(key) for each and

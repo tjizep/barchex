@@ -32,6 +32,9 @@
 --   /lent/edges/<edge>/from, /to            links to the two tables' nodes
 --   /lent/edges/<edge>/fields/<field>       an edge field, as a table's field
 --
+-- The store of a stored edge.through is an edge whose compiled record holds
+-- its path, and state = "filling" until its links are filled.
+--
 -- plan() refuses a change that would leave stored rows unreadable or wrong:
 --   - dropping a table;
 --   - changing a table's id kind, which its stored keys are written in;
@@ -40,9 +43,13 @@
 --   - renaming a field of a table that has ever stored json rows, since
 --     those rows name their fields;
 --   - two tables that store under one key.
+--   - turning a stored edge.through into an edge.to or edge.from of the same
+--     name, since links added while its paths are dropped would go too.
 -- A new stored computed field, or a new revision of one, adds a fill step
 -- that computes it for every stored row with the function in `app`, after
--- the drops and before the builds.
+-- the drops and before the builds. A new stored edge.through, or one whose
+-- path changed, adds a drop step for its store and a fill step that counts
+-- each row's paths; one that is removed or no longer stored adds a drop.
 -- apply() refuses a unique index that two rows' values already break, and
 -- a fill whose function answers a value that does not fit its field.
 
@@ -273,6 +280,12 @@ end
 local function edge_record(s: any, old: any): any
     local c = { name = s.name, from = s.from, to = s.to, fromId = s.fromId, toId = s.toId,
                 unique = s.unique, inverseUnique = s.inverseUnique }
+    if s.path then
+        c.edge, c.path = s.edge, s.path
+        if old and old.path and canon(old.path) == canon(s.path) then
+            c.state = old.state
+        end
+    end
     if s.fields then
         local decl = { name = s.name, dir = "to", fields = s.fields }
         local fields, ver = check_fields("edge " .. s.name, old, decl,
@@ -287,8 +300,9 @@ end
 
 -- What a migration from `prev` (load()'s answer, or nil) to `app` would do:
 -- { version, changed, compiled, steps = { { op = "build" | "drop", table,
--- index } | { op = "fill", table, fields, fns } } }. Raises an error for a
--- change it refuses.
+-- index } | { op = "fill", table, fields, fns } | { op = "drop", edge, label }
+-- | { op = "fill", table, edge, label } } }. Raises an error for a change it
+-- refuses.
 function plan(prev: any, app: any): any
     prev = prev or { version = 0, tables = {}, edges = {} }
     local tables, steps = {}, {}
@@ -366,6 +380,27 @@ function plan(prev: any, app: any): any
                 .. " is not supported yet")
         end
     end
+    local edges = {}
+    for store, s in app.edges do
+        local old = prev.edges[store]
+        edges[store] = edge_record(s, old)
+        local label = s.path and s.from .. "." .. s.edge
+        if old and old.path and not s.path then
+            fail("edge " .. store .. " was the store of table " .. old.from .. " edge "
+                .. old.edge .. ", a stored edge.through; migrate once without the edge"
+                .. " before declaring it again")
+        end
+        if s.path and (old == nil or old.path == nil or canon(old.path) ~= canon(s.path)) then
+            steps[#steps + 1] = { op = "drop", edge = store, label = label }
+            steps[#steps + 1] = { op = "fill", table = tables[app.tables[s.from].key],
+                                  edge = store, label = label }
+        end
+    end
+    for store, old in prev.edges do
+        if old.path and edges[store] == nil then
+            steps[#steps + 1] = { op = "drop", edge = store, label = old.from .. "." .. old.edge }
+        end
+    end
     -- drops first, so an index rebuilt under its own name starts empty, and
     -- fills before builds, so a build reads the computed values
     local rank = { drop = 1, fill = 2, build = 3 }
@@ -373,10 +408,6 @@ function plan(prev: any, app: any): any
         return rank[a.op] < rank[b.op]
     end)
 
-    local edges = {}
-    for store, s in app.edges do
-        edges[store] = edge_record(s, prev.edges[store])
-    end
     local compiled = { tables = tables, edges = edges }
     local prevShape = { tables = logical_tables(prev.tables), edges = logical_edges(prev.edges) }
     local changed = canon({ tables = logical_tables(tables), edges = logical_edges(edges) })
@@ -441,6 +472,35 @@ local function fill_fns(app: any, t: any, names: { string }): any
         if table.find(names, f.name) then fns[f.name] = f.code.computed end
     end
     return fns
+end
+
+-- Removes up to `limit` keys of edge store `store`, forward keys first, and
+-- answers how many it removed.
+local function drop_edge(store: string, limit: number): number
+    local n = 0
+    for _, prefix in { lay.edge_store({ name = store }) } do
+        for _, k in barch.store.range(prefix, kc.after(prefix), limit - n) do
+            barch.store.remove(k)
+            n += 1
+        end
+        if n == limit then break end
+    end
+    return n
+end
+
+-- Writes the links of stored edge.through `p` from the row at key k of
+-- table t: one to each row its paths reach, holding how many paths do.
+-- `edges` are the catalog's edge stores, which the path names.
+local function fill_paths(t: any, p: any, edges: any, k: string)
+    local pk = lay.row_pk(t, k)
+    lay.walk(lay.edge(p, pk), function(key)
+        barch.store.remove(key)
+        barch.store.remove(lay.edge_back(p, lay.edge_to(p, key), pk))
+    end)
+    for to, n in lay.path_counts(edges, p.path, { [pk] = 1 }, 1, #p.path) do
+        barch.store.set(lay.edge(p, pk, to), tostring(n))
+        barch.store.set(lay.edge_back(p, to, pk), "")
+    end
 end
 
 local function build(t: any, ix: any)
@@ -516,7 +576,14 @@ function apply(p: any)
         fail("a migration is in progress; use migrate to resume it")
     end
     for _, s in p.steps do
-        if s.op == "drop" then
+        if s.edge and s.op == "drop" then
+            while drop_edge(s.edge, 1000) == 1000 do end
+        elseif s.edge then
+            local store = p.compiled.edges[s.edge]
+            lay.walk(lay.row(s.table), function(k)
+                fill_paths(s.table, store, p.compiled.edges, k)
+            end)
+        elseif s.op == "drop" then
             drop(s.table, s.index)
         elseif s.op == "fill" then
             local fields = row_fields(s.table)
@@ -545,6 +612,29 @@ local function advance(c: any, budget: number, app: any): number
     while work.at <= #work.steps and processed < budget do
         local step = work.steps[work.at]
         local t = c.tables[step.table]
+        if step.edge then
+            local limit = budget - processed
+            local n, done
+            if step.op == "drop" then
+                n = drop_edge(step.edge, limit)
+                done = n < limit
+            else
+                local store, prefix = c.edges[step.edge], lay.row(t)
+                local keys = barch.store.range(work.cursor and work.cursor .. "\2" or prefix,
+                                               kc.after(prefix), limit)
+                for _, k in keys do
+                    fill_paths(t, store, c.edges, k)
+                end
+                n, done = #keys, #keys < limit
+                if done then store.state = nil else work.cursor = keys[#keys] end
+            end
+            processed += n
+            if done then
+                work.at += 1
+                work.cursor = nil
+            end
+            continue
+        end
         local rows = step.op ~= "drop"
         local ix = step.op == "build" and find_index(t, step.index.name) or step.index
         local prefix = rows and lay.row(t) or lay.index(t, ix)
@@ -622,7 +712,11 @@ function migrate(app: any, pageSize: number?): any
         if not resuming then
             local work = { steps = {}, at = 1 }
             for i, s in p.steps do
-                if s.op == "fill" then
+                if s.edge then
+                    work.steps[i] = { op = s.op, table = s.table and s.table.key, edge = s.edge,
+                                      label = s.label }
+                    if s.op == "fill" then c.edges[s.edge].state = "filling" end
+                elseif s.op == "fill" then
                     work.steps[i] = { op = s.op, table = s.table.key, fields = s.fields }
                     for _, f in s.table.fields do
                         if table.find(s.fields, f.name) then f.state = "filling" end
@@ -636,8 +730,12 @@ function migrate(app: any, pageSize: number?): any
         end
         local steps = {}
         for i, s in c.migration.steps do
-            local what = s.op == "fill" and table.concat(s.fields, ",") or s.index.name
-            steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. what
+            if s.edge then
+                steps[i] = s.op .. " " .. s.label
+            else
+                local what = s.op == "fill" and table.concat(s.fields, ",") or s.index.name
+                steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. what
+            end
         end
         local processed = advance(c, pageSize, app)
         if resuming then write_progress(c) else write_catalog(c) end

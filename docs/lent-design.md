@@ -28,7 +28,7 @@ remains.
 | enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [README](../README.md#what-it-contains) |
 | aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge fields: values stored on a link | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| path edges: `edge.through` and multi-hop `follow` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| path edges: `edge.through`, stored or not, and multi-hop `follow` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -251,9 +251,16 @@ on the row.
 Following an edge collects the linked ids, then reads those rows in id
 order. A later version could intersect them with an index on the target.
 
-A path edge (`edge.through`) names a chain of edges and stores nothing.
-Following it collects the distinct ids at each hop before the next, so its
-cost grows with the distinct rows along the path. A driving `has` on a path
+A path edge (`edge.through`) names a chain of edges. Following it collects
+the distinct ids at each hop before the next, so its cost grows with the
+distinct rows along the path. A stored path edge keeps one link per pair of
+rows a path joins, holding the number of paths, in a store named as an
+`edge.to` of the same name would be. A link change at hop i changes the
+paths by the paths into the link through hops before i, counted after the
+change, times the paths out of it through hops after i, counted before the
+change; summed over each hop on that store, this stays exact when a path
+crosses the same store twice. Its `migrate` fill counts each source row's
+paths, and reads walk the hops until the fill finishes. A driving `has` on a path
 edge walks the hops backwards from its matches. Paths are declared: a
 search over the schema for a path between two tables could pick a different
 path after a new edge is added, and change what an existing query means.
