@@ -249,7 +249,11 @@ plan. Index bounds may let in extra keys, so every filter is checked again
 on the row.
 
 Following an edge collects the linked ids, then reads those rows in id
-order. A later version could intersect them with an index on the target.
+order. When the query's filters narrow an index on the target, or its order
+matches one and it has a limit, it reads that index's keys and only the
+linked rows among them. It gives up on the index after as many keys as there
+are linked ids, so the index read costs at most as many keys as the follow
+has links.
 
 A path edge (`edge.through`) names a chain of edges. Following it collects
 the distinct ids at each hop before the next, so its cost grows with the

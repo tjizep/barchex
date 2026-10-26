@@ -80,6 +80,10 @@ beside a development server.
   reads them from both ends, filters with `whereEdge` in `has` and `with`,
   migrates an edge from no fields to fields and refuses a new required
   field, and checks the errors for bad edge values.
+- `test_follow_index.py` follows an edge with filters and orders that an
+  index on the target serves, makes every row outside the expected set
+  unreadable to show which rows each read touches, and checks the fallback
+  to reading each linked row when the index range is larger than the links.
 - `test_through.py` declares path edges across customers, orders, lines and
   products, follows them both ways and through another path edge, filters
   with `has` by probing and by walking back from an index, loads them with

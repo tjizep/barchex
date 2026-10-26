@@ -26,8 +26,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   could build on hooks.
 - **Edge fields in more queries:** `follow`, `groupBy` and aggregates read
   only the linked rows; they could also read a link's values.
-- **Faster edge follows:** intersect the linked ids with an index on the
-  target table, so a follow reads only the rows its filters keep.
 
 ## barch
 

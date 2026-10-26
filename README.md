@@ -915,7 +915,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
 | `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
 | `delete()` | deletes the selected rows and answers the number it removed |
-| `explain()` | the plan, such as `by_name_age = name range age` |
+| `explain()` | the plan, such as `by_name_age = name range age` or `edge customer_likes in (by_color = color)` |
 
 Write every row selected by a query with `update` or `delete`:
 
@@ -957,6 +957,18 @@ matching row before sorting. A
 unique index is used only when every one of its fields has an `=` filter,
 because it leaves out rows with a missing value. Filters on other fields
 are checked on each row read.
+
+A query from `follow` or `query<Edge>()`, or the query `with` runs for each
+row, starts from the linked ids. When its filters narrow an index, or its
+`order` matches an index and it has a `limit`, it reads that index's keys
+and then only the linked rows among them; `explain` shows this as
+`edge customer_likes in (by_color = color)`. If the index range holds more
+keys than there are linked ids, the query stops reading the index and reads
+each linked row, so the index read costs at most as many keys as the
+follow has links. `using(name)` reads the named index to the end of its range. A
+`desc` order without a narrowing filter reads each linked row. Without
+`order`, rows come in index order when the index is read and in id order
+otherwise.
 
 Use `cursor` and `after` to page through a query. Each page starts where the
 last one ended, so later pages cost the same as the first, and rows added or

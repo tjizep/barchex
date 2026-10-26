@@ -1215,11 +1215,20 @@ end
 
 -- How to read q: which index, the key span, and whether the keys come in
 -- the order q asks for.
-local function index_plan(q: any): any
+local function index_plan(q: any, keys: boolean?): any
     local tbl, t = q.tbl, q.tbl.t
-    if q.idset then
+    if q.idset and not keys then
         local ordered = q.sortField == nil or q.sortField == "id"
-        return { name = "edge " .. q.via .. (ordered and "" or " then sort"), ordered = ordered }
+        local p = { name = "edge " .. q.via .. (ordered and "" or " then sort"), ordered = ordered }
+        -- an index that narrows the read, or one in the query's order that a
+        -- limit stops early, can find the linked rows by their index keys
+        local ix = index_plan(q, true)
+        local sorted = q.sortField ~= nil and q.sortField ~= "id"
+        if q.use or not ix.full or (sorted and ix.ordered and q.lim and not q.desc) then
+            p.within = ix
+            p.name = "edge " .. q.via .. " in (" .. ix.name .. ")"
+        end
+        return p
     end
     local eq, ranges = {}, {}
     for _, c in q.conds do
@@ -1469,9 +1478,7 @@ local function rows(q: any, loading: boolean?): { any }
         table.sort(idset)
     end
     local want = q.lim and q.skip + q.lim
-    local early = p.ordered and want ~= nil
-    -- an ordered read in desc order reads from the end, so it can stop early
-    local back = p.ordered and q.desc
+    local ordered, early, back = p.ordered, false, false
     local out = {}
     local function consider(pk: number): boolean
         local r = read(tbl, pk)
@@ -1481,23 +1488,59 @@ local function rows(q: any, loading: boolean?): { any }
         end
         return false
     end
-    if idset then
-        local n = #idset
-        for i = 1, n do
-            if consider(idset[back and n + 1 - i or i]) then
-                break
-            end
-        end
-    elseif want ~= 0 then
-        local scan = back and lay.scan_back or lay.scan
-        scan(p.lo, p.hi, function(k)
-            if p.ix.primary then
-                return consider(lay.row_pk(tbl.t, k))
-            end
-            return consider(lay.pk_of(tbl.t, p.ix, k, p.ix.unique and barch.store.get(k) or nil))
-        end)
+    -- An ordered read can stop at the limit, and one in desc order reads
+    -- from the end to do so.
+    local function order_by(o: boolean)
+        ordered, early, back = o, o and want ~= nil, o and q.desc
     end
-    if not p.ordered then
+    -- Reads the rows of index plan ix's keys, only those in `only` when
+    -- given. Answers false when it gave up after `budget` keys.
+    local function scan_index(ix: any, only: any, budget: number?): boolean
+        local seen, over = 0, false
+        local scan = back and lay.scan_back or lay.scan
+        scan(ix.lo, ix.hi, function(k)
+            seen += 1
+            if budget and seen > budget then
+                over = true
+                return true
+            end
+            local pk = if ix.ix.primary then lay.row_pk(tbl.t, k)
+                else lay.pk_of(tbl.t, ix.ix, k, ix.ix.unique and barch.store.get(k) or nil)
+            if only and not only[pk] then
+                return false
+            end
+            return consider(pk)
+        end)
+        return not over
+    end
+    local done = false
+    if idset and p.within and #idset > 0 and want ~= 0 then
+        -- reading more index keys than there are linked rows would cost
+        -- more than reading the rows, unless using() named the index
+        order_by(p.within.ordered)
+        local only = {}
+        for _, pk in idset do
+            only[pk] = true
+        end
+        done = scan_index(p.within, only, if q.use then nil else #idset)
+        if not done then
+            out = {}
+        end
+    end
+    if not done then
+        order_by(p.ordered)
+        if idset then
+            local n = #idset
+            for i = 1, n do
+                if consider(idset[back and n + 1 - i or i]) then
+                    break
+                end
+            end
+        elseif want ~= 0 then
+            scan_index(p)
+        end
+    end
+    if not ordered then
         local f = q.sortField
         table.sort(out, function(a, b)
             if a[f] == b[f] then
