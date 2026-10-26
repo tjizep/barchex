@@ -69,6 +69,13 @@ beside a development server.
   filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
   ignores them and that a client without the graph lacks them, and checks
   the errors for writing one and for a value of the wrong kind.
+- `test_stored_computed.py` stores computed fields on `create` and
+  `update`, fills stored rows in paged migrations while a client computes
+  the rows not yet filled, indexes and unique checks the stored values,
+  recomputes every row for a new revision, and checks the errors for
+  setting a stored computed field, a value of the wrong kind in a write or
+  a fill, a revision the catalog lacks, and writes from a client without
+  the graph.
 - `test_edge_fields.py` stores values on links through `create` and `link`,
   reads them from both ends, filters with `whereEdge` in `has` and `with`,
   migrates an edge from no fields to fields and refuses a new required

@@ -24,7 +24,7 @@ remains.
 | edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| computed fields, computed on read | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| computed fields, computed on read or stored and filled by `migrate` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [README](../README.md#what-it-contains) |
 | aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge fields: values stored on a link | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |

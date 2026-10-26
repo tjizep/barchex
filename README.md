@@ -352,6 +352,7 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | `lent.field.enum` | the same modifiers, plus required `:values("choice", ...)` |
 | `lent.field.bytes` | the same modifiers and byte-length rules |
 | `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
+| any field builder | `:computed(fn)`, and `:stored(revision)` to store it; see computed fields below |
 | `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
 | `lent.edge.to "name" "Table"` | `:unique()`, `:fields { ... }` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
@@ -535,18 +536,57 @@ one. A `nil` answer means the field has no value; any other answer must fit
 the field's kind, or the read raises an error.
 
 Use a computed field by name in `where`, `order`, `cursor`, `groupBy` and
-aggregates. Its value is never stored, which has these consequences:
+aggregates. A computed field without `:stored()` keeps no value in the row,
+which has these consequences:
 
 - A query checks a filter on a computed field against each row it reads,
   so the filter never picks an index. An index on a computed field raises
   a `SCHEMA` error.
 - `create`, `update` and query `update` raise an error for a value or a
   `clear` of a computed field.
-- A computed field takes no option except an enum's `:values`.
+- A computed field takes no option except an enum's `:values` and
+  `:stored()`.
 - `migrate` ignores computed fields, so adding, changing or removing one
   needs no migration and applies to every row at once.
 - Like hooks, computed fields exist only in a client opened with the graph.
   A plain client raises `has no field` when a query names one.
+
+Add `:stored()` to keep the value in the row, so an index can use it:
+
+```lua
+lent.schema "Shift" {
+    fields = {
+        lent.field.time "clockIn",
+        lent.field.time "clockOut":optional(),
+        lent.field.int "worked":computed(function(r)
+            return r.clockOut and r.clockOut - r.clockIn
+        end):stored(),
+    },
+    indexes = { lent.index("worked") },
+}
+```
+
+In a plain table, set `stored = true`, or the revision number.
+
+The client calls the function on `create`, `update`, query `update` and
+`upsert`, after the hooks run, and stores the answer. `row` holds the
+row's stored fields, without `id`, and the new values of the stored
+computed fields declared before this one. A `nil` answer stores no value;
+any other answer must fit the field's kind, or the write raises an error.
+
+- Reads answer the stored value without calling the function, so a client
+  opened without the graph reads it too. Writing rows of the table from
+  such a client raises an error, because it cannot compute the value.
+- A stored computed field may be `:unique()`, named in an index and renamed
+  with `:was()`. It takes no other option except an enum's `:values`.
+- `migrate` computes the field for the rows stored before it: when you add
+  a stored computed field, or turn a stored field into one. It fills the
+  rows in pages before it builds the field's indexes; see MIGRATE.
+- Changing the function leaves stored values as they are. Raise the
+  revision with the change, as in `:stored(2)`, and `migrate` computes
+  every row again and rebuilds the indexes on the field. Until then, a
+  client opened with the new graph raises
+  `is declared with stored revision 2, and this space's catalog has stored revision 1; run MIGRATE`.
 
 `lent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
 new table, or the first answer of the previous version's call. A field keeps
@@ -580,22 +620,29 @@ function calls give each page its own function deadline.
 
 The optional page size defaults to `1000` and accepts whole numbers from
 `1` to `10000`. It bounds the total row visits and removed index entries
-across all indexes in that call. Each index build visits every row,
-including rows whose missing values leave them out of a unique index.
+across all indexes in that call. Each fill and index build visits every
+row, including rows whose missing values leave them out of a unique index.
 
 | report field | meaning |
 |---|---|
 | `version` | the active schema version; it advances on the first committed page and stays the same while the migration resumes |
 | `changed` | `true` when this call installs a schema or advances pending work |
-| `done` | `true` when every index drop and build is complete |
+| `done` | `true` when every index drop, fill and build is complete |
 | `processed` | row visits plus removed index entries in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index` and `build Table.index` operations; empty for an unchanged, completed schema |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
 and its `/lent/tables/<table>/indexes/<index>/spec` JSON. Ready indexes have
 no `state` field. The last index entries and the readiness change commit
 together.
+
+A fill computes stored computed fields, described with SCHEMA, for the rows
+stored before them and writes each row again. While it runs, the fields
+have `state = "filling"`, and a client opened with the graph computes them
+on every read, so reads answer the new values before the fill reaches a
+row. A client opened without the graph reads the stored values, which are
+missing or old until the fill reaches the row.
 
 Queries choose ready indexes or read the table while an index builds.
 `using`, `by` and `upsert` raise a `LENT` error if they request a building
@@ -630,6 +677,8 @@ changes or a unique-index conflict:
 - removing a value from an enum's choices;
 - a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
+- a stored computed field whose function answers a value that does not fit
+  the field for a stored row;
 - a change to a table's `id` kind.
 
 Adding enum choices preserves stored rows and their indexes. Byte and JSON

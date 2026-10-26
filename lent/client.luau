@@ -77,7 +77,23 @@ local function bind(t: any, version: number, pessimistic: boolean?, decl: any?):
             fail("table " .. t.name .. " field " .. f.name .. " is declared, and this"
                 .. " space's catalog lacks it; run MIGRATE")
         end
+        if f.computed ~= byName[f.name].computed then
+            local function rev(n: any): string
+                return n and "stored revision " .. n or "no stored revision"
+            end
+            fail("table " .. t.name .. " field " .. f.name .. " is declared with "
+                .. rev(f.computed) .. ", and this space's catalog has "
+                .. rev(byName[f.name].computed) .. "; run MIGRATE")
+        end
         code[f.name] = f.code
+    end
+    -- stored computed fields, in catalog order
+    local stored, storedByName = {}, {}
+    for _, f in t.fields do
+        if f.computed then
+            stored[#stored + 1] = f
+            storedByName[f.name] = f
+        end
     end
     local computed = decl and decl.computed or {}
     local computedByName = {}
@@ -88,6 +104,7 @@ local function bind(t: any, version: number, pessimistic: boolean?, decl: any?):
         t = t, fields = rc.fields(t.fields), byName = byName, edgeByName = edgeByName,
         code = code, hooks = decl and decl.hooks or NO_HOOKS,
         computed = computed, computedByName = computedByName,
+        stored = stored, storedByName = storedByName,
         version = version, lock = pessimistic == true, where = "table " .. t.name,
     }, Table)
 end
@@ -134,9 +151,33 @@ local function fits_kind(f: any, v: any): boolean
     return type(v) == "string"
 end
 
+-- Sets stored computed field f of row r to its function's value.
+local function compute_stored(self: any, f: any, r: any)
+    local code = self.code[f.name]
+    if code == nil or code.computed == nil then
+        fail(self.where .. " field " .. f.name .. " is computed and stored, so writing"
+            .. " rows needs its function; open the client with lent.open(app)")
+    end
+    local v = code.computed(table.clone(r))
+    local why = SCHEMA.computed_broken(f, v)
+    if why then
+        fail(self.where .. " field " .. f.name .. " " .. why)
+    end
+    r[f.name] = v
+end
+
 -- Sets each computed field of row r to fn(r), in declaration order, so a
--- computed field sees the ones declared before it.
+-- computed field sees the ones declared before it. A stored computed field
+-- that MIGRATE has not yet filled is computed here too.
 local function compute(self: any, r: any): any
+    for _, f in self.stored do
+        if f.state == "filling" and self.code[f.name] then
+            local id = r.id
+            r.id = nil
+            compute_stored(self, f, r)
+            r.id = id
+        end
+    end
     for _, f in self.computed do
         local v = f.fn(r)
         if v ~= nil and not fits_kind(f, v) then
@@ -161,7 +202,7 @@ local function read(self: any, pk: any, exclusive: boolean?): any
 end
 
 local function no_field(self: any, k: any)
-    if self.computedByName[k] then
+    if self.computedByName[k] or self.storedByName[k] then
         fail(self.where .. " field " .. k .. " is computed, so a row cannot set it")
     end
     if self.byName[k] == nil then
@@ -210,7 +251,9 @@ end
 -- changed keeps its field's rules and validate functions.
 local function check_row(self: any, r: any, old: any)
     for k in r do
-        no_field(self, k)
+        if not self.storedByName[k] then
+            no_field(self, k)
+        end
     end
     for _, f in self.t.fields do
         local v = r[f.name]
@@ -554,6 +597,9 @@ function Table:create(values: { [string]: any }): any
     lay.fill(self.t, r)
     r = clone_row(self, r)
     run_hooks(self, "create", r)
+    for _, f in self.stored do
+        compute_stored(self, f, r)
+    end
     check_row(self, r, nil)
     -- a uuid needs no shared key, so creates in one table do not conflict
     local counter, pk
@@ -670,6 +716,9 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
     end
     r = clone_row(self, r)
     run_hooks(self, "update", pk, r, clone_row(self, old))
+    for _, f in self.stored do
+        compute_stored(self, f, r)
+    end
     check_row(self, r, old)
     return compute(self, store(self, pk, old, r))
 end

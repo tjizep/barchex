@@ -24,6 +24,9 @@
 --   /lent/tables/<table>/fields/<field>     kind, id, optional, unique, default
 --                                          and the value rules: immutable,
 --                                          min, max, minLen, maxLen, match
+--                                          ; a stored computed field adds its
+--                                          revision in computed, and state =
+--                                          "filling" until its rows are filled
 --   /lent/tables/<table>/indexes/<ix>/spec  unique, state = "building" until ready
 --   /lent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
 --   /lent/edges/<edge>/from, /to            links to the two tables' nodes
@@ -37,7 +40,11 @@
 --   - renaming a field of a table that has ever stored json rows, since
 --     those rows name their fields;
 --   - two tables that store under one key.
--- apply() refuses a unique index that two rows' values already break.
+-- A new stored computed field, or a new revision of one, adds a fill step
+-- that computes it for every stored row with the function in `app`, after
+-- the drops and before the builds.
+-- apply() refuses a unique index that two rows' values already break, and
+-- a fill whose function answers a value that does not fit its field.
 
 local SCHEMA = require("lent.SCHEMA")
 local rc = require("lent.ROWCODEC")
@@ -155,7 +162,10 @@ local function logical_tables(tables: any): any
     for key, t in tables do
         local copy = table.clone(t)
         copy.fields = {}
-        for i, f in t.fields do copy.fields[i] = field_data(f) end
+        for i, f in t.fields do
+            copy.fields[i] = field_data(f)
+            copy.fields[i].state = nil
+        end
         copy.indexes = {}
         for i, ix in t.indexes do copy.indexes[i] = index_spec(ix) end
         out[key] = copy
@@ -168,6 +178,7 @@ local function load_fields(t: any)
     t.next = num(t.next)
     for _, f in t.fields or {} do
         f.id = num(f.id)
+        f.computed = num(f.computed)
         f.default = num(f.default)
         if f.defaultEncoding == "json" then
             f.default = VALUES.parse_json(f.default)
@@ -248,7 +259,8 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
     for i, f in t.fields do
         fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
                       unique = f.unique, default = f.default, immutable = f.immutable,
-                      match = f.match, values = f.values and table.clone(f.values) }
+                      match = f.match, values = f.values and table.clone(f.values),
+                      computed = f.computed }
         for _, k in RULES do
             fields[i][k] = f[k]
         end
@@ -275,7 +287,8 @@ end
 
 -- What a migration from `prev` (load()'s answer, or nil) to `app` would do:
 -- { version, changed, compiled, steps = { { op = "build" | "drop", table,
--- index } } }. Raises an error for a change it refuses.
+-- index } | { op = "fill", table, fields, fns } } }. Raises an error for a
+-- change it refuses.
 function plan(prev: any, app: any): any
     prev = prev or { version = 0, tables = {}, edges = {} }
     local tables, steps = {}, {}
@@ -294,6 +307,18 @@ function plan(prev: any, app: any): any
         local before = by_name(old and old.fields)
         local fields, ver = check_fields(where, old, t, before)
         local after = by_name(fields)
+        -- stored computed fields that rows stored before need computed:
+        -- new ones, and ones whose revision changed
+        local fill, fns, refill = {}, {}, {}
+        for i, f in fields do
+            local d = t.fields[i]
+            local was = before[d.name] or (d.was and before[d.was])
+            if old and f.computed and (was == nil or num(was.computed) ~= f.computed) then
+                fill[#fill + 1] = f.name
+                fns[f.name] = d.code.computed
+                if was then refill[f.name] = true end
+            end
+        end
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
@@ -312,9 +337,16 @@ function plan(prev: any, app: any): any
                 had[ix.name] = ix
             end
         end
+        if #fill > 0 then
+            steps[#steps + 1] = { op = "fill", table = c, fields = fill, fns = fns }
+        end
         for _, ix in c.indexes do
             local o = had[ix.name]
-            if o == nil or not same_index(o, ix, before, after) then
+            local stale = false
+            for _, fname in ix.on do
+                if refill[fname] then stale = true end
+            end
+            if o == nil or stale or not same_index(o, ix, before, after) then
                 if o then
                     steps[#steps + 1] = { op = "drop", table = old, index = o }
                 end
@@ -334,9 +366,11 @@ function plan(prev: any, app: any): any
                 .. " is not supported yet")
         end
     end
-    -- drops first, so an index rebuilt under its own name starts empty
+    -- drops first, so an index rebuilt under its own name starts empty, and
+    -- fills before builds, so a build reads the computed values
+    local rank = { drop = 1, fill = 2, build = 3 }
     table.sort(steps, function(a, b)
-        return a.op == "drop" and b.op == "build"
+        return rank[a.op] < rank[b.op]
     end)
 
     local edges = {}
@@ -376,6 +410,37 @@ local function build_row(t: any, ix: any, fields: any, k: string)
         end
     end
     barch.store.set(key, value)
+end
+
+-- Computes the stored computed fields `names` of the row at key k with
+-- their functions `fns`, and stores the row again.
+local function fill_row(t: any, names: { string }, fns: any, fields: any, version: number,
+                        k: string)
+    local stored = barch.store.get(k)
+    if stored == nil then return end
+    local r = lay.fill(t, (rc.decode(fields, stored)))
+    for _, name in names do
+        local v = fns[name](table.clone(r))
+        for _, f in t.fields do
+            local why = f.name == name and SCHEMA.computed_broken(f, v)
+            if why then
+                fail("table " .. t.name .. " field " .. name .. " " .. why .. " for row "
+                    .. tostring(lay.row_pk(t, k)))
+            end
+        end
+        r[name] = v
+    end
+    barch.store.set(k, rc.encode(fields, t.format, version, r))
+end
+
+-- The functions of the stored computed fields `names` of catalog table t,
+-- from the graph `app`.
+local function fill_fns(app: any, t: any, names: { string }): any
+    local fns = {}
+    for _, f in app.tables[t.name].fields do
+        if table.find(names, f.name) then fns[f.name] = f.code.computed end
+    end
+    return fns
 end
 
 local function build(t: any, ix: any)
@@ -453,6 +518,11 @@ function apply(p: any)
     for _, s in p.steps do
         if s.op == "drop" then
             drop(s.table, s.index)
+        elseif s.op == "fill" then
+            local fields = row_fields(s.table)
+            lay.walk(lay.row(s.table), function(k)
+                fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k)
+            end)
         else
             build(s.table, s.index)
         end
@@ -467,35 +537,45 @@ local function find_index(t: any, name: string): any
     fail("table " .. t.name .. " has no index " .. name .. " to resume")
 end
 
--- Drops consume entries from the start; builds remember the last row key.
--- The last page's entries and its readiness change commit together.
-local function advance(c: any, budget: number): number
+-- Drops consume entries from the start; fills and builds remember the last
+-- row key. The last page's writes and its readiness change commit together.
+-- Fills take their functions from the graph `app`.
+local function advance(c: any, budget: number, app: any): number
     local work, processed = c.migration, 0
     while work.at <= #work.steps and processed < budget do
         local step = work.steps[work.at]
         local t = c.tables[step.table]
+        local rows = step.op ~= "drop"
         local ix = step.op == "build" and find_index(t, step.index.name) or step.index
-        local prefix = step.op == "build" and lay.row(t) or lay.index(t, ix)
-        local lo = step.op == "build" and work.cursor and work.cursor .. "\2" or prefix
+        local prefix = rows and lay.row(t) or lay.index(t, ix)
+        local lo = rows and work.cursor and work.cursor .. "\2" or prefix
         local hi = kc.after(prefix)
         local limit = budget - processed
         local keys = barch.store.range(lo, hi, limit)
-        local fields = step.op == "build" and row_fields(t)
+        local fields = rows and row_fields(t)
+        local fns = step.op == "fill" and fill_fns(app, t, step.fields)
         for _, k in keys do
             if step.op == "drop" then
                 barch.store.remove(k)
+            elseif step.op == "fill" then
+                fill_row(t, step.fields, fns, fields, c.version, k)
             else
                 build_row(t, ix, fields, k)
             end
         end
         processed += #keys
-        local nextKey = step.op == "build" and keys[#keys] and keys[#keys] .. "\2" or prefix
+        local nextKey = rows and keys[#keys] and keys[#keys] .. "\2" or prefix
         local done = #keys < limit or #barch.store.range(nextKey, hi, 1) == 0
         if done then
             if step.op == "build" then ix.state = nil end
+            if step.op == "fill" then
+                for _, f in t.fields do
+                    if table.find(step.fields, f.name) then f.state = nil end
+                end
+            end
             work.at += 1
             work.cursor = nil
-        elseif step.op == "build" then
+        elseif rows then
             work.cursor = keys[#keys]
         end
     end
@@ -505,6 +585,10 @@ end
 
 local function write_progress(c: any)
     for key, t in c.tables do
+        for _, f in t.fields do
+            barch.graph.put("/lent/tables/" .. key .. "/fields/" .. f.name,
+                simdjson.encode(field_data(f)), "json")
+        end
         for _, ix in t.indexes do
             barch.graph.put("/lent/tables/" .. key .. "/indexes/" .. ix.name .. "/spec",
                 simdjson.encode({ unique = ix.unique, state = ix.state }), "json")
@@ -538,16 +622,24 @@ function migrate(app: any, pageSize: number?): any
         if not resuming then
             local work = { steps = {}, at = 1 }
             for i, s in p.steps do
-                work.steps[i] = { op = s.op, table = s.table.key, index = index_spec(s.index) }
+                if s.op == "fill" then
+                    work.steps[i] = { op = s.op, table = s.table.key, fields = s.fields }
+                    for _, f in s.table.fields do
+                        if table.find(s.fields, f.name) then f.state = "filling" end
+                    end
+                else
+                    work.steps[i] = { op = s.op, table = s.table.key, index = index_spec(s.index) }
+                end
                 if s.op == "build" then s.index.state = "building" end
             end
             c.migration = work
         end
         local steps = {}
         for i, s in c.migration.steps do
-            steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. s.index.name
+            local what = s.op == "fill" and table.concat(s.fields, ",") or s.index.name
+            steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. what
         end
-        local processed = advance(c, pageSize)
+        local processed = advance(c, pageSize, app)
         if resuming then write_progress(c) else write_catalog(c) end
         return { version = c.version, changed = true, steps = steps,
                  done = c.migration == nil, processed = processed }
@@ -635,6 +727,36 @@ function selftest(): (boolean, string?)
     if not raises(function() plan(linked, liked { lent.field.time "at", lent.field.int "n" }) end,
         "edge u_likes field n is new, so links stored before it have no value") then
         return false, "added a required edge field"
+    end
+
+    local function counted(rev, fn)
+        return lent.graph { lent.schema "U" { fields = { lent.field.int "a",
+            lent.field.int "b":computed(fn):stored(rev) }, indexes = { lent.index("b") } } }
+    end
+    local double = function(r) return r.a * 2 end
+    local plainU = simdjson.parse(simdjson.encode(plan(nil, lent.graph { lent.schema "U" {
+        fields = { lent.field.int "a" } } }).compiled))
+    local function shape(p)
+        local out = {}
+        for _, s in p.steps do
+            out[#out + 1] = s.op .. " " .. (s.index and s.index.name or table.concat(s.fields, ","))
+        end
+        return table.concat(out, ",")
+    end
+    local sp = plan(plainU, counted(1, double))
+    if shape(sp) ~= "fill b,build by_b" or sp.compiled.tables.u.fields[2].computed ~= 1
+        or sp.steps[1].fns.b({ a = 2 }) ~= 4 then
+        return false, "stored computed field plan " .. shape(sp)
+    end
+    local filled = simdjson.parse(simdjson.encode(sp.compiled))
+    if plan(filled, counted(1, function() return 0 end)).changed then
+        return false, "a changed function without a new revision planned a change"
+    end
+    if shape(plan(filled, counted(2, double))) ~= "drop by_b,fill b,build by_b" then
+        return false, "stored computed revision plan"
+    end
+    if #plan(nil, counted(1, double)).steps ~= 1 then
+        return false, "a new table planned a fill"
     end
 
     local other = lent.graph { lent.schema "Post" { fields = { lent.field.string "t" } } }

@@ -94,6 +94,20 @@ function encodeJson(value: any): string
     return VALUES.json(value)
 end
 
+-- Why value `v`, which a computed field's function answered, does not fit
+-- compiled field `f`, or nil when it fits. nil fits every computed field.
+function computed_broken(f: any, v: any): string?
+    if v == nil then
+        return nil
+    end
+    local what = "is a computed " .. f.kind .. ", and its function answered " .. tostring(v)
+    if not fits(f.kind, v) then
+        return what
+    end
+    local why = broken(f, v)
+    return why and what .. ": " .. why
+end
+
 -- Why value `v` breaks a rule of compiled field `f`, or nil when it keeps
 -- them all. lent.CLIENT checks every value it writes with this.
 function broken(f: any, v: any): string?
@@ -223,6 +237,15 @@ end
 -- and only a client opened with the graph has it.
 function Field:computed(fn: (any) -> any)
     self.computed_ = fn
+    return self
+end
+
+-- Stores a computed field: lent.CLIENT computes it on create and update,
+-- and MIGRATE fills the rows stored before it. A stored computed field may
+-- also be :unique(), :was() and indexed. Raise `revision` (1 by default)
+-- when the function changes, so MIGRATE computes every row again.
+function Field:stored(revision: number?)
+    self.stored_ = if revision == nil then 1 else revision
     return self
 end
 
@@ -375,7 +398,7 @@ local FIELD_KEYS = {
     default = "any", was = "string", immutable = "boolean", min = "number",
     max = "number", minLen = "number", maxLen = "number", notEmpty = "boolean",
     match = "string", validate = "any", updateDefault = "function", values = "table",
-    computed = "function",
+    computed = "function", stored = "any",
 }
 
 local function plain_field(where: string, t: any): any
@@ -396,6 +419,10 @@ local function plain_field(where: string, t: any): any
     if t.was then f:was(t.was) end
     if t.updateDefault then f:updateDefault(t.updateDefault) end
     if t.computed then f:computed(t.computed) end
+    -- stored = true, or a revision
+    if t.stored ~= nil and t.stored ~= false then
+        f:stored(if t.stored == true then nil else t.stored)
+    end
     for _, k in { "min", "max", "minLen", "maxLen", "match" } do
         if t[k] ~= nil then
             f[k](f, t[k])
@@ -529,8 +556,10 @@ local function rules(where: string, f: any, out: any)
     out.immutable = f.immutable_ == true
 end
 
--- The options a computed field may have besides its function.
+-- The options a computed field may have besides its function, and the
+-- ones a stored computed field adds.
 local COMPUTED_KEEPS = { kind = true, name = true, computed_ = true, values_ = true }
+local STORED_KEEPS = { stored_ = true, unique_ = true, was_ = true }
 
 -- Checks computed field f and answers { name, kind, values?, fn }.
 local function computed_field(where: string, f: any): any
@@ -538,7 +567,7 @@ local function computed_field(where: string, f: any): any
         fail(where .. " computed takes a function, got " .. type(f.computed_))
     end
     for k in f do
-        if not COMPUTED_KEEPS[k] then
+        if not COMPUTED_KEEPS[k] and not (f.stored_ ~= nil and STORED_KEEPS[k]) then
             local option = string.gsub(k, "_$", "")
             if option == "hasDefault" then option = "default" end
             fail(where .. " is computed, which takes no " .. option)
@@ -631,9 +660,11 @@ end
 --     indexes = { { name, on, unique } },
 --     edges = { { name, dir, target, unique, ref, fields? } } }
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
--- given to lent.open: each field's `code` = { default?, update?, validate },
--- the table's `hooks` = { create, update, delete } lists of functions, and
--- its `computed` = { { name, kind, values?, fn } } fields, which no row stores.
+-- given to lent.open: each field's `code` = { default?, update?, validate,
+-- computed? }, the table's `hooks` = { create, update, delete } lists of
+-- functions, and its `computed` = { { name, kind, values?, fn } } fields,
+-- which no row stores. A stored computed field is in `fields`, with its
+-- revision in `computed` and its function in `code.computed`.
 function schema(name: string)
     ident(name, "table")
     return function(spec: any)
@@ -667,10 +698,22 @@ function schema(name: string)
             if byName[fname] or computed[fname] then
                 fail(where .. " field " .. fname .. " is declared twice")
             end
-            if f.computed_ ~= nil then
+            if f.stored_ ~= nil and f.computed_ == nil then
+                fail(where .. " field " .. fname .. " is stored, which needs :computed(fn)")
+            end
+            if f.computed_ ~= nil and f.stored_ == nil then
                 computed[fname] = true
                 t.computed[#t.computed + 1] = computed_field(where .. " field " .. fname, f)
                 continue
+            end
+            local fn
+            if f.computed_ ~= nil then
+                local rev = f.stored_
+                if type(rev) ~= "number" or rev < 1 or rev ~= math.floor(rev) then
+                    fail(where .. " field " .. fname .. " stored takes a whole number"
+                        .. " revision from 1, got " .. tostring(rev))
+                end
+                fn = computed_field(where .. " field " .. fname, f).fn
             end
             if f.was_ then
                 if was[f.was_] then
@@ -680,6 +723,10 @@ function schema(name: string)
                 was[f.was_] = fname
             end
             local out = stored_field(where, f)
+            if fn then
+                -- the function may answer nil, so the value is optional
+                out.optional, out.computed, out.code.computed = true, f.stored_, fn
+            end
             byName[fname] = out
             t.fields[#t.fields + 1] = out
         end
@@ -1004,6 +1051,18 @@ function selftest(): (boolean, string?)
         or Shift.computed[2].values[2] ~= "l" or Shift.computed[1].fn({}) ~= 1 then
         return false, "computed fields"
     end
+    local Stored = schema "Stored" { fields = {
+        field.time "clockIn",
+        field.int "day":computed(function(r) return r.clockIn // 86400 end):stored(),
+        { kind = "int", name = "hour", stored = 2, unique = true,
+          computed = function(r) return r.clockIn // 3600 end },
+    }, indexes = { index("day") } }
+    local day, hour = Stored.fields[2], Stored.fields[3]
+    if #Stored.fields ~= 3 or #Stored.computed ~= 0 or day.computed ~= 1 or hour.computed ~= 2
+        or not day.optional or not hour.unique or day.code.computed({ clockIn = 86400 }) ~= 1
+        or #Stored.indexes ~= 2 then
+        return false, "stored computed fields"
+    end
 
     local Liker = schema "Liker" { fields = { field.int "a" }, edges = {
         edge.to "likes" "Liker":fields { field.time "at":default(now), field.int "n":min(1):optional() },
@@ -1041,6 +1100,12 @@ function selftest(): (boolean, string?)
         { function() schema "U" { fields = { { kind = "date", name = "a" } } } end, "no kind date" },
         { function() schema "U" { fields = { field.int "a", field.int "b":computed(5) } } end,
           "computed takes a function" },
+        { function() schema "U" { fields = { field.int "a", field.int "b":stored() } } end,
+          "field b is stored, which needs :computed(fn)" },
+        { function() schema "U" { fields = { field.int "a", field.int "b":computed(now):stored(0) } } end,
+          "stored takes a whole number revision from 1, got 0" },
+        { function() schema "U" { fields = { field.int "a",
+            field.int "b":computed(now):stored():default(1) } } end, "is computed, which takes no default" },
         { function() schema "U" { fields = { field.int "a",
             field.int "b":computed(now):optional() } } end, "field b is computed, which takes no optional" },
         { function() schema "U" { fields = { field.int "a", field.int "b":computed(now):default(1) } } end,

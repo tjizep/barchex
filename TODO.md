@@ -5,8 +5,8 @@ This page lists the work that remains on lent, the ORM described in
 with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
 `groupBy`, edges, edge joins, edge fields, cursor pages, value rules,
-`time`, `enum`, `json` and `bytes` fields, computed fields and hooks are
-built.
+`time`, `enum`, `json` and `bytes` fields, computed fields, stored or
+not, and hooks are built.
 
 ## Limits of what is built
 
@@ -22,10 +22,6 @@ built.
 
 ## Features
 
-- **Stored computed fields:** `:computed(fn):stored()` would compute the
-  value on `create` and `update` and store it, so an index can use it.
-  `migrate` would backfill stored rows in pages, and a changed function
-  would need the rows rewritten.
 - **Privacy rules:** read and write policies per table, as in Go ent. They
   could build on hooks.
 - **Edge fields in more queries:** `follow`, `groupBy` and aggregates read
