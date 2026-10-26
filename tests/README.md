@@ -80,6 +80,11 @@ beside a development server.
   reads them from both ends, filters with `whereEdge` in `has` and `with`,
   migrates an edge from no fields to fields and refuses a new required
   field, and checks the errors for bad edge values.
+- `test_through.py` declares path edges across customers, orders, lines and
+  products, follows them both ways and through another path edge, filters
+  with `has` by probing and by walking back from an index, loads them with
+  `with`, groups by a unique one, sees links change underneath, and checks
+  that writes through a path edge raise errors.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order

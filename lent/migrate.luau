@@ -327,7 +327,7 @@ function plan(prev: any, app: any): any
         for i, ix in t.indexes do c.indexes[i] = index_spec(ix) end
         for i, e in t.edges do
             c.edges[i] = { name = e.name, dir = e.dir, target = e.target, unique = e.unique,
-                           store = e.store }
+                           store = e.store, via = e.via }
         end
         tables[t.key] = c
 

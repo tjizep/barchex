@@ -27,6 +27,7 @@
 --           :queryPosts():order("title", "desc"):limit(10):all()
 --       c.User:query():hasPostsWith(function(q) q:where("title", "=", "hi") end)
 --           :withPosts():all()             -- each u.posts holds u's posts
+--       c.Post:query():follow("author.posts"):all()  -- edge after edge
 --       c.Post:query():sum("stars")        -- also min and max
 --       c.Post:query():groupBy("author"):aggregate {
 --           posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }
@@ -210,12 +211,23 @@ local function no_field(self: any, k: any)
     end
 end
 
+-- Answers edge `e`, raising an error for an edge.through, whose links are
+-- the links of the edges it follows.
+local function linkable(self: any, e: any): any
+    if e.dir == "through" then
+        fail(self.where .. " edge " .. e.name .. " goes through " .. table.concat(e.via, ".")
+            .. ", so its links change through those edges")
+    end
+    return e
+end
+
 local function set_fields(self: any, r: any, values: any)
     for k, v in values do
         if k == "id" then
             fail(self.where .. " gives out ids itself, so a row cannot set id")
         end
         if self.edgeByName[k] then
+            linkable(self, self.edgeByName[k])
             fail(self.where .. " edge " .. k .. " changes with link and unlink")
         end
         no_field(self, k)
@@ -379,6 +391,9 @@ end
 
 -- Whether a row of this table has at most one row at the far end of `e`.
 local function one(self: any, e: any): boolean
+    if e.dir == "through" then
+        return e.unique == true
+    end
     local s = self.allEdges[e.store]
     if e.dir == "to" then
         return s.unique == true
@@ -425,6 +440,77 @@ local function linked(s: any, forward: boolean, pk: any, each: (any) -> boolean?
     return lay.scan(prefix, kc.after(prefix), function(k)
         return each(pick(s, k))
     end, page)
+end
+
+-- The stored edges that edge `e` of table `tbl` follows, as { tbl, e } in
+-- order: `e` itself, or the hops of each edge an edge.through goes through.
+local function hops(tbl: any, e: any, out: { any }?): { any }
+    local list = out or {}
+    if e.dir ~= "through" then
+        list[#list + 1] = { tbl = tbl, e = e }
+        return list
+    end
+    for _, name in e.via do
+        local h = find_edge(tbl, name)
+        hops(tbl, h, list)
+        tbl = tbl.peers[h.target]
+    end
+    return list
+end
+
+-- The ids that the rows in `ids` reach through edge `e`, each once, in id
+-- order. Each hop scans the edges of the distinct rows the hop before
+-- reached. `backward` walks the hops in reverse from the far table and
+-- answers the rows of `tbl` that reach the rows in `ids`.
+local function reach(tbl: any, e: any, ids: { any }, backward: boolean?): { any }
+    local path = hops(tbl, e)
+    local first, last, step = 1, #path, 1
+    if backward then
+        first, last, step = #path, 1, -1
+    end
+    for i = first, last, step do
+        local h = path[i]
+        local s = h.tbl.allEdges[h.e.store]
+        local forward = (h.e.dir == "to") ~= (backward == true)
+        local seen, found = {}, {}
+        for _, pk in ids do
+            linked(s, forward, pk, function(other)
+                if not seen[other] then
+                    seen[other] = true
+                    found[#found + 1] = other
+                end
+                return false
+            end)
+        end
+        ids = found
+    end
+    table.sort(ids)
+    return ids
+end
+
+-- Calls each(other) for the rows that row pk reaches through edge `e`,
+-- until `each` answers true, and answers whether it did. A row reached by
+-- two paths is passed once, and a hop row reached before is skipped.
+local function reaches(tbl: any, e: any, pk: any, each: (any) -> boolean?): boolean
+    local path = hops(tbl, e)
+    local seen = {}
+    for i in path do
+        seen[i] = {}
+    end
+    local function walk(i: number, at: any): boolean
+        local h = path[i]
+        return linked(h.tbl.allEdges[h.e.store], h.e.dir == "to", at, function(other)
+            if seen[i][other] then
+                return false
+            end
+            seen[i][other] = true
+            if i == #path then
+                return each(other) == true
+            end
+            return walk(i + 1, other)
+        end, 100)
+    end
+    return walk(1, pk)
 end
 
 -- Raises an error unless `from` -> `to` can be added to edge `e`.
@@ -507,7 +593,7 @@ end
 -- defaults, and an existing link keeps the rest. Linking again without
 -- values leaves the link as it is.
 function Table:link(name: string, pk: any, other: any, values: { [string]: any }?): any
-    local e = find_edge(self, name)
+    local e = linkable(self, find_edge(self, name))
     if not exists(self, pk) then
         fail(self.where .. " has no row " .. pk)
     end
@@ -529,7 +615,7 @@ end
 -- The values on the link from row pk to row `other` through edge `name`,
 -- or nil when the rows are not linked.
 function Table:edge(name: string, pk: any, other: any): any
-    local e = find_edge(self, name)
+    local e = linkable(self, find_edge(self, name))
     check_pk(self, pk)
     check_pk(self.peers[e.target], other)
     return link_values(self, e, pk, other)
@@ -537,7 +623,7 @@ end
 
 -- Removes the link from row pk to row `other`. Answers whether there was one.
 function Table:unlink(name: string, pk: any, other: any): boolean
-    local e = find_edge(self, name)
+    local e = linkable(self, find_edge(self, name))
     local s = self.allEdges[e.store]
     check_pk(self, pk)
     check_pk(self.peers[e.target], other)
@@ -583,7 +669,7 @@ function Table:create(values: { [string]: any }): any
     for k, v in values do
         local e = self.edgeByName[k]
         if e then
-            links[#links + 1] = { e, ids_in(self, e, v) }
+            links[#links + 1] = { linkable(self, e), ids_in(self, e, v) }
         else
             plain[k] = v
         end
@@ -1009,15 +1095,10 @@ local function has_link(q: any, h: any, pk: any): boolean
     if h.set then
         return h.set[pk] == true
     end
-    local s = q.tbl.allEdges[h.e.store]
-    local forward = h.e.dir == "to"
-    if h.sub == nil then
-        return first_key(edge_prefix(s, forward, pk)) ~= nil
-    end
     local target = q.tbl.peers[h.e.target]
-    return linked(s, forward, pk, function(other)
-        if not link_ok(q.tbl, h.e, h.sub.edgeOf, pk, other) then
-            return false
+    local function match(other: any): boolean
+        if h.sub == nil then
+            return true
         end
         local m = h.memo[other]
         if m == nil then
@@ -1026,6 +1107,20 @@ local function has_link(q: any, h: any, pk: any): boolean
             h.memo[other] = m
         end
         return m
+    end
+    if h.e.dir == "through" then
+        return reaches(q.tbl, h.e, pk, match)
+    end
+    local s = q.tbl.allEdges[h.e.store]
+    local forward = h.e.dir == "to"
+    if h.sub == nil then
+        return first_key(edge_prefix(s, forward, pk)) ~= nil
+    end
+    return linked(s, forward, pk, function(other)
+        if not link_ok(q.tbl, h.e, h.sub.edgeOf, pk, other) then
+            return false
+        end
+        return match(other)
     end, 100)
 end
 
@@ -1229,7 +1324,14 @@ end
 local function prepare(q: any)
     for _, h in q.checks do
         h.memo, h.set = {}, nil
-        if h.drive then
+        if h.drive and h.e.dir == "through" then
+            -- walk the hops back from the matching rows
+            local set = {}
+            for _, pk in reach(q.tbl, h.e, h.sub:ids(), true) do
+                set[pk] = true
+            end
+            h.set = set
+        elseif h.drive then
             local set = {}
             local s = q.tbl.allEdges[h.e.store]
             for _, other in h.sub:ids() do
@@ -1263,13 +1365,17 @@ local function load(q: any, list: { any })
                 sub = w.fn(sub) or sub
             end
             local ids = {}
-            linked(s, forward, r.id, function(other)
-                if link_ok(tbl, w.e, sub.edgeOf, r.id, other) then
-                    ids[#ids + 1] = other
-                end
-                return false
-            end)
-            sub.idset, sub.via = ids, w.e.store
+            if w.e.dir == "through" then
+                ids = reach(tbl, w.e, { r.id })
+            else
+                linked(s, forward, r.id, function(other)
+                    if link_ok(tbl, w.e, sub.edgeOf, r.id, other) then
+                        ids[#ids + 1] = other
+                    end
+                    return false
+                end)
+            end
+            sub.idset, sub.via = ids, w.e.store or w.e.name
             local got = single and { sub:first() } or sub:all()
             if fielded then
                 for _, x in got do
@@ -1496,7 +1602,7 @@ end
 -- The id that row pk links to through edge e, or nil.
 local function linked_id(tbl: any, e: any, pk: any): any
     local out
-    linked(tbl.allEdges[e.store], e.dir == "to", pk, function(other)
+    reaches(tbl, e, pk, function(other)
         out = other
         return true
     end)
@@ -1652,24 +1758,34 @@ function Query:explain(): string
     return plan(self).name
 end
 
--- A query over the rows that the matching rows link to through edge `name`.
-function Query:follow(name: string): any
+-- A query over the rows that the matching rows reach through the edges
+-- named, hop by hop: follow("orders", "lines", "product") or
+-- follow("orders.lines.product"). Each hop reads each distinct row once.
+function Query:follow(...: string): any
     local tbl = self.tbl
-    local e = find_edge(tbl, name)
-    local s = tbl.allEdges[e.store]
-    local seen, list = {}, {}
-    for _, pk in self:ids() do
-        linked(s, e.dir == "to", pk, function(other)
-            if not seen[other] then
-                seen[other] = true
-                list[#list + 1] = other
-            end
-            return false
-        end)
+    local names = {}
+    for _, part in { ... } do
+        if type(part) ~= "string" then
+            fail(tbl.where .. " query follow takes edge names, got " .. tostring(part))
+        end
+        for name in string.gmatch(part .. ".", "([^.]*)%.") do
+            names[#names + 1] = name
+        end
     end
-    table.sort(list)
-    local q = tbl.peers[e.target]:query()
-    q.idset, q.via = list, e.store
+    if #names == 0 then
+        fail(tbl.where .. " query follow takes at least one edge name")
+    end
+    local ids, stores = self:ids(), {}
+    for _, name in names do
+        local e = find_edge(tbl, name)
+        for _, h in hops(tbl, e) do
+            stores[#stores + 1] = h.e.store
+        end
+        ids = reach(tbl, e, ids)
+        tbl = tbl.peers[e.target]
+    end
+    local q = tbl:query()
+    q.idset, q.via = ids, table.concat(stores, "/")
     return q
 end
 

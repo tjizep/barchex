@@ -356,6 +356,7 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
 | `lent.edge.to "name" "Table"` | `:unique()`, `:fields { ... }` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
+| `lent.edge.through "name" "Table"` | `:via "edge.edge"` (required); see path edges below |
 
 Fields, indexes and edges can also be plain tables of the same options.
 Each option takes the modifier's name, and `true` stands for a modifier
@@ -375,7 +376,7 @@ local Post = lent.schema "Post" {
 |---|---|
 | field | `kind` and `name` (required), `values` (required for `enum`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `unique`, `name` |
-| edge | `dir`, `"to"` or `"from"`, `name` and `target` (required), `ref`, `unique`, `fields` |
+| edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names) |
 
 A plain table goes through the same checks as the builder, and a key it
 does not recognise raises an error, so a misspelt option fails when the
@@ -818,6 +819,44 @@ table's fields. An edge has no indexes, so its fields take no `:unique()`,
 and they take no `:computed`. `migrate` accepts fields on an edge that already has links
 when each new field is optional or has a stored default.
 
+A path edge, declared with `lent.edge.through`, reaches the rows at the end
+of a chain of edges. A customer reaches the products on the lines of their
+orders in one step:
+
+```lua
+lent.schema "Customer" {
+    fields = { lent.field.string "name" },
+    edges = {
+        lent.edge.to "orders" "Order",
+        lent.edge.through "products" "Product":via "orders.lines.product",
+    },
+}
+
+c.Customer:query():where("name", "=", "ann"):queryProducts():all()
+c.Customer:query():hasProductsWith(function(p) p:where("color", "=", "red") end):all()
+c.Customer:query():withProducts():all()     -- each row's products in row.products
+```
+
+`:via` takes the hops as one dotted string or as one name per argument.
+The first hop is an edge of the declaring table, each later hop is an edge
+of the table the hop before it reaches, and the last hop must reach the
+table the path edge names. A hop may be another path edge. `graph` raises an
+error naming the hop that does not fit, or a path edge that goes through
+itself.
+
+A path edge stores nothing: it reads the links of its hops, so it reflects
+every `link`, `unlink` and `delete` at once, and `migrate` only records it in
+the catalog. Change its links through its hops; `link`, `unlink`, `edge` and
+a value under its name in `create` or `update` raise an error. It has no
+fields, so `whereEdge` inside its `has` or `with` raises an error too.
+
+Each row a path reaches comes once, however many paths lead to it. Each hop
+scans the edges of the distinct rows the hop before it reached, so the cost
+grows with the number of distinct rows along the path, and a path from a few
+rows stays cheap. A path edge is unique when every hop is unique, as a
+line's `order.customer` is. A unique path edge loads a row or `nil` in
+`with`, and `groupBy` can use it.
+
 Queries read through the best index for their filters:
 
 ```lua
@@ -828,6 +867,7 @@ c.User:query()
     :order("age", "desc"):offset(10):limit(10)
     :all()                                -- or first, ids, count
 c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
+c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 ```
 
 | method | effect |
@@ -839,7 +879,7 @@ c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 | `cursor(row)` | a string that marks `row`'s place in the query's order |
 | `after(cursor)` | keeps the rows after the cursor's row; with no `order`, the query orders by id |
 | `using(name)` | reads through the named ready index, or `"id"` for the table |
-| `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
+| `follow(edge, ...)`, `query<Edge>()` | a query over the rows the matches reach through the edges, hop by hop; `follow("a.b")` equals `follow("a", "b")` |
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
@@ -995,7 +1035,9 @@ c.Post:query():withAuthor():all()
 A `has` filter that reads part of its table through an index runs first,
 and the rows linked to its matches become the candidates. `explain` shows
 this as `has posts from (by_stars range stars)`. Any other `has` checks the
-edges of each candidate row, which `explain` shows as `has posts`. A `has`
+edges of each candidate row, which `explain` shows as `has posts`. For a
+path edge, the first way walks the hops backwards from the matches, and the
+second stops at the first matching row each candidate reaches. A `has`
 filter with `order`, `limit`, `offset` or `with` raises an error.
 
 `with` runs after the outer query's `limit`, one query per answered row,
