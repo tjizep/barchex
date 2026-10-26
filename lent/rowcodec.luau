@@ -15,8 +15,11 @@
 --   local value = rc.encode(users, "binary", 3, { email = "a@b", age = 41 })
 --   local row, version, format = rc.decode(users, value)  -- row, 3, "binary"
 --
--- A field's kind is "string", "int" (an integer in +-2^53), "float" or "bool",
--- the same kinds as KEYCODEC. A "time" field is stored as an "int". Its id is a number from 1 to 65535 that stays
+-- Fields support string, int (an integer in +-2^53), float, bool, time,
+-- enum, json and bytes. Time uses int storage; enum uses strings and a
+-- required `values` list. Bytes are Luau strings, stored as hex in JSON and
+-- text rows and raw bytes in binary rows. JSON values preserve nulls and
+-- array/object distinctions through lent.VALUES. A field's id is 1 to 65535 and stays
 -- with the field for the table's life: text and binary rows name fields by
 -- id, so a field can be renamed without rewriting them.
 --
@@ -30,22 +33,25 @@
 -- older schema decodes with the current field list: a field it has no value
 -- for is nil, and a value for a field the list no longer has is skipped. An
 -- int value decodes into a float field. A float value decodes into an int
--- field when it is a whole number in range, and any other kind change is an
--- error, so a migration has to rewrite those rows.
+-- field when it is a whole number in range. MIGRATE checks compatible kind
+-- changes before publishing a schema.
 --
 -- encode() refuses a row with a key the field list has no field for, a
 -- missing value for a field that is not optional, or a value of the wrong
 -- kind. NaN is refused in every format. A "json" row also refuses a string
 -- that is not UTF-8 and an infinite float, which JSON has no way to write;
--- use "text" or "binary" for those.
+-- use "text" or "binary" for those. JSON fields require valid UTF-8 strings
+-- and finite numbers in every row format. Bytes fields hold any bytes in all three.
 
 local MAX_INT = 2 ^ 53
-local KINDS = { string = true, int = true, float = true, bool = true, time = true }
+local VALUES = require("lent.VALUES")
+local KINDS = { string = true, int = true, float = true, bool = true, time = true,
+                enum = true, json = true, bytes = true }
 
 -- binary entry tags
-local FALSE, TRUE, INT, FLOAT, STRING = 0, 1, 2, 3, 4
+local FALSE, TRUE, INT, FLOAT, STRING, JSON, BYTES = 0, 1, 2, 3, 4, 5, 6
 
--- Compiles a field list: { name, kind, id, optional? } entries in the order
+-- Compiles a field list: { name, kind, id, optional?, values? } entries in the order
 -- rows should be written. Names start with a letter and hold letters, digits
 -- and "_". Answers { list, byName, byId }.
 function fields(list: { any }): any
@@ -70,6 +76,7 @@ function fields(list: { any }): any
         end
         local kind = f.kind == "time" and "int" or f.kind
         local field = { name = f.name, kind = kind, id = f.id, optional = f.optional == true }
+        if kind == "enum" then field.values = VALUES.enum_values(f.values, where) end
         byName[f.name] = field
         byId[f.id] = field
         out[i] = field
@@ -84,7 +91,15 @@ end
 -- The value checked for `field` before it is written, or an error.
 local function check(field: any, v: any): any
     local kind, ok = field.kind, false
-    if kind == "string" then
+    if kind == "json" then
+        local valid, why = pcall(VALUES.json, v)
+        if not valid then error("ROWCODEC field " .. field.name .. " wants JSON: " .. tostring(why), 3) end
+        return v
+    elseif kind == "enum" then
+        local why = VALUES.enum_error(field.values, v)
+        if why then error("ROWCODEC field " .. field.name .. " " .. why, 3) end
+        return v
+    elseif kind == "string" or kind == "bytes" then
         ok = type(v) == "string"
     elseif kind == "int" then
         ok = is_int(v)
@@ -102,6 +117,9 @@ end
 -- A value read back for `field`, converted where the change of kind loses
 -- nothing, or an error.
 local function coerce(field: any, v: any): any
+    if field.kind == "json" or field.kind == "enum" or field.kind == "bytes" then
+        return check(field, v)
+    end
     if type(v) == "integer" then
         v = integer.tonumber(v)
     end
@@ -144,19 +162,25 @@ end
 -- json ----------------------------------------------------------------------
 
 local function enc_json(schema: any, version: number, row: any): string
-    local out = { _v = version }
+    local out = { '"_v":' .. simdjson.encode(version) }
     for _, f in schema.list do
         local v = row[f.name]
-        if f.kind == "string" and v ~= nil and utf8.len(v) == nil then
+        if (f.kind == "string" or f.kind == "enum") and v ~= nil and utf8.len(v) == nil then
             error("ROWCODEC field " .. f.name .. " is not UTF-8, which a json row needs", 3)
         end
-        out[f.name] = v
+        if v ~= nil then
+            local encoded
+            if f.kind == "json" then encoded = VALUES.json(v)
+            elseif f.kind == "bytes" then encoded = simdjson.encode(VALUES.hex(v))
+            else encoded = simdjson.encode(v) end
+            out[#out + 1] = simdjson.encode(f.name) .. ":" .. encoded
+        end
     end
-    return simdjson.encode(out)
+    return "{" .. table.concat(out, ",") .. "}"
 end
 
 local function dec_json(schema: any, value: string): (any, number)
-    local doc = simdjson.parse(value)
+    local doc = VALUES.parse_json(value, 129)
     local version = doc._v
     if type(version) == "integer" then
         version = integer.tonumber(version)
@@ -167,7 +191,12 @@ local function dec_json(schema: any, value: string): (any, number)
     local row = {}
     for _, f in schema.list do
         local v = doc[f.name]
-        if v ~= nil and v ~= simdjson.null then
+        if v ~= nil and (f.kind == "json" or v ~= simdjson.null) then
+            if f.kind == "bytes" then
+                local ok, decoded = pcall(VALUES.unhex, v)
+                if not ok then error("ROWCODEC field " .. f.name .. " " .. tostring(decoded), 3) end
+                v = decoded
+            end
             row[f.name] = coerce(f, v)
         end
     end
@@ -178,6 +207,16 @@ end
 
 local TEXT_ESCAPE = { ["\\"] = "\\\\", ["\t"] = "\\t", ["\n"] = "\\n", ["\r"] = "\\r" }
 local TEXT_UNESCAPE = { ["\\"] = "\\", t = "\t", n = "\n", r = "\r" }
+
+local function escaped(s: string): string
+    return (string.gsub(s, "[\\\t\n\r]", TEXT_ESCAPE))
+end
+
+local function read_json(field: any, s: string): any
+    local ok, value = pcall(VALUES.parse_json, s)
+    if not ok then error("ROWCODEC field " .. field.name .. " has invalid JSON: " .. tostring(value), 4) end
+    return value
+end
 
 local function num_text(x: number): string
     if x == math.huge then return "inf" end
@@ -191,8 +230,12 @@ local function enc_text(schema: any, version: number, row: any): string
         local v = row[f.name]
         if v ~= nil then
             local s
-            if f.kind == "string" then
-                s = string.gsub(v, "[\\\t\n\r]", TEXT_ESCAPE)
+            if f.kind == "string" or f.kind == "enum" then
+                s = escaped(v)
+            elseif f.kind == "json" then
+                s = escaped(VALUES.json(v))
+            elseif f.kind == "bytes" then
+                s = VALUES.hex(v)
             elseif f.kind == "int" then
                 s = string.format("%.0f", v)
             elseif f.kind == "float" then
@@ -208,7 +251,7 @@ end
 
 local function text_value(field: any, s: string): any
     local kind = field.kind
-    if kind == "string" then
+    if kind == "string" or kind == "enum" or kind == "json" then
         local bad = false
         local out = string.gsub(s, "\\(.?)", function(c)
             local u = TEXT_UNESCAPE[c]
@@ -218,7 +261,12 @@ local function text_value(field: any, s: string): any
         if bad then
             error("ROWCODEC field " .. field.name .. " has a bad text escape", 4)
         end
-        return out
+        if kind == "json" then return read_json(field, out) end
+        return kind == "enum" and coerce(field, out) or out
+    elseif kind == "bytes" then
+        local ok, decoded = pcall(VALUES.unhex, s)
+        if not ok then error("ROWCODEC field " .. field.name .. " " .. tostring(decoded), 4) end
+        return decoded
     elseif kind == "bool" then
         if s == "1" then return true end
         if s == "0" then return false end
@@ -257,13 +305,17 @@ end
 
 local function enc_binary(schema: any, version: number, row: any): string
     local size = 5
+    local payloads = {}
     for _, f in schema.list do
         local v = row[f.name]
         if v ~= nil then
             size += 3
             if f.kind == "int" or f.kind == "float" then
                 size += 8
-            elseif f.kind == "string" then
+            elseif f.kind == "json" then
+                payloads[f.name] = VALUES.json(v)
+                size += 4 + #payloads[f.name]
+            elseif f.kind == "string" or f.kind == "enum" or f.kind == "bytes" then
                 size += 4 + #v
             end
         end
@@ -280,8 +332,10 @@ local function enc_binary(schema: any, version: number, row: any): string
             if kind == "bool" then
                 buffer.writeu8(b, at + 2, v and TRUE or FALSE)
                 at += 3
-            elseif kind == "string" then
-                buffer.writeu8(b, at + 2, STRING)
+            elseif kind == "string" or kind == "enum" or kind == "bytes" or kind == "json" then
+                v = payloads[f.name] or v
+                local tag = kind == "json" and JSON or kind == "bytes" and BYTES or STRING
+                buffer.writeu8(b, at + 2, tag)
                 buffer.writeu32(b, at + 3, #v)
                 buffer.writestring(b, at + 7, v)
                 at += 7 + #v
@@ -318,7 +372,7 @@ local function dec_binary(schema: any, value: string): (any, number)
             need(at, 8)
             v = buffer.readf64(b, at)
             at += 8
-        elseif tag == STRING then
+        elseif tag == STRING or tag == JSON or tag == BYTES then
             need(at, 4)
             local n = buffer.readu32(b, at)
             need(at + 4, n)
@@ -329,6 +383,10 @@ local function dec_binary(schema: any, value: string): (any, number)
         end
         local f = schema.byId[id]
         if f then
+            if (tag == JSON) ~= (f.kind == "json") or (tag == BYTES) ~= (f.kind == "bytes") then
+                error("ROWCODEC field " .. f.name .. " has an incompatible binary kind", 3)
+            end
+            if tag == JSON then v = read_json(f, v) end
             row[f.name] = coerce(f, v)
         end
     end

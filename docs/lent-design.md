@@ -16,12 +16,17 @@ remains.
 | row codecs | `lent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
 | schema language and field ids | `lent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
 | storage layout | `lent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
-| graph catalog and migrations | `lent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
+| graph catalog and migrations with paged index builds | `lent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
 | create, get, update and delete with index upkeep | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| bulk create and unique-index upsert | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | queries and edges | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| query-wide update and delete | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| computed fields, computed on read | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [README](../README.md#what-it-contains) |
+| aggregates: `sum`, `min`, `max`, `aggregate` and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -98,11 +103,11 @@ next id.
 schema can be browsed and linked:
 
 ```
-/lent/version                              bumped by every migration
+/lent/version                              bumped by each schema change
 /lent/compiled                             the whole schema as JSON
 /lent/tables/user/table                    leaf: name, format, next field id
 /lent/tables/user/fields/email             leaf: kind, id, optional, unique, default
-/lent/tables/user/indexes/by_email/spec    leaf: unique
+/lent/tables/user/indexes/by_email/spec    leaf: unique, state while building
 /lent/tables/user/indexes/by_email/on/1    link to the email field's node
 /lent/edges/user_posts/from                link to the user table's node
 /lent/edges/user_posts/to                  link to the post table's node
@@ -110,16 +115,29 @@ schema can be browsed and linked:
 
 At run time lent reads `/lent/compiled` inside the transaction with one
 `GRAPH GET` and caches it for the call. The rest of the tree is for browsing
-and linking. A migration that commits during a transaction changes
-`/lent/compiled`, so that transaction conflicts and runs again.
+and linking. A writer whose cached `/lent/compiled` changes before commit
+conflicts and runs again, including a build page whose schema version stays
+the same.
 
-`MIGRATE` splits a migration into `plan`, which compares the stored schema
-with the declared one and refuses unsafe changes, and `apply`, which drops
-and builds index entries and rewrites the catalog. Both run in one
-transaction today, so an index build reads the whole table at once. Large
-tables will need builds in pages, with the index marked `building` until the
-last page commits, because one transaction has to finish within the
-function deadline.
+`migrate(app, pageSize)` advances a migration by a bounded amount in each
+stored-function call. Its default budget is 1,000 row visits or removed
+index entries across all indexes. The catalog keeps the target schema and
+committed progress, and `done = false` asks the caller to resume with the
+same schema. Completed pages survive a later page's error or timeout.
+
+The target schema becomes active with the first page. Queries use ready
+indexes while unfinished indexes carry `state = "building"`. Writes keep
+building indexes current; a building unique index checks the table for
+duplicates, including rows beyond its cursor. Old entries are removed
+before a replacement builds, and row writes to an affected table are
+refused until its pending drops finish. The last build page commits its
+entries and readiness together. See the [migration reference](../README.md#what-it-contains)
+for limits and recovery.
+
+`plan` compares the stored schema with the declaration. `apply` retains the
+whole-plan operation for a caller that already owns a transaction; it
+refuses a pending paged migration. Applications use `migrate` to manage the
+page transactions.
 
 ## Rules and hooks
 
@@ -139,6 +157,24 @@ catches the error.
 A `time` field is an `int` of Unix milliseconds, and `lent.now()` answers
 `barch.time()`. A call replayed from a Raft log reads the time its entry was
 logged, so a default of `lent.now` stores the same value on every member.
+
+Enum and bytes fields share string key encoding, so their indexes and
+cursor pages follow byte order. Enums carry their allowed strings in the
+catalog. A migration can add choices or relax an enum to a string; removing
+choices is refused to keep existing rows readable.
+
+JSON fields preserve structured values, including the distinction between
+null and a missing field, and between empty arrays and objects. Applications
+use `lent.jsonArray`, `lent.parseJson` and `lent.encodeJson` for those
+distinctions. JSON equality is structural; JSON filters run on decoded
+values and the fields support predicate filters. JSON indexes and ordering
+are refused. Defaults, write inputs and old hook snapshots are copied so
+nested edits keep each row's values independent.
+
+Binary rows store bytes as raw data and JSON values as length-prefixed
+JSON text. Text and JSON rows store bytes as hex. The catalog encodes byte
+and JSON defaults explicitly and restores them in `load`, preserving binary
+bytes and empty JSON arrays across migration pages and reloads.
 
 ## Storage layout
 

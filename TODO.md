@@ -1,37 +1,32 @@
 # lent TODO
 
 This page lists the work that remains on lent, the ORM described in
-[docs/lent-design.md](docs/lent-design.md). The schema language, migrations,
-row reads and writes with index upkeep, queries, edges, edge joins, cursor
-pages, value rules, `time` fields and hooks are built.
-
-## Next
-
-1. **Bulk create and upsert.** Create many rows in one call, and create or
-   update a row by a unique index.
-2. **Update and delete on a query.** `query():where(...):update(values)` and
-   `query():where(...):delete()` for every matching row.
-3. **Paged index builds in `migrate`.** `migrate` builds each index in one
-   transaction, so a large table can exceed the function deadline. Build in
-   pages and mark the index `building` until the last page commits.
+[docs/lent-design.md](docs/lent-design.md). The schema language, migrations
+with paged index builds, row reads and writes with index upkeep, bulk create
+and upsert, query reads and writes, aggregates and `groupBy`, edges, edge
+joins, cursor pages, value rules, `time`, `enum`, `json` and `bytes`
+fields, computed fields and hooks are built.
 
 ## Limits of what is built
 
 - **Dropping a table.** `migrate` refuses a table missing from the schema.
 - **Renaming a field of a `json` table.** Stored `json` rows name their
   fields, so `migrate` refuses the rename until those rows are rewritten.
+- **Removing enum choices.** `migrate` accepts added choices and refuses
+  removing a choice, so stored enum values stay readable.
 - **Unique edges in pessimistic transactions.** Two `link` calls to one row
   at once can deadlock on the shared lock of the unique check.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
   order the two calls.
-- **Hooks as plain tables.** Fields, indexes and edges take plain tables;
-  hooks still need `lent.hook.create(fn)` and the like. A form such as
-  `hooks = { create = { fn } }` would match.
 
 ## Features
 
-- **More field kinds:** enum, json and bytes.
-- **Aggregates:** sum, min, max and group by. `count()` is the only one.
+- **Stored computed fields:** `:computed(fn):stored()` would compute the
+  value on `create` and `update` and store it, so an index can use it.
+  `migrate` would backfill stored rows in pages, and a changed function
+  would need the rows rewritten.
+- **Aggregates over an expression:** `{ fn = "sum", value = function(r) ... end }`
+  for a one-off value that does not belong in the schema.
 - **Privacy rules:** read and write policies per table, as in Go ent. They
   could build on hooks.
 - **Edge fields:** values stored on a link.

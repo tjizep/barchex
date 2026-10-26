@@ -19,7 +19,7 @@ local function log(c, msg)
     c.Log:create { msg = msg }
 end
 
-local function app(extra)
+local function app(extra, form)
     local fields = {
         lent.field.string "title":notEmpty():maxLen(20):match("^%u"),
         lent.field.string "slug":unique():immutable(),
@@ -35,29 +35,48 @@ local function app(extra)
     if extra then
         fields[#fields + 1] = extra
     end
+    local hooks = {
+        create = {
+            function(c, r)
+                r.slug = r.slug or slug(r.title)
+            end,
+            function(c, r)
+                log(c, "create " .. r.slug)
+            end,
+        },
+        update = { function(c, id, r, old)
+            log(c, "update " .. old.title .. " -> " .. r.title)
+        end },
+        delete = { function(c, id, old)
+            log(c, "delete " .. old.slug)
+        end },
+    }
+    if form == "builders" then
+        local built = {}
+        for op, fns in hooks do
+            for _, fn in fns do
+                built[#built + 1] = lent.hook[op](fn)
+            end
+        end
+        hooks = built
+    elseif form == "mixed" then
+        hooks = {
+            lent.hook.create(hooks.create[1]),
+            create = { hooks.create[2] },
+            update = hooks.update,
+            delete = hooks.delete,
+        }
+    end
     return lent.graph {
         lent.schema "Post" {
             fields = fields,
             indexes = { lent.index("created") },
-            hooks = {
-                lent.hook.create(function(c, r)
-                    r.slug = r.slug or slug(r.title)
-                    log(c, "create " .. r.slug)
-                end),
-                lent.hook.update(function(c, id, r, old)
-                    log(c, "update " .. old.title .. " -> " .. r.title)
-                end),
-                lent.hook.delete(function(c, id, old)
-                    log(c, "delete " .. old.slug)
-                end),
-            },
+            hooks = hooks,
         },
         -- a plain table works where a builder does
         lent.schema "Log" { id = "int", fields = { { kind = "string", name = "msg", notEmpty = true } } },
     }
 end
-
-local db = client.open(app())
 
 local function logs(c)
     local out = {}
@@ -80,7 +99,9 @@ function steps.rows(c)
     c.Post:delete(b.id)
     return {
         made.slug .. " " .. made.stars .. " " .. b.stars .. " " .. tostring(made.body),
-        tostring(made.created >= t0 and made.created <= t1 and made.updated >= made.created),
+        -- Function defaults may run in either field order.
+        tostring(made.created >= t0 and made.created <= t1
+            and made.updated >= t0 and made.updated <= t1),
         u.slug .. " " .. tostring(u.created == made.created) .. " "
             .. tostring(u.updated >= made.updated),
         tostring(u2.updated),
@@ -116,7 +137,7 @@ local errors = {
     kind = function(c) c.Post:create { title = "S", slug = 3 } end,
 }
 
-function call(step, mode)
+function call(step, mode, form)
     if step == "migrate" then
         return m.migrate(app()).version
     end
@@ -138,7 +159,7 @@ function call(step, mode)
     if step == "plain" then
         return client.tx(steps.plain, mode == "pessimistic")
     end
-    return db.tx(function(c)
+    return client.open(app(nil, form)).tx(function(c)
         if errors[step] then
             errors[step](c)
             return "no error"
@@ -150,7 +171,8 @@ end
 
 
 def setup(client, space):
-    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+    for name, path in [("VALUES", "lent/values.luau"),
+                       ("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
                        ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
                        ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
         install(client, "lent", name, path)
@@ -160,9 +182,10 @@ def setup(client, space):
 
 
 @pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
-def test_rules_defaults_and_hooks(client, mode):
-    setup(client, "rules_" + mode)
-    assert client.execute_command("CALLF", "RULES", "rows", mode) == [
+@pytest.mark.parametrize("form", ["plain", "builders", "mixed"])
+def test_rules_defaults_and_hooks(client, mode, form):
+    setup(client, "rules_" + mode + "_" + form)
+    assert client.execute_command("CALLF", "RULES", "rows", mode, form) == [
         # the create hook made the slug; stars took its default
         "hello-world 5 0 nil",
         "true",

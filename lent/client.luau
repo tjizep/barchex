@@ -15,6 +15,9 @@
 --       c.User:by("email", "a@b")            -- the row, through by_email
 --       c.User:update(u.id, { name = "bo" }, { "age" })  -- sets name, clears age
 --       c.User:delete(u.id)                  -- true, or false if it was gone
+--       c.User:createMany { { email = "c@d", name = "cy" },
+--                           { email = "e@f", name = "eve" } }
+--       local row, created = c.User:upsert("email", { email = "a@b", name = "al" })
 --
 --       local p = c.Post:create { title = "hi", author = u }    -- links the edge
 --       c.User:link("posts", u.id, p.id)     -- or unlink
@@ -22,6 +25,9 @@
 --           :queryPosts():order("title", "desc"):limit(10):all()
 --       c.User:query():hasPostsWith(function(q) q:where("title", "=", "hi") end)
 --           :withPosts():all()             -- each u.posts holds u's posts
+--       c.Post:query():sum("stars")        -- also min and max
+--       c.Post:query():groupBy("author"):aggregate {
+--           posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }
 --   end)
 --
 -- lent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
@@ -40,6 +46,7 @@ local lay = require("lent.LAYOUT")
 local kc = require("lent.KEYCODEC")
 local mig = require("lent.MIGRATE")
 local SCHEMA = require("lent.SCHEMA")
+local VALUES = require("lent.VALUES")
 
 local function fail(msg: string)
     error("LENT " .. msg, 0)
@@ -51,7 +58,8 @@ Table.__index = Table
 local NO_HOOKS = { create = {}, update = {}, delete = {} }
 
 -- `decl` is the table as lent.schema declared it, for the parts that stay in
--- code: function defaults, validate functions and hooks. nil leaves them out.
+-- code: function defaults, validate functions, hooks and computed fields.
+-- nil leaves them out.
 local function bind(t: any, version: number, pessimistic: boolean?, decl: any?): any
     local byName, edgeByName, code = {}, {}, {}
     for _, f in t.fields do
@@ -67,9 +75,15 @@ local function bind(t: any, version: number, pessimistic: boolean?, decl: any?):
         end
         code[f.name] = f.code
     end
+    local computed = decl and decl.computed or {}
+    local computedByName = {}
+    for _, f in computed do
+        computedByName[f.name] = f
+    end
     return setmetatable({
         t = t, fields = rc.fields(t.fields), byName = byName, edgeByName = edgeByName,
         code = code, hooks = decl and decl.hooks or NO_HOOKS,
+        computed = computed, computedByName = computedByName,
         version = version, lock = pessimistic == true, where = "table " .. t.name,
     }, Table)
 end
@@ -79,6 +93,18 @@ local function get(self: any, key: string, exclusive: boolean?): string?
         return barch.store.get(key, true)
     end
     return barch.store.get(key)
+end
+
+local function writable(self: any)
+    if self.dropping then
+        fail(self.where .. " indexes are being replaced; resume MIGRATE before writing rows")
+    end
+end
+
+local function ready(self: any, ix: any)
+    if ix.state == "building" then
+        fail(self.where .. " index " .. ix.name .. " is building; run MIGRATE until it completes")
+    end
 end
 
 local function check_pk(self: any, pk: any)
@@ -91,7 +117,34 @@ local function check_pk(self: any, pk: any)
     end
 end
 
--- The row at pk, filled with defaults, or nil. A pessimistic caller about
+local function fits_kind(f: any, v: any): boolean
+    if f.kind == "int" then
+        return type(v) == "number" and v == math.floor(v)
+    elseif f.kind == "float" then
+        return type(v) == "number" and v == v
+    elseif f.kind == "bool" then
+        return type(v) == "boolean"
+    elseif f.kind == "time" or f.kind == "enum" or f.kind == "json" then
+        return SCHEMA.broken(f, v) == nil
+    end
+    return type(v) == "string"
+end
+
+-- Sets each computed field of row r to fn(r), in declaration order, so a
+-- computed field sees the ones declared before it.
+local function compute(self: any, r: any): any
+    for _, f in self.computed do
+        local v = f.fn(r)
+        if v ~= nil and not fits_kind(f, v) then
+            fail(self.where .. " field " .. f.name .. " is a computed " .. f.kind
+                .. ", and its function answered " .. tostring(v))
+        end
+        r[f.name] = v
+    end
+    return r
+end
+
+-- The row at pk, filled with defaults and computed fields, or nil. A pessimistic caller about
 -- to write the row reads it with the exclusive lock.
 local function read(self: any, pk: any, exclusive: boolean?): any
     local v = get(self, lay.row(self.t, pk), exclusive)
@@ -100,7 +153,16 @@ local function read(self: any, pk: any, exclusive: boolean?): any
     end
     local r = lay.fill(self.t, (rc.decode(self.fields, v)))
     r.id = pk
-    return r
+    return compute(self, r)
+end
+
+local function no_field(self: any, k: any)
+    if self.computedByName[k] then
+        fail(self.where .. " field " .. k .. " is computed, so a row cannot set it")
+    end
+    if self.byName[k] == nil then
+        fail(self.where .. " has no field " .. tostring(k))
+    end
 end
 
 local function set_fields(self: any, r: any, values: any)
@@ -111,11 +173,32 @@ local function set_fields(self: any, r: any, values: any)
         if self.edgeByName[k] then
             fail(self.where .. " edge " .. k .. " changes with link and unlink")
         end
-        if self.byName[k] == nil then
-            fail(self.where .. " has no field " .. tostring(k))
-        end
+        no_field(self, k)
         r[k] = v
     end
+end
+
+local function clone_row(self: any, row: any): any
+    local copy = table.clone(row)
+    for _, f in self.t.fields do
+        if f.kind == "json" and copy[f.name] ~= nil then
+            local ok, value = pcall(VALUES.copy_json, copy[f.name])
+            if not ok then fail(self.where .. " field " .. f.name .. " wants JSON: " .. tostring(value)) end
+            copy[f.name] = value
+        end
+    end
+    return copy
+end
+
+local function same_value(f: any, a: any, b: any): boolean
+    if f.kind == "json" then return VALUES.equal_json(a, b) end
+    return a == b
+end
+
+local function describe(f: any, v: any): string
+    if f.kind == "bytes" and type(v) == "string" then return "0x" .. VALUES.hex(v) end
+    if f.kind == "json" then return VALUES.json(v) end
+    return string.format("%q", tostring(v))
 end
 
 -- Checks row `r` before it is stored over `old` (nil for a new row): every
@@ -123,13 +206,15 @@ end
 -- changed keeps its field's rules and validate functions.
 local function check_row(self: any, r: any, old: any)
     for k in r do
-        if self.byName[k] == nil then
-            fail(self.where .. " has no field " .. tostring(k))
-        end
+        no_field(self, k)
     end
     for _, f in self.t.fields do
         local v = r[f.name]
-        if old == nil or v ~= old[f.name] then
+        if f.kind == "json" and v ~= nil then
+            local why = SCHEMA.broken(f, v)
+            if why then fail(self.where .. " field " .. f.name .. " " .. why) end
+        end
+        if old == nil or not same_value(f, v, old[f.name]) then
             local where = self.where .. " field " .. f.name
             if old and f.immutable then
                 fail(where .. " is immutable, so update cannot change it")
@@ -142,7 +227,7 @@ local function check_row(self: any, r: any, old: any)
                 for _, fn in self.code[f.name] and self.code[f.name].validate or {} do
                     local ok = fn(v)
                     if ok == false or type(ok) == "string" then
-                        fail(where .. " refuses " .. string.format("%q", tostring(v))
+                        fail(where .. " refuses " .. describe(f, v)
                             .. (type(ok) == "string" and ": " .. ok or ""))
                     end
                 end
@@ -157,17 +242,38 @@ local function run_hooks(self: any, op: string, ...: any)
     end
 end
 
--- Raises an error if another row holds the unique entry `key`.
+local function duplicate(self: any, ix: any, other: any, r: any)
+    local parts = {}
+    for i, f in ix.on do
+        local value = self.byName[f].kind == "bytes" and describe(self.byName[f], r[f]) or tostring(r[f])
+        parts[i] = f .. "=" .. value
+    end
+    fail(self.where .. " index " .. ix.name .. " is unique, and row " .. other
+        .. " already has " .. table.concat(parts, " "))
+end
+
+-- A building unique index also checks rows its build has not reached yet.
 local function check_free(self: any, ix: any, key: string, pk: any, r: any)
     local other = get(self, key, true)
     if other ~= nil and lay.unique_pk(self.t, other) ~= pk then
-        local parts = {}
-        for i, f in ix.on do
-            parts[i] = f .. "=" .. tostring(r[f])
-        end
-        fail(self.where .. " index " .. ix.name .. " is unique, and row " .. other
-            .. " already has " .. table.concat(parts, " "))
+        duplicate(self, ix, other, r)
     end
+    if ix.state == "building" then
+        lay.walk(lay.row(self.t), function(k)
+            local otherPk = lay.row_pk(self.t, k)
+            if otherPk ~= pk then
+                local row = read(self, otherPk)
+                if row and lay.entry(self.t, ix, row, otherPk) == key then
+                    duplicate(self, ix, tostring(otherPk), r)
+                end
+            end
+        end)
+    end
+end
+
+-- Pre-existing duplicates can share a key while a unique build is pending.
+local function owns_entry(self: any, ix: any, key: string, pk: any): boolean
+    return not ix.unique or ix.state ~= "building" or get(self, key, true) == tostring(pk)
 end
 
 -- Stores row `r` at pk, given the row it replaces (nil for a new row), and
@@ -183,6 +289,7 @@ local function store(self: any, pk: any, old: any, r: any, counter: string?): an
             if key and ix.unique then
                 check_free(self, ix, key, pk, r)
             end
+            if was and not owns_entry(self, ix, was, pk) then was = nil end
             moves[#moves + 1] = { was, key, v }
         end
     end
@@ -354,6 +461,7 @@ end
 -- Adds a row and answers it with its new id. A value under an edge's name
 -- links the row: an id or a row, or a list of them.
 function Table:create(values: { [string]: any }): any
+    writable(self)
     local r, plain, links = {}, {}, {}
     for k, v in values do
         local e = self.edgeByName[k]
@@ -370,6 +478,7 @@ function Table:create(values: { [string]: any }): any
         end
     end
     lay.fill(self.t, r)
+    r = clone_row(self, r)
     run_hooks(self, "create", r)
     check_row(self, r, nil)
     -- a uuid needs no shared key, so creates in one table do not conflict
@@ -394,7 +503,33 @@ function Table:create(values: { [string]: any }): any
             write_link(self, l[1], pk, other)
         end
     end
-    return r
+    return compute(self, r)
+end
+
+-- Creates each row in input order in the caller's transaction. If the caller
+-- catches an error, earlier rows and the hooks' writes stay in the transaction.
+function Table:createMany(rows: { any }): { any }
+    local where = self.where .. " createMany"
+    if type(rows) ~= "table" then
+        fail(where .. " takes a list of rows")
+    end
+    local n = 0
+    for i in rows do
+        if type(i) ~= "number" or i < 1 or i ~= math.floor(i) then
+            fail(where .. " takes a list of rows")
+        end
+        n += 1
+    end
+    for i = 1, n do
+        if type(rows[i]) ~= "table" then
+            fail(where .. " row " .. i .. " must be a table of values")
+        end
+    end
+    local out = table.create(n)
+    for i = 1, n do
+        out[i] = self:create(rows[i])
+    end
+    return out
 end
 
 -- The row with this id, or nil.
@@ -403,9 +538,7 @@ function Table:get(pk: any): any
     return read(self, pk)
 end
 
--- The row whose values match a unique index, or nil. `name` is the index's
--- name, or a field name whose `by_<field>` index is unique.
-function Table:by(name: string, ...: any): any
+local function unique_index(self: any, name: string): any
     local ix
     for _, i in self.t.indexes do
         if i.name == name or i.name == "by_" .. name then
@@ -415,6 +548,14 @@ function Table:by(name: string, ...: any): any
     if ix == nil or not ix.unique then
         fail(self.where .. " has no unique index " .. tostring(name))
     end
+    ready(self, ix)
+    return ix
+end
+
+-- The row whose values match a unique index, or nil. `name` is the index's
+-- name, or a field name whose `by_<field>` index is unique.
+function Table:by(name: string, ...: any): any
+    local ix = unique_index(self, name)
     local values = { ... }
     if select("#", ...) ~= #ix.on then
         fail(self.where .. " index " .. ix.name .. " takes " .. #ix.on .. " values, got "
@@ -427,6 +568,7 @@ end
 -- Sets the fields in `values` and clears the fields named in `clear`, then
 -- answers the stored row. Raises an error if there is no row with this id.
 function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): any
+    writable(self)
     check_pk(self, pk)
     local old = read(self, pk, true)
     if old == nil then
@@ -434,6 +576,9 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
     end
     local r = table.clone(old)
     r.id = nil
+    for _, f in self.computed do
+        r[f.name] = nil
+    end
     values = values or {}
     set_fields(self, r, values)
     local cleared = {}
@@ -447,23 +592,47 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
             r[name] = code.update()
         end
     end
-    run_hooks(self, "update", pk, r, table.clone(old))
+    r = clone_row(self, r)
+    run_hooks(self, "update", pk, r, clone_row(self, old))
     check_row(self, r, old)
-    return store(self, pk, old, r)
+    return compute(self, store(self, pk, old, r))
+end
+
+-- Creates a row or updates the row selected by the unique fields in values.
+-- All indexed fields must be supplied before defaults and hooks run. The
+-- unique key is locked exclusively in a pessimistic transaction.
+function Table:upsert(name: string, values: { [string]: any }): (any, boolean)
+    local ix = unique_index(self, name)
+    if type(values) ~= "table" then
+        fail(self.where .. " upsert takes a table of values")
+    end
+    local on = table.create(#ix.on)
+    for i, fname in ix.on do
+        if values[fname] == nil then
+            fail(self.where .. " upsert index " .. ix.name .. " needs a value for " .. fname)
+        end
+        on[i] = values[fname]
+    end
+    local pk = get(self, lay.index(self.t, ix, on), true)
+    if pk == nil then
+        return self:create(values), true
+    end
+    return self:update(lay.unique_pk(self.t, pk), values), false
 end
 
 -- Removes the row, its index entries and its edges. Answers false if there
 -- was no row.
 function Table:delete(pk: any): boolean
+    writable(self)
     check_pk(self, pk)
     local old = read(self, pk, true)
     if old == nil then
         return false
     end
-    run_hooks(self, "delete", pk, table.clone(old))
+    run_hooks(self, "delete", pk, clone_row(self, old))
     for _, ix in self.t.indexes do
         local key = lay.entry(self.t, ix, old, pk)
-        if key then
+        if key and owns_entry(self, ix, key, pk) then
             barch.store.remove(key)
         end
     end
@@ -526,7 +695,7 @@ local function kind_of(tbl: any, field: string): string
     if field == "id" then
         return lay.id_kind(tbl.t)
     end
-    local f = tbl.byName[field]
+    local f = tbl.byName[field] or tbl.computedByName[field]
     if f == nil then
         fail(tbl.where .. " has no field " .. tostring(field))
     end
@@ -540,6 +709,7 @@ local function fits(kind: string, v: any): boolean
     if kind == "uuid" then
         return kc.is_uuid(v)
     end
+    if kind == "enum" or kind == "bytes" then return type(v) == "string" end
     return type(v) == (kind == "string" and "string" or "boolean")
 end
 
@@ -550,8 +720,8 @@ function Table:query(): any
 end
 
 -- Keeps the rows where `field op value` holds, op being one of = ~= < <= >
--- >=. A field without a value only matches `= nil`. where(fn) keeps the
--- rows for which fn(row) answers true.
+-- >=. A missing value equals nil, differs from non-nil values and fails
+-- range comparisons. where(fn) keeps rows for which fn(row) answers true.
 function Query:where(field: any, op: string?, value: any): any
     if type(field) == "function" then
         self.preds[#self.preds + 1] = field
@@ -562,10 +732,14 @@ function Query:where(field: any, op: string?, value: any): any
     if not OPS[op] then
         fail(tbl.where .. " query has no operator " .. tostring(op))
     end
-    if RANGE[op] and kind == "bool" then
-        fail(tbl.where .. " field " .. field .. " is bool, which has no order")
+    if RANGE[op] and (kind == "bool" or kind == "json") then
+        fail(tbl.where .. " field " .. field .. " is " .. kind .. ", which has no order")
     end
-    if (value ~= nil or RANGE[op]) and not fits(kind, value) then
+    if kind == "json" and value ~= nil then
+        local ok, copy = pcall(VALUES.copy_json, value)
+        if not ok then fail(tbl.where .. " field " .. field .. " wants JSON: " .. tostring(copy)) end
+        value = copy
+    elseif (value ~= nil or RANGE[op]) and not fits(kind, value) then
         fail(tbl.where .. " field " .. field .. " is " .. kind .. ", got " .. tostring(value))
     end
     self.conds[#self.conds + 1] = { field = field, op = op, value = value, kind = kind }
@@ -575,7 +749,9 @@ end
 -- Orders the rows by `field`, "asc" (the default) or "desc". Rows with the
 -- same value come in id order, and a field without a value sorts first.
 function Query:order(field: string, dir: string?): any
-    kind_of(self.tbl, field)
+    if kind_of(self.tbl, field) == "json" then
+        fail(self.tbl.where .. " field " .. field .. " is json, which has no order")
+    end
     if dir ~= nil and dir ~= "asc" and dir ~= "desc" then
         fail(self.tbl.where .. " query order takes asc or desc, got " .. tostring(dir))
     end
@@ -673,8 +849,10 @@ end
 local function holds(c: any, v: any): boolean
     local w = c.value
     if c.op == "=" then
+        if c.kind == "json" then return VALUES.equal_json(v, w) end
         return v == w
     elseif c.op == "~=" then
+        if c.kind == "json" then return not VALUES.equal_json(v, w) end
         return v ~= w
     elseif v == nil then
         return false
@@ -758,7 +936,9 @@ local function index_plan(q: any): any
         sources[#sources + 1] = ix
     end
     for _, ix in sources do
-        if q.use == nil or q.use == ix.name then
+        if ix.state == "building" then
+            if q.use == ix.name then ready(tbl, ix) end
+        elseif q.use == nil or q.use == ix.name then
             local values = {}
             for i, f in ix.on do
                 if eq[f] == nil then
@@ -1050,6 +1230,242 @@ function Query:count(): number
     return #rows(self)
 end
 
+-- aggregates -------------------------------------------------------------------
+
+local AGGREGATES = { count = true, sum = true, min = true, max = true }
+
+-- Checks the aggregate `name` = { fn, field? }.
+local function aggregate_spec(tbl: any, name: any, spec: any): any
+    if type(name) ~= "string" or type(spec) ~= "table" then
+        fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
+    end
+    local at = tbl.where .. " query aggregate " .. name
+    for k in spec do
+        if k ~= "fn" and k ~= "field" then
+            fail(at .. " has no option " .. tostring(k))
+        end
+    end
+    local fn, field = spec.fn, spec.field
+    if not AGGREGATES[fn] then
+        fail(at .. " has no function " .. tostring(fn) .. "; use count, sum, min or max")
+    end
+    if field == nil then
+        if fn ~= "count" then
+            fail(at .. " needs a field for " .. fn)
+        end
+        return { name = name, fn = fn }
+    end
+    local kind = kind_of(tbl, field)
+    if fn == "sum" and kind ~= "int" and kind ~= "float" then
+        fail(tbl.where .. " field " .. field .. " is " .. kind .. ", so sum needs int or float")
+    end
+    if (fn == "min" or fn == "max") and kind == "json" then
+        fail(tbl.where .. " field " .. field .. " is json, which has no order")
+    end
+    return { name = name, fn = fn, field = field }
+end
+
+-- Adds row r to aggregate a's running value acc. Rows without a value for
+-- the field are skipped.
+local function fold(a: any, acc: any, r: any): any
+    if a.fn == "count" then
+        if a.field == nil or r[a.field] ~= nil then
+            return (acc or 0) + 1
+        end
+        return acc
+    end
+    local v = r[a.field]
+    if v == nil then
+        return acc
+    elseif a.fn == "sum" then
+        return (acc or 0) + v
+    elseif acc == nil then
+        return v
+    elseif a.fn == "min" then
+        if less(v, acc) then return v end
+        return acc
+    end
+    if less(acc, v) then return v end
+    return acc
+end
+
+-- Checks a groupBy key: a field, or an edge with one row at its far end,
+-- which groups by the linked row's id.
+local function group_key(tbl: any, name: any): any
+    if type(name) ~= "string" then
+        fail(tbl.where .. " query groupBy takes field or edge names, got " .. tostring(name))
+    end
+    if name == "id" or tbl.byName[name] or tbl.computedByName[name] then
+        local kind = kind_of(tbl, name)
+        if kind == "json" then
+            fail(tbl.where .. " field " .. name .. " is json, so groupBy cannot use it")
+        end
+        return { name = name, kind = kind }
+    end
+    local e = tbl.edgeByName[name]
+    if e == nil then
+        fail(tbl.where .. " has no field or edge " .. name)
+    end
+    if not one(tbl, e) then
+        fail(tbl.where .. " edge " .. name .. " can link a row to many rows, so groupBy"
+            .. " cannot use it")
+    end
+    return { name = name, kind = lay.id_kind(tbl.peers[e.target].t), e = e }
+end
+
+-- The id that row pk links to through edge e, or nil.
+local function linked_id(tbl: any, e: any, pk: any): any
+    local out
+    linked(tbl.allEdges[e.store], e.dir == "to", pk, function(other)
+        out = other
+        return true
+    end)
+    return out
+end
+
+-- One row per group of q's rows, in the order of the group keys, with the
+-- keys' values and each aggregate of spec.
+local function aggregate(q: any, keys: { any }, spec: any): { any }
+    local tbl = q.tbl
+    if type(spec) ~= "table" then
+        fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
+    end
+    local aggs = {}
+    for name, s in spec do
+        aggs[#aggs + 1] = aggregate_spec(tbl, name, s)
+    end
+    local kinds = {}
+    for i, k in keys do
+        if spec[k.name] ~= nil then
+            fail(tbl.where .. " query aggregate " .. k.name .. " has the name of a groupBy key")
+        end
+        kinds[i] = k.kind
+    end
+    local groups, list = {}, {}
+    for _, r in rows(q) do
+        local values = {}
+        for i, k in keys do
+            if k.e then
+                values[i] = linked_id(tbl, k.e, r.id)
+            else
+                values[i] = r[k.name]
+            end
+        end
+        -- key text sorts groups the way an index sorts their values
+        local key = kc.pack(kinds, values)
+        local g = groups[key]
+        if g == nil then
+            g = { key = key, values = values, acc = {} }
+            groups[key] = g
+            list[#list + 1] = g
+        end
+        for _, a in aggs do
+            g.acc[a.name] = fold(a, g.acc[a.name], r)
+        end
+    end
+    if #keys == 0 and #list == 0 then
+        list[1] = { key = "", values = {}, acc = {} }
+    end
+    table.sort(list, function(a, b)
+        return a.key < b.key
+    end)
+    local out = {}
+    for i, g in list do
+        local row = {}
+        for j, k in keys do
+            row[k.name] = g.values[j]
+        end
+        for _, a in aggs do
+            local v = g.acc[a.name]
+            if v == nil and (a.fn == "count" or a.fn == "sum") then
+                v = 0
+            end
+            row[a.name] = v
+        end
+        out[i] = row
+    end
+    return out
+end
+
+-- One row with each aggregate of spec over the matching rows, such as
+-- { posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }.
+function Query:aggregate(spec: { [string]: any }): any
+    return aggregate(self, {}, spec)[1]
+end
+
+-- The sum of `field` over the matching rows, 0 when none has a value.
+function Query:sum(field: string): number
+    return self:aggregate({ sum = { fn = "sum", field = field } }).sum
+end
+
+-- The least value of `field` among the matching rows, or nil.
+function Query:min(field: string): any
+    return self:aggregate({ min = { fn = "min", field = field } }).min
+end
+
+-- The greatest value of `field` among the matching rows, or nil.
+function Query:max(field: string): any
+    return self:aggregate({ max = { fn = "max", field = field } }).max
+end
+
+local Grouped = {}
+Grouped.__index = Grouped
+
+-- Groups the matching rows by the values of fields, or by the row linked
+-- through an edge with one row at its far end. Call aggregate(spec) on the
+-- result.
+function Query:groupBy(...: string): any
+    local names = { ... }
+    if #names == 0 then
+        fail(self.tbl.where .. " query groupBy takes at least one field or edge")
+    end
+    local keys = {}
+    for i, name in names do
+        keys[i] = group_key(self.tbl, name)
+    end
+    return setmetatable({ q = self, keys = keys }, Grouped)
+end
+
+-- One row per group, in the order of the group keys, with the keys and
+-- each aggregate of spec.
+function Grouped:aggregate(spec: { [string]: any }?): { any }
+    return aggregate(self.q, self.keys, spec or {})
+end
+
+-- Updates the selected rows in query order, with the same values and clear
+-- list as Table:update. Select every id before writes can move index entries
+-- or change which rows match. Answers how many rows were updated.
+function Query:update(values: { [string]: any }?, clear: { string }?): number
+    local tbl = self.tbl
+    if values ~= nil and type(values) ~= "table" then
+        fail(tbl.where .. " query update takes a table of values")
+    end
+    if clear ~= nil and type(clear) ~= "table" then
+        fail(tbl.where .. " query update clear takes a list of fields")
+    end
+    set_fields(tbl, {}, values or {})
+    for _, name in clear or {} do
+        set_fields(tbl, {}, { [name] = true })
+    end
+    local ids = self:ids()
+    for _, id in ids do
+        tbl:update(id, values, clear)
+    end
+    return #ids
+end
+
+-- Deletes the selected rows in query order and answers how many were removed.
+-- Capture all ids before deleting rows or their edges changes the selection.
+function Query:delete(): number
+    local ids, n = self:ids(), 0
+    for _, id in ids do
+        if self.tbl:delete(id) then
+            n += 1
+        end
+    end
+    return n
+end
+
 -- How the query reads: the index, the fields it matches with = and the
 -- range field, and "then sort" when the rows are sorted after reading.
 function Query:explain(): string
@@ -1119,9 +1535,17 @@ function client(pessimistic: boolean?, app: any?): any
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
     end
-    local c = {}
+    local c, dropping = {}, {}
+    if compiled.migration then
+        local work = compiled.migration
+        for i = work.at, #work.steps do
+            local step = work.steps[i]
+            if step.op == "drop" then dropping[step.table] = true end
+        end
+    end
     for _, t in compiled.tables do
         c[t.name] = bind(t, compiled.version, pessimistic, app and app.tables[t.name])
+        c[t.name].dropping = dropping[t.key]
     end
     for name in app and app.tables or {} do
         if c[name] == nil then
@@ -1218,6 +1642,11 @@ local function check(): string?
     if c.T:query():where("n", ">=", 5):explain() ~= "by_n range n"
         or c.T:query():where("n", ">=", 5):count() ~= 1 then
         return "plan " .. c.T:query():where("n", ">=", 5):explain()
+    end
+    local groups = c.U:query():groupBy("t"):aggregate { n = { fn = "count" } }
+    if c.U:query():sum("v") ~= 3 or c.U:query():max("v") ~= 2 or #groups ~= 1
+        or groups[1].t ~= 1 or groups[1].n ~= 2 then
+        return "aggregates"
     end
     c.T:delete(1)
     if c.U:query():where("id", "=", u1.id):queryT():count() ~= 0 then

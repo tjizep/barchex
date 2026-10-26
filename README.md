@@ -262,6 +262,8 @@ local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
 | `bool` | `false`, `true` | `false` first |
 | `uuid` | 36 lowercase characters, as `barch.uuid()` answers | the uuid's text order |
 | `time` | as `int`, for Unix milliseconds | numeric |
+| `enum` | a string label; SCHEMA and ROWCODEC check the allowed values | byte order of the label |
+| `bytes` | any bytes in a Luau string | the same byte order as `string` |
 
 `nil` encodes as null for every kind and sorts before every value. `encode`
 raises an error for a value of the wrong kind, a fractional or out-of-range
@@ -290,15 +292,20 @@ local row, version, format = rc.decode(users, barch.store.get("lent.r.user.1"))
 | field key | required | values |
 |---|---|---|
 | `name` | yes | a letter, then letters, digits and `_` |
-| `kind` | yes | `string`, `int`, `float`, `bool`, or `time`, which is stored as an `int` |
+| `kind` | yes | `string`, `int`, `float`, `bool`, `time`, `enum`, `json` or `bytes`; `time` uses integer storage |
 | `id` | yes | 1 to 65535, unique in the table; keep it when the field is renamed |
 | `optional` | no | `true` lets the row leave the field nil; default `false` |
+| `values` | for `enum` | a non-empty list of distinct, non-empty UTF-8 strings |
 
 | format | stored value | limits |
 |---|---|---|
-| `json` | a JSON object keyed by field name, with the version in `_v` | strings must be UTF-8; no infinite floats |
-| `text` | `t<version>`, then a tab and `<id>=<value>` per field | none |
-| `binary` | `b`, a u32 version, then an id, a tag and a value per field | none |
+| `json` | a JSON object keyed by field name, with the version in `_v` | string fields must be UTF-8; floats must be finite; bytes use hexadecimal strings |
+| `text` | `t<version>`, then a tab and `<id>=<value>` per field | bytes use hexadecimal strings; JSON values use escaped JSON text |
+| `binary` | `b`, a u32 version, then an id, a tag and a value per field | bytes use raw data; JSON values use length-prefixed JSON text |
+
+Bytes round-trip in all three formats. Hexadecimal storage takes two
+characters per byte in `json` and `text` rows; use `binary` for compact byte
+storage. JSON field validation applies in every row format.
 
 `encode` raises an error for a key the fields do not define, a missing value
 for a field that is not optional, a value of the wrong kind, NaN, and a
@@ -307,7 +314,11 @@ row, the schema version it was written with and the format. A row written
 with an older field list reads with the current one: added fields are nil,
 values for removed fields are skipped, an `int` value reads into a `float`
 field, and a whole-number `float` value in range reads into an `int` field.
-Other kind changes raise an error until the rows are rewritten. `lent.ROWCODEC` runs the module's self-check and answers `ok`.
+Enum values use string storage, so they also read as strings. Use MIGRATE
+to check a schema change's storage compatibility. `lent.ROWCODEC` runs the
+module's self-check and answers `ok`. The codecs and schema use
+`lent.VALUES` for structured value handling; install it with the other lent
+modules. `lent.VALUES` also answers `ok` for its self-check.
 
 SCHEMA declares lent tables in Luau. `lent.schema` checks one table and
 `lent.graph` checks the tables together; each raises an error that starts with
@@ -338,6 +349,9 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | builder | modifiers |
 |---|---|
 | `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
+| `lent.field.enum` | the same modifiers, plus required `:values("choice", ...)` |
+| `lent.field.bytes` | the same modifiers and byte-length rules |
+| `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
 | `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
 | `lent.edge.to "name" "Table"` | `:unique()` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
@@ -358,7 +372,7 @@ local Post = lent.schema "Post" {
 
 | plain table | keys |
 |---|---|
-| field | `kind` and `name` (required), `optional`, `unique`, `default`, `was`, and the value rules below; `validate` takes a function or a list of them |
+| field | `kind` and `name` (required), `values` (required for `enum`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `unique`, `name` |
 | edge | `dir`, `"to"` or `"from"`, `name` and `target` (required), `ref`, `unique` |
 
@@ -381,6 +395,55 @@ the current time that way, from `barch.time()`. In a call replayed from a
 Raft log, it answers the time the entry was logged, so every member stores
 the same value.
 
+Enums hold one of the strings listed in `:values`. The choices must be
+distinct, non-empty UTF-8 strings. Enum fields support indexes, unique
+constraints, comparisons and cursor pages. Their order is the byte order
+of their labels, so changing the declaration order leaves query ordering
+the same.
+
+Bytes fields hold Luau strings containing arbitrary bytes, including NUL
+and invalid UTF-8. They support indexes, unique constraints, comparisons,
+cursor pages and byte-length rules. JSON fields hold structured values:
+
+```lua
+local Document = lent.schema "Document" {
+    fields = {
+        lent.field.enum "state":values("draft", "published"):default("draft"),
+        lent.field.bytes "content":optional():maxLen(1048576),
+        lent.field.json "metadata":default({ tags = lent.jsonArray(), properties = {} }),
+    },
+    indexes = { lent.index("state") },
+}
+```
+
+For JSON, use plain tables with string keys for objects and dense lists
+numbered from 1 for arrays. `{}` is an empty object; use `lent.jsonArray()`
+for an empty array, or `lent.jsonArray(list)` to mark a list as an array.
+Strings, finite numbers and booleans are also valid JSON values. Use
+`simdjson.null` for JSON null. Leave a field `nil` to use its create default,
+or mark it `:optional()` to allow a missing value.
+
+Use `lent.parseJson(text)` to parse JSON input and
+`lent.encodeJson(row.metadata)` to emit a JSON field value. These helpers
+preserve empty arrays and objects. JSON strings and object keys must be
+UTF-8, object keys must be unique, and nesting is limited to 128 object or
+array levels. Cycles, sparse or mixed-key arrays, functions, NaN and infinity
+raise an error. `lent.parseJson` preserves signed 64-bit integer tokens
+exactly; values outside the exact Luau-number range (`±2^53`) use barch's
+native `integer` type. Other JSON numbers use Luau numbers.
+
+`where("metadata", "=", value)` and `~=` compare JSON structurally: object
+key order is ignored, array order matters, and an empty array differs from
+an empty object. Use `where(fn)` to filter nested properties. JSON fields
+reject indexes and unique constraints when the schema loads, and reject
+ordering and range comparisons in queries.
+
+Each row receives its own copy of a JSON default. Writes copy JSON inputs
+before hooks run, and hooks receive an independent `old` snapshot. An
+immutable JSON field compares by value, so an equal replacement is allowed
+and an in-place nested change is refused. Updating a JSON field replaces
+its whole value.
+
 Value rules check each value that `create` and `update` write:
 
 ```lua
@@ -396,9 +459,9 @@ lent.schema "Post" {
         lent.field.time "updated_at":default(lent.now):updateDefault(lent.now),
     },
     hooks = {
-        lent.hook.create(function(c, row)
+        create = { function(c, row)
             row.slug = row.slug or (string.gsub(string.lower(row.title), "%W+", "-"))
-        end),
+        end },
     },
 }
 ```
@@ -406,27 +469,29 @@ lent.schema "Post" {
 | modifier | fields | effect |
 |---|---|---|
 | `:min(n)`, `:max(n)` | `int`, `float`, `time` | the value is at least or at most `n` |
-| `:minLen(n)`, `:maxLen(n)` | `string` | the value's length in bytes is at least or at most `n` |
-| `:notEmpty()` | `string` | the same as `:minLen(1)` |
-| `:match(pattern)` | `string` | the value contains a match for the Luau string pattern; anchor it with `^` and `$` to match the whole value |
+| `:minLen(n)`, `:maxLen(n)` | `string`, `enum`, `bytes` | the value's length in bytes is at least or at most `n` |
+| `:notEmpty()` | `string`, `enum`, `bytes` | the same as `:minLen(1)` |
+| `:match(pattern)` | `string`, `enum` | the value contains a match for the Luau string pattern; anchor it with `^` and `$` to match the whole value |
 | `:validate(fn)` | any | `fn(value)` refuses the value by answering `false` or a message, or by raising an error; a field may have several |
 | `:immutable()` | any | `update` refuses to change the value |
 | `:default(fn)` | any | `create` calls `fn()` when the row leaves the field nil |
 | `:updateDefault(fn)` | any but immutable | `update` calls `fn()` when the update leaves the field unchanged |
 
-`:min`, `:max`, `:minLen`, `:maxLen`, `:match` and `:immutable` are stored in
-the catalog, so every client of the space enforces them once `migrate` has
-run. A new rule applies to later writes; it leaves stored rows as they are.
+Enum choices, `:min`, `:max`, `:minLen`, `:maxLen`, `:match` and `:immutable`
+are stored in the catalog, so every client of the space enforces them once
+`migrate` has run. A new rule applies to later writes; it leaves stored rows
+as they are.
 `update` checks only the values it changes.
 
 Functions stay in code: `:validate`, `:updateDefault`, a function
-`:default`, and hooks run only in a client opened with the graph; see
+`:default`, `:computed` and hooks run only in a client opened with the graph; see
 `lent.open` under CLIENT. A function default fills only new rows, so a new
 required field also needs a value default, or `:optional()`, for the rows
 stored before it.
 
-`lent.hook.create(fn)`, `lent.hook.update(fn)` and `lent.hook.delete(fn)` run
-before the write, inside its transaction, in the order they are listed:
+Declare hooks under `create`, `update` and `delete`, each with a list of
+functions as in the example above. Each list is optional and defaults to
+empty. Hooks run before the write, inside its transaction, in list order:
 
 | hook | called as | runs |
 |---|---|---|
@@ -434,10 +499,54 @@ before the write, inside its transaction, in the order they are listed:
 | `update` | `fn(c, id, row, old)` | after `updateDefault`, before the value rules |
 | `delete` | `fn(c, id, old)` | when the row exists, before it is removed |
 
+`lent.hook.create(fn)`, `lent.hook.update(fn)` and `lent.hook.delete(fn)` also
+declare hooks as list entries, such as `hooks = { lent.hook.create(fn) }`.
+You can combine these entries with the named operation lists. For each
+operation, the builder entries run in list order, followed by the functions
+in its named list. Unknown operation names, invalid lists and non-function
+entries in a named list raise a `SCHEMA` error when the schema loads.
+
 A hook may change `row` and may read and write other tables through `c`.
 An error it raises refuses the write. Writes a hook made before a refusal
 stay in the transaction, so a caller that catches the error and goes on
 keeps them.
+
+Use `:computed(fn)` for a value derived from the row each time it is read,
+such as the time between two `time` fields:
+
+```lua
+lent.schema "Shift" {
+    fields = {
+        lent.field.time "clockIn",
+        lent.field.time "clockOut":optional(),
+        lent.field.int "worked":computed(function(r)
+            return r.clockOut and r.clockOut - r.clockIn   -- nil while open
+        end),
+    },
+}
+-- total hours per user
+c.Shift:query():groupBy("user"):aggregate { worked = { fn = "sum", field = "worked" } }
+```
+
+The client calls `fn(row)` for every row it answers, from `get`, `by`,
+`create`, `update` and queries, and for the `old` row hooks receive. `row`
+holds the stored fields, `id` and the computed fields declared before this
+one. A `nil` answer means the field has no value; any other answer must fit
+the field's kind, or the read raises an error.
+
+Use a computed field by name in `where`, `order`, `cursor`, `groupBy` and
+aggregates. Its value is never stored, which has these consequences:
+
+- A query checks a filter on a computed field against each row it reads,
+  so the filter never picks an index. An index on a computed field raises
+  a `SCHEMA` error.
+- `create`, `update` and query `update` raise an error for a value or a
+  `clear` of a computed field.
+- A computed field takes no option except an enum's `:values`.
+- `migrate` ignores computed fields, so adding, changing or removing one
+  needs no migration and applies to every row at once.
+- Like hooks, computed fields exist only in a client opened with the graph.
+  A plain client raises `has no field` when a query names one.
 
 `lent.ids(table, previous)` gives each field a ROWCODEC id. Pass `nil` for a
 new table, or the first answer of the previous version's call. A field keeps
@@ -454,35 +563,83 @@ for the keys in `[lo, hi)`, in key order or highest first, and stop when
 `each` answers `true`.
 `lent.LAYOUT` runs the module's self-check and answers `ok`.
 
-MIGRATE puts a schema into the space that calls it. Call it from that space
-with the answer of `lent.graph`:
+MIGRATE applies a schema and builds or removes its indexes in bounded
+pages. Call `migrate` from the application's space with the answer of
+`lent.graph`, outside an open transaction:
 
 ```lua
 local m = require("lent.MIGRATE")
-local report = m.migrate(app)  -- { version = 2, changed = true,
-                               --   steps = { "build User.by_email" } }
-local compiled = m.load()      -- the schema in the catalog, or nil
+local report = m.migrate(app, 1000)
+local compiled = m.load()      -- the active schema, or nil before the first migration
 ```
 
-`migrate` runs in one `barch.tx.run` transaction. It drops the entries of
-removed or changed indexes, builds new indexes from the stored rows, and
-writes the catalog under `/lent` in the space's graph. If it raises an error,
-nothing is written. Running it again with the same schema writes nothing and
-answers the current version.
+Call it again with the same schema in later stored-function calls until
+`report.done` is `true`. Each call runs in one `barch.tx.run` transaction
+and persists its progress under `/lent` in the space's graph. Separate
+function calls give each page its own function deadline.
 
-`migrate` raises an error that starts with `MIGRATE` for a change that would
-leave stored rows unreadable:
+The optional page size defaults to `1000` and accepts whole numbers from
+`1` to `10000`. It bounds the total row visits and removed index entries
+across all indexes in that call. Each index build visits every row,
+including rows whose missing values leave them out of a unique index.
+
+| report field | meaning |
+|---|---|
+| `version` | the active schema version; it advances on the first committed page and stays the same while the migration resumes |
+| `changed` | `true` when this call installs a schema or advances pending work |
+| `done` | `true` when every index drop and build is complete |
+| `processed` | row visits plus removed index entries in this call, at most the page size |
+| `steps` | the migration's list of `drop Table.index` and `build Table.index` operations; empty for an unchanged, completed schema |
+
+The target schema becomes active with the first committed page. An index
+being built has `state = "building"` in its `m.load().tables` index entry
+and its `/lent/tables/<table>/indexes/<index>/spec` JSON. Ready indexes have
+no `state` field. The last index entries and the readiness change commit
+together.
+
+Queries choose ready indexes or read the table while an index builds.
+`using`, `by` and `upsert` raise a `LENT` error if they request a building
+index. Creates, updates and deletes maintain building indexes. Successful
+writes of new or changed indexed values scan the table to check uniqueness
+while a unique index is building, so these writes can cost more until the
+build finishes.
+
+Index replacements and removals drop old entries first. Creating, updating
+or deleting rows in an affected table raises a `LENT` error until that
+table's pending drops finish. Reads continue, and other tables remain
+writable.
+
+An error or timeout rolls back the current page; earlier pages and their
+schema changes stay committed. Call `migrate` with the same schema to
+resume. Reduce the page size if a page times out. If a unique build finds
+duplicate stored values, find the rows with a query, correct or delete the
+duplicates, then resume. Finish the pending migration before changing the
+schema again.
+
+A migration that fits in one page remains atomic. Once a migration is
+complete, calling it with the same schema writes nothing and answers
+`changed = false`, `done = true` and the current version.
+
+`migrate` raises an error that starts with `MIGRATE` for unsupported schema
+changes or a unique-index conflict:
 
 - a table missing from the schema;
 - a new field that is neither `:optional()` nor has a value `:default()`;
-- a kind change other than `int` to `float`, or `int` to or from `time`;
+- a kind change other than `int` to `float`, `int` to or from `time`, or
+  `enum` to `string`;
+- removing a value from an enum's choices;
 - a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
 - a change to a table's `id` kind.
 
-Index builds read the whole table in that one transaction, so a large table
-can exceed the function deadline. `lent.MIGRATE` runs the self-check of the
-planning step and answers `ok`.
+Adding enum choices preserves stored rows and their indexes. Byte and JSON
+defaults are preserved in the catalog, including binary bytes, JSON null
+and empty arrays; `m.load()` returns their Luau values.
+
+`plan(previous, app)` describes a migration. The low-level `apply(plan)`
+runs a whole plan inside a caller-opened transaction and refuses a pending
+paged migration; use `migrate` for paged work. `lent.MIGRATE` runs the
+planning self-check and answers `ok`.
 
 CLIENT reads and writes the rows of a migrated space and keeps their indexes
 current. Call `lent.tx` from the application's space:
@@ -501,9 +658,11 @@ end)
 | call | answers | raises an error when |
 |---|---|---|
 | `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind or breaks a value rule, or a required field is missing |
+| `createMany(rows)` | the created rows in input order; `{}` for an empty list | the list is malformed, or any row fails `create` |
 | `get(id)` | the row, or `nil` | `id` does not fit the table's id kind: a lowercase uuid, or a positive integer for `id = "int"` |
-| `by(index, values...)` | the row, or `nil` | there is no such unique index, or the number of values differs from its fields |
+| `by(index, values...)` | the row, or `nil` | there is no such ready unique index, or the number of values differs from its fields |
 | `update(id, values, clear)` | the stored row | there is no row `id`, it changes an immutable field, or as for `create` |
+| `upsert(index, values)` | the row and a `created` boolean | the index is missing, building or non-unique, an indexed field is missing from `values`, or the selected `create` or `update` fails |
 | `delete(id)` | `true`, or `false` if there was no row | `id` does not fit the table's id kind |
 
 `by` takes an index name, such as `by_email`, or a field name with a unique
@@ -528,8 +687,49 @@ unique entry about to be written is read with the exclusive lock, so two
 writers of one value wait for each other. Inside a transaction you already
 run, `lent.client(pessimistic)` answers the same `c`. A table with
 `id = "int"` takes each new id from one counter, so concurrent creates in
-that table conflict and retry. A refused call writes nothing apart from what
-its hooks wrote, so `fn` can catch its error and go on.
+that table conflict and retry. A refused single-row call writes nothing apart
+from what its hooks wrote, so `fn` can catch its error and go on.
+
+Use `createMany` to create several rows and `upsert` to create or update a
+row selected by a unique index:
+
+```lua
+db.tx(function(c)
+    local rows = c.User:createMany {
+        { email = "a@b", name = "ann" },
+        { email = "c@d", name = "cy" },
+    }
+    local row, created = c.User:upsert("email", { email = "a@b", name = "al" })
+    -- row.id is rows[1].id; created is false because that email already exists.
+end)
+```
+
+`createMany` takes row-value tables numbered from 1 without gaps. It checks
+the list's shape before creating any rows, then runs `create` once per row
+in input order, with the same defaults, rules, hooks, indexes and edges.
+The input tables keep their original values. All rows use the caller's
+transaction; split large lists into separate transactions to stay within
+the function deadline.
+
+Multi-row writes (`createMany`, query `update` and query `delete`) stop at
+the first error. Let the error leave the transaction callback to roll back
+the writes, including those made by hooks. If the callback catches the
+error and completes, earlier row writes and hook writes stay in the
+transaction.
+
+`upsert` accepts the same index names and field-name shorthand as `by`.
+Supply a non-`nil` value for every field of the unique index, including all
+fields of a composite index. The lookup uses these values before defaults
+and hooks run. A match keeps its `id` and updates the supplied fields;
+omitted fields keep their stored values, subject to `updateDefault`. A
+missing match runs `create`. The returned `created` flag is `true` for a new
+row and `false` for an update. Each branch runs its usual defaults, rules
+and hooks, and maintains every affected index. Edge values work on the
+create branch; use `link` and `unlink` to change an existing row's edges.
+
+Concurrent upserts of the same indexed values select one row. Optimistic
+transactions retry conflicts; pessimistic transactions take an exclusive
+lock on the unique entry before choosing the branch.
 
 Edges link rows. Pass an edge's name to `create` with an id, a row, or a
 list of them, or call `link` and `unlink`:
@@ -558,19 +758,54 @@ c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
 
 | method | effect |
 |---|---|
-| `where(field, op, value)` | keeps rows where the comparison holds; a field without a value matches only `= nil` |
+| `where(field, op, value)` | keeps rows where the comparison holds; a missing field equals `nil`, differs from non-`nil` values and fails range comparisons |
 | `where(fn)` | keeps rows for which `fn(row)` is true |
 | `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
 | `limit(n)`, `offset(n)` | applied after the order |
 | `cursor(row)` | a string that marks `row`'s place in the query's order |
 | `after(cursor)` | keeps the rows after the cursor's row; with no `order`, the query orders by id |
-| `using(name)` | reads through the named index, or `"id"` for the table |
+| `using(name)` | reads through the named ready index, or `"id"` for the table |
 | `follow(edge)`, `query<Edge>()` | a query over the rows the matches link to |
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
+| `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
+| `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
+| `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
+| `delete()` | deletes the selected rows and answers the number it removed |
 | `explain()` | the plan, such as `by_name_age = name range age` |
+
+Write every row selected by a query with `update` or `delete`:
+
+```lua
+db.tx(function(c)
+    local updated = c.User:query():where("name", "=", "ann")
+        :update({ name = "anne" }, { "age" })
+    local deleted = c.Post:query():where("stars", "=", 0)
+        :order("id"):limit(100):delete()
+end)
+```
+
+Both methods select the same IDs as `ids()`, including `where`, `has`, edge
+follows, `using`, order, offset, limit and cursor filters. They collect all
+target IDs before writing, then process them in query order. Changes to
+indexed values or edges keep the original selection intact, and rows added
+by hooks wait for a later query.
+
+`update` passes `values` and `clear` to each row's `update`, so value rules,
+immutable fields, `updateDefault` and hooks apply to every row. Calling it
+with `{}` or without arguments runs update defaults and hooks. Its count
+includes a successfully processed row even when its stored values stay the
+same. `delete` runs each row's delete hooks and removes its indexes and
+edges in both directions. It skips targets already removed by an earlier
+hook; an update of such a target raises the usual missing-row error. An
+empty selection returns `0`.
+
+These methods use the caller's transaction and the multi-row error behavior
+described above. All target IDs stay in memory until the writes finish.
+Use an `id` cursor and `limit` to divide large updates across transactions;
+a limited delete can run in separate transactions until it returns `0`.
 
 The query picks the index whose leading fields match the most `=` filters,
 then one range filter on the next field. When that index already returns
@@ -601,6 +836,58 @@ differs from the cursor's. When the index read already comes in the
 cursor's order, the read starts at the cursor and `explain` adds
 `from cursor`; otherwise each row is checked and `explain` ends with
 `after cursor`.
+
+Use `sum`, `min` and `max` for one value over the rows a query selects:
+
+```lua
+c.Post:query():sum("stars")                              -- 0 for no rows
+c.Post:query():where("kind", "=", "news"):max("stars")   -- nil for no rows
+```
+
+Use `aggregate` for several values at once. Name each result and give its
+function in `fn`, and its field in `field`:
+
+```lua
+local t = c.Post:query():aggregate {
+    posts  = { fn = "count" },                  -- every selected row
+    scored = { fn = "count", field = "score" }, -- rows with a score
+    stars  = { fn = "sum", field = "stars" },
+    newest = { fn = "max", field = "at" },
+}
+-- t.posts, t.scored, t.stars, t.newest
+```
+
+Use `groupBy` to aggregate each group of rows. Group by fields, or by an
+edge with one row at its far end, such as a post's `author`, which groups by
+the linked row's id:
+
+```lua
+for _, g in c.Post:query():groupBy("author"):aggregate {
+    posts = { fn = "count" }, stars = { fn = "sum", field = "stars" },
+} do
+    print(g.author, g.posts, g.stars)
+end
+```
+
+| function | `field` | answers | for no values |
+|---|---|---|---|
+| `count` | optional | the rows, or the rows where `field` has a value | `0` |
+| `sum` | required; `int` or `float` | the total | `0` |
+| `min`, `max` | required; any kind except `json` | the least or greatest value, in the order `order` uses | `nil` |
+
+Rows without a value for the field are skipped. `groupBy` answers one row
+per group, holding the group's key values under their names and each
+aggregate under its name. Groups come in key order, with missing values
+first, the same order an index keeps. A row without a value, or without a
+link through the edge, joins the group whose key is `nil`. Call
+`aggregate()` with no spec to list the distinct key values. An aggregate
+with the name of a group key raises an error, and so does a `groupBy` on a
+`json` field or on an edge that can link a row to many rows.
+
+Aggregates run over the rows the query selects after its filters, order,
+offset, limit and cursor, so `order("stars", "desc"):limit(10):sum("stars")`
+sums the top ten. They read and hold the same rows `all()` would, so a large
+selection costs what `all()` costs.
 
 `has` and `with` join through edges:
 

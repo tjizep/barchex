@@ -9,7 +9,8 @@ redis = pytest.importorskip("redis")
 
 @pytest.fixture
 def blog(client, request):
-    for name, path in [("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
+    for name, path in [("VALUES", "lent/values.luau"),
+                       ("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
                        ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
                        ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
         install(client, "lent", name, path)
@@ -64,3 +65,32 @@ def test_blog_errors(client, blog, args, error):
 def test_blog_schema_module(client, blog):
     client.execute_command("USE", "blog")
     assert client.execute_command("CALLF", "SCHEMA") == ["User", "Post"]
+
+
+def test_blog_migration_reports_pending_pages(client, blog):
+    client.execute_command("SETF", "OLD_BLOG", """
+local schema = require("blog.SCHEMA")
+local m = require("lent.MIGRATE")
+local client = require("lent.CLIENT")
+function call(start)
+    if start == nil then
+        local graph = schema.app()
+        graph.tables.Post.indexes = {}
+        return m.migrate(graph).version
+    end
+    return client.tx(function(c)
+        local rows = {}
+        for i = tonumber(start), math.min(tonumber(start) + 249, 1105) do
+            rows[#rows + 1] = { title = "post " .. i, body = "body" }
+        end
+        return #c.Post:createMany(rows)
+    end)
+end
+""")
+    assert client.execute_command("CALLF", "OLD_BLOG") == 1
+    for start in range(1, 1106, 250):
+        assert client.execute_command("CALLF", "OLD_BLOG", start) == min(250, 1106 - start)
+    assert blog("migrate") == "migration pending at version 2; call BLOG migrate again"
+    assert len(blog("top", "2")) == 2
+    assert blog("migrate") == 2
+    assert blog("migrate") == 2

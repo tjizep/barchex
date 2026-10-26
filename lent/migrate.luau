@@ -1,5 +1,5 @@
 -- Puts a declared lent schema into a space: the catalog in the graph, and the
--- index entries a change of indexes needs, in one transaction.
+-- index entries a change of indexes needs, in resumable transaction pages.
 --
 -- Required, not called: `local m = require("lent.MIGRATE")`. A function key
 -- has to define call(), so this one answers a self-check of plan():
@@ -8,12 +8,11 @@
 --
 -- From the application's space, with the tables SCHEMA's graph() checked:
 --
---   local report = m.migrate(app)   -- { version = 2, changed = true,
---                                   --   steps = { "build User.by_email" } }
+--   local report = m.migrate(app, 1000) -- repeat in later calls until report.done
 --
--- migrate() runs in barch.tx.run, so it retries on a conflict and leaves
--- nothing behind when it raises an error. A run that changes nothing writes
--- nothing and answers the current version.
+-- Each migrate() call runs one page in barch.tx.run. Completed pages survive
+-- an error in a later page. A run that changes nothing writes nothing and
+-- answers the current version. Call migrate() outside an open transaction.
 --
 -- The catalog, in the space's graph:
 --
@@ -25,7 +24,7 @@
 --   /lent/tables/<table>/fields/<field>     kind, id, optional, unique, default
 --                                          and the value rules: immutable,
 --                                          min, max, minLen, maxLen, match
---   /lent/tables/<table>/indexes/<ix>/spec  unique
+--   /lent/tables/<table>/indexes/<ix>/spec  unique, state = "building" until ready
 --   /lent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
 --   /lent/edges/<edge>/from, /to            links to the two tables' nodes
 --
@@ -42,6 +41,8 @@
 local SCHEMA = require("lent.SCHEMA")
 local rc = require("lent.ROWCODEC")
 local lay = require("lent.LAYOUT")
+local kc = require("lent.KEYCODEC")
+local VALUES = require("lent.VALUES")
 
 local function fail(msg: string)
     error("MIGRATE " .. msg, 0)
@@ -51,10 +52,41 @@ end
 local RULES = { "min", "max", "minLen", "maxLen" }
 
 -- kind changes that read stored values as they are
-local SAME_STORE = { ["int>float"] = true, ["int>time"] = true, ["time>int"] = true }
+local SAME_STORE = { ["int>float"] = true, ["int>time"] = true, ["time>int"] = true,
+                     ["enum>string"] = true }
 
 local function num(v: any): any
     return type(v) == "integer" and integer.tonumber(v) or v
+end
+
+-- Preserve byte defaults and JSON array/object distinctions in the catalog.
+local function field_data(f: any): any
+    local out = table.clone(f)
+    if f.default ~= nil then
+        if f.kind == "json" then
+            out.default, out.defaultEncoding = VALUES.json(f.default), "json"
+        elseif f.kind == "bytes" or (type(f.default) == "string" and utf8.len(f.default) == nil) then
+            out.default, out.defaultEncoding = VALUES.hex(f.default), "hex"
+        end
+    end
+    return out
+end
+
+local function catalog_data(c: any): any
+    local out = table.clone(c)
+    out.tables = {}
+    for key, t in c.tables do
+        local copy = table.clone(t)
+        copy.fields = {}
+        for i, f in t.fields do copy.fields[i] = field_data(f) end
+        out.tables[key] = copy
+    end
+    return out
+end
+
+local function key_kind(kind: string): string
+    if kind == "enum" or kind == "bytes" then return "string" end
+    return kind == "time" and "int" or kind
 end
 
 -- A string that two equal schemas share, whatever order their keys came in.
@@ -80,7 +112,7 @@ local function canon(v: any): string
     return "{" .. table.concat(parts, ",") .. "}"
 end
 
-local function same_index(a: any, b: any): boolean
+local function same_index(a: any, b: any, before: any, after: any): boolean
     if (a.unique == true) ~= (b.unique == true) or #a.on ~= #b.on then
         return false
     end
@@ -88,8 +120,32 @@ local function same_index(a: any, b: any): boolean
         if b.on[i] ~= f then
             return false
         end
+        local old, new = before[f], after[f]
+        local oldKind = old and key_kind(old.kind)
+        local newKind = new and key_kind(new.kind)
+        if oldKind ~= newKind or canon(old and old.default) ~= canon(new and new.default) then
+            return false
+        end
     end
     return true
+end
+
+local function index_spec(ix: any): any
+    return { name = ix.name, on = table.clone(ix.on), unique = ix.unique }
+end
+
+-- Progress and readiness do not change a schema's logical shape.
+local function logical_tables(tables: any): any
+    local out = {}
+    for key, t in tables do
+        local copy = table.clone(t)
+        copy.fields = {}
+        for i, f in t.fields do copy.fields[i] = field_data(f) end
+        copy.indexes = {}
+        for i, ix in t.indexes do copy.indexes[i] = index_spec(ix) end
+        out[key] = copy
+    end
+    return out
 end
 
 -- The compiled schema in this space's catalog, or nil before the first
@@ -101,11 +157,20 @@ function load(): any
     end
     local c = simdjson.parse(s)
     c.version = num(c.version)
+    if c.migration then c.migration.at = num(c.migration.at) end
     for _, t in c.tables do
         t.next = num(t.next)
         for _, f in t.fields do
             f.id = num(f.id)
             f.default = num(f.default)
+            if f.defaultEncoding == "json" then
+                f.default = VALUES.parse_json(f.default)
+            elseif f.defaultEncoding == "hex" then
+                f.default = VALUES.unhex(f.default)
+            elseif f.defaultEncoding ~= nil then
+                fail("field " .. f.name .. " has unknown default encoding " .. tostring(f.defaultEncoding))
+            end
+            f.defaultEncoding = nil
             for _, k in RULES do
                 f[k] = num(f[k])
             end
@@ -152,6 +217,15 @@ function plan(prev: any, app: any): any
                 fail(where .. " field " .. f.name .. " changes kind from " .. was.kind
                     .. " to " .. f.kind)
             end
+            if was and was.kind == "enum" and f.kind == "enum" then
+                local allowed = {}
+                for _, value in f.values do allowed[value] = true end
+                for _, value in was.values do
+                    if not allowed[value] then
+                        fail(where .. " field " .. f.name .. " removes enum value " .. VALUES.json(value))
+                    end
+                end
+            end
             if was and was.name ~= f.name and old.jsonRows then
                 fail(where .. " field " .. f.name .. " renames " .. was.name .. ", but the"
                     .. " table has stored json rows, which name their fields")
@@ -159,20 +233,22 @@ function plan(prev: any, app: any): any
         end
 
         local ver, list = SCHEMA.ids(t, old and { ids = old.ids, next = old.next })
-        local fields = {}
+        local fields, after = {}, {}
         for i, f in t.fields do
             fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
                           unique = f.unique, default = f.default, immutable = f.immutable,
-                          match = f.match }
+                          match = f.match, values = f.values and table.clone(f.values) }
             for _, k in RULES do
                 fields[i][k] = f[k]
             end
+            after[f.name] = fields[i]
         end
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
-            fields = fields, indexes = t.indexes, edges = {},
+            fields = fields, indexes = {}, edges = {},
         }
+        for i, ix in t.indexes do c.indexes[i] = index_spec(ix) end
         for i, e in t.edges do
             c.edges[i] = { name = e.name, dir = e.dir, target = e.target, unique = e.unique,
                            store = e.store }
@@ -185,9 +261,9 @@ function plan(prev: any, app: any): any
                 had[ix.name] = ix
             end
         end
-        for _, ix in t.indexes do
+        for _, ix in c.indexes do
             local o = had[ix.name]
-            if o == nil or not same_index(o, ix) then
+            if o == nil or not same_index(o, ix, before, after) then
                 if o then
                     steps[#steps + 1] = { op = "drop", table = old, index = o }
                 end
@@ -213,8 +289,8 @@ function plan(prev: any, app: any): any
     end)
 
     local compiled = { tables = tables, edges = app.edges }
-    local prevShape = { tables = prev.tables, edges = prev.edges }
-    local changed = canon(compiled) ~= canon(prevShape)
+    local prevShape = { tables = logical_tables(prev.tables), edges = prev.edges }
+    local changed = canon({ tables = logical_tables(tables), edges = app.edges }) ~= canon(prevShape)
     compiled.version = changed and prev.version + 1 or prev.version
     return { version = compiled.version, changed = changed, compiled = compiled, steps = steps }
 end
@@ -229,23 +305,27 @@ local function drop(t: any, ix: any)
     end)
 end
 
+local function build_row(t: any, ix: any, fields: any, k: string)
+    local stored = barch.store.get(k)
+    if stored == nil then return end
+    local pk = lay.row_pk(t, k)
+    local r = lay.fill(t, rc.decode(fields, stored))
+    local key, value = lay.entry(t, ix, r, pk)
+    if key == nil then return end
+    if ix.unique then
+        local other = barch.store.get(key, true)
+        if other ~= nil and other ~= value then
+            fail("table " .. t.name .. " index " .. ix.name .. " is unique, but rows "
+                .. other .. " and " .. pk .. " hold the same values")
+        end
+    end
+    barch.store.set(key, value)
+end
+
 local function build(t: any, ix: any)
     local fields = row_fields(t)
     lay.walk(lay.row(t), function(k)
-        local pk = lay.row_pk(t, k)
-        local r = lay.fill(t, rc.decode(fields, barch.store.get(k)))
-        local key, value = lay.entry(t, ix, r, pk)
-        if key == nil then
-            return
-        end
-        if ix.unique then
-            local other = barch.store.get(key)
-            if other ~= nil then
-                fail("table " .. t.name .. " index " .. ix.name .. " is unique, but rows "
-                    .. other .. " and " .. pk .. " hold the same values")
-            end
-        end
-        barch.store.set(key, value)
+        build_row(t, ix, fields, k)
     end)
 end
 
@@ -275,14 +355,14 @@ local function write_catalog(c: any)
         local fieldNode = {}
         for _, f in t.fields do
             local path = base .. "/fields/" .. f.name
-            g.put(path, simdjson.encode(f), "json")
+            g.put(path, simdjson.encode(field_data(f)), "json")
             fieldNode[f.name] = g.stat(path).id
         end
         g.mkdir(base .. "/indexes")
         for _, ix in t.indexes do
             local dir = base .. "/indexes/" .. ix.name
             g.mkdir(dir)
-            g.put(dir .. "/spec", simdjson.encode({ unique = ix.unique }), "json")
+            g.put(dir .. "/spec", simdjson.encode({ unique = ix.unique, state = ix.state }), "json")
             g.mkdir(dir .. "/on")
             for i, fname in ix.on do
                 g.link(fieldNode[fname], dir .. "/on/" .. i)
@@ -295,12 +375,19 @@ local function write_catalog(c: any)
         g.link(nodes[e.from], dir .. "/from")
         g.link(nodes[e.to], dir .. "/to")
     end
-    g.put("/lent/compiled", simdjson.encode(c), "json")
+    g.put("/lent/compiled", simdjson.encode(catalog_data(c)), "json")
     g.put("/lent/version", tostring(c.version))
 end
 
 -- Writes the plan: index drops and builds, then the catalog.
 function apply(p: any)
+    if not barch.tx.open() then
+        fail("apply needs an open transaction; use migrate for paged migrations")
+    end
+    local previous = load()
+    if previous and previous.migration then
+        fail("a migration is in progress; use migrate to resume it")
+    end
     for _, s in p.steps do
         if s.op == "drop" then
             drop(s.table, s.index)
@@ -311,18 +398,97 @@ function apply(p: any)
     write_catalog(p.compiled)
 end
 
--- Migrates this space to `app` in one transaction.
-function migrate(app: any): any
+local function find_index(t: any, name: string): any
+    for _, ix in t.indexes do
+        if ix.name == name then return ix end
+    end
+    fail("table " .. t.name .. " has no index " .. name .. " to resume")
+end
+
+-- Drops consume entries from the start; builds remember the last row key.
+-- The last page's entries and its readiness change commit together.
+local function advance(c: any, budget: number): number
+    local work, processed = c.migration, 0
+    while work.at <= #work.steps and processed < budget do
+        local step = work.steps[work.at]
+        local t = c.tables[step.table]
+        local ix = step.op == "build" and find_index(t, step.index.name) or step.index
+        local prefix = step.op == "build" and lay.row(t) or lay.index(t, ix)
+        local lo = step.op == "build" and work.cursor and work.cursor .. "\2" or prefix
+        local hi = kc.after(prefix)
+        local limit = budget - processed
+        local keys = barch.store.range(lo, hi, limit)
+        local fields = step.op == "build" and row_fields(t)
+        for _, k in keys do
+            if step.op == "drop" then
+                barch.store.remove(k)
+            else
+                build_row(t, ix, fields, k)
+            end
+        end
+        processed += #keys
+        local nextKey = step.op == "build" and keys[#keys] and keys[#keys] .. "\2" or prefix
+        local done = #keys < limit or #barch.store.range(nextKey, hi, 1) == 0
+        if done then
+            if step.op == "build" then ix.state = nil end
+            work.at += 1
+            work.cursor = nil
+        elseif step.op == "build" then
+            work.cursor = keys[#keys]
+        end
+    end
+    if work.at > #work.steps then c.migration = nil end
+    return processed
+end
+
+local function write_progress(c: any)
+    for key, t in c.tables do
+        for _, ix in t.indexes do
+            barch.graph.put("/lent/tables/" .. key .. "/indexes/" .. ix.name .. "/spec",
+                simdjson.encode({ unique = ix.unique, state = ix.state }), "json")
+        end
+    end
+    barch.graph.put("/lent/compiled", simdjson.encode(catalog_data(c)), "json")
+end
+
+-- One committed page toward `app`, with a shared budget for row reads and
+-- dropped index entries. Call again with the same app until done is true.
+function migrate(app: any, pageSize: number?): any
+    pageSize = pageSize == nil and 1000 or pageSize
+    if type(pageSize) ~= "number" or pageSize < 1 or pageSize > 10000
+        or pageSize ~= math.floor(pageSize) then
+        fail("page size must be a whole number from 1 to 10000")
+    end
+    if barch.tx.open() then
+        fail("migrate needs its own transaction; call it outside a transaction")
+    end
     return barch.tx.run(function()
-        local p = plan(load(), app)
+        local prev = load()
+        local p = plan(prev, app)
+        local resuming = prev and prev.migration ~= nil
+        if resuming and p.changed then
+            fail("a migration is in progress; resume with the same schema until done")
+        end
+        if not resuming and not p.changed then
+            return { version = p.version, changed = false, steps = {}, done = true, processed = 0 }
+        end
+        local c = resuming and prev or p.compiled
+        if not resuming then
+            local work = { steps = {}, at = 1 }
+            for i, s in p.steps do
+                work.steps[i] = { op = s.op, table = s.table.key, index = index_spec(s.index) }
+                if s.op == "build" then s.index.state = "building" end
+            end
+            c.migration = work
+        end
         local steps = {}
-        for i, s in p.steps do
-            steps[i] = s.op .. " " .. s.table.name .. "." .. s.index.name
+        for i, s in c.migration.steps do
+            steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. s.index.name
         end
-        if p.changed then
-            apply(p)
-        end
-        return { version = p.version, changed = p.changed, steps = steps }
+        local processed = advance(c, pageSize)
+        if resuming then write_progress(c) else write_catalog(c) end
+        return { version = c.version, changed = true, steps = steps,
+                 done = c.migration == nil, processed = processed }
     end)
 end
 

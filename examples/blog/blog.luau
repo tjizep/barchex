@@ -86,7 +86,11 @@ end
 
 function call(command: string?, ...: string)
     if command == "migrate" then
-        return m.migrate(blog.app()).version
+        local report = m.migrate(blog.app())
+        if not report.done then
+            return "migration pending at version " .. report.version .. "; call BLOG migrate again"
+        end
+        return report.version
     end
     local run = commands[command]
     if run == nil then

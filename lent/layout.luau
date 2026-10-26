@@ -26,6 +26,7 @@
 -- rows, and nil sorts first.
 
 local kc = require("lent.KEYCODEC")
+local VALUES = require("lent.VALUES")
 
 local function name(s: string): string
     return kc.encode("string", s)
@@ -88,7 +89,8 @@ end
 function fill(t: any, r: { [string]: any }): { [string]: any }
     for _, f in t.fields do
         if r[f.name] == nil and f.default ~= nil then
-            r[f.name] = f.default
+            if f.kind == "json" then r[f.name] = VALUES.copy_json(f.default)
+            else r[f.name] = f.default end
         end
     end
     return r

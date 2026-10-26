@@ -43,12 +43,14 @@ end
 
 
 def setup(client):
+    install(client, "lent", "VALUES", "lent/values.luau")
     install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
     client.execute_command("USE", "default")
     client.execute_command("SETF", "ROWS", ROWS)
 
 
 def test_rowcodec_selftest(client):
+    install(client, "lent", "VALUES", "lent/values.luau")
     install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
     client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "ROWCODEC") == "ok"
@@ -69,6 +71,7 @@ def test_rows_round_trip_through_the_store(client, fmt):
 @pytest.mark.parametrize("fmt", ["text", "binary"])
 def test_text_and_binary_rows_hold_any_bytes(server, fmt):
     raw = redis.Redis(port=server.port, protocol=2)
+    install(raw, "lent", "VALUES", "lent/values.luau")
     install(raw, "lent", "ROWCODEC", "lent/rowcodec.luau")
     raw.execute_command("USE", "default")
     raw.execute_command("SETF", "ROWS", ROWS)

@@ -68,12 +68,14 @@ end
 
 
 def setup(client):
+    install(client, "lent", "VALUES", "lent/values.luau")
     install(client, "lent", "SCHEMA", "lent/schema.luau")
     install(client, "lent", "ROWCODEC", "lent/rowcodec.luau")
     client.execute_command("USE", "default")
 
 
 def test_schema_selftest(client):
+    install(client, "lent", "VALUES", "lent/values.luau")
     install(client, "lent", "SCHEMA", "lent/schema.luau")
     client.execute_command("USE", "lent")
     assert client.execute_command("CALLF", "SCHEMA") == "ok"
@@ -101,3 +103,35 @@ def test_schema_errors_name_the_problem(client, which, error):
     client.execute_command("SETF", "BAD", BAD)
     with pytest.raises(redis.ResponseError, match=error):
         client.execute_command("CALLF", "BAD", which)
+
+
+@pytest.mark.parametrize("which, hooks, error", [
+    ("table", "false", "hooks must be a table"),
+    ("operation", "{ creat = {} }", "hooks has no operation creat"),
+    ("list", "{ create = function() end }", "hooks.create takes a list of functions, got function"),
+    ("boolean", "{ update = false }", "hooks.update takes a list of functions, got boolean"),
+    ("function", "{ delete = { 1 } }", "hooks.delete takes a function at 1, got number"),
+    ("builder", "{ create = { lent.hook.create(function() end) } }",
+     "hooks.create takes a function at 1, got table"),
+    ("map", "{ create = { named = function() end } }", "hooks.create takes a list of functions"),
+    ("gap", "{ create = { [2] = function() end } }", "hooks.create takes a function at 1, got nil"),
+    ("builder_gap", "{ [2] = lent.hook.create(function() end) }",
+     "hooks must list hooks made with lent.hook"),
+])
+def test_schema_rejects_bad_hooks(client, which, hooks, error):
+    install(client, "lent", "VALUES", "lent/values.luau")
+    install(client, "lent", "SCHEMA", "lent/schema.luau")
+    client.execute_command("USE", "default")
+    name = "BAD_HOOKS_" + which
+    client.execute_command("SETF", name, """
+function call()
+    local lent = require("lent.SCHEMA")
+    return lent.schema "Post" {
+        fields = { lent.field.string "title" },
+        hooks = %s,
+    }
+end
+""" % hooks)
+    with pytest.raises(redis.ResponseError) as err:
+        client.execute_command("CALLF", name)
+    assert "SCHEMA table Post " + error in str(err.value)

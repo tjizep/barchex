@@ -22,17 +22,21 @@ SETF BLOG "<contents of examples/blog/blog.luau>"
 CALLF BLOG migrate
 ```
 
-`migrate` answers the schema version. Call it again after you change
-`schema.luau` and run `SETF` for it again.
+`migrate` answers the schema version when it finishes. If it answers
+`migration pending at version <version>; call BLOG migrate again`, repeat
+`CALLF BLOG migrate` in a later call until it answers a version number.
+Finish that migration before changing `schema.luau` again. After a later
+schema change, install the updated source with `SETF` and migrate again.
 
 ## Commands
 
-Each command runs in one transaction. Post lists answer one
-`<id> <stars> <title>` line per post, and `n` defaults to 10.
+Data commands run in one transaction; `migrate` advances one page per call.
+Post lists answer one `<id> <stars> <title>` line per post, and `n` defaults
+to 10.
 
 | Command | Answers |
 |---|---|
-| `CALLF BLOG migrate` | the schema version |
+| `CALLF BLOG migrate` | the schema version when complete, or a pending-migration message |
 | `CALLF BLOG user <email> <name>` | the new user's id |
 | `CALLF BLOG post <email> <title> <body>` | the new post's id |
 | `CALLF BLOG follow <email> <other email>` | `OK` |
@@ -64,4 +68,5 @@ CALLF BLOG timeline cy@x         -> 1) "019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50 1 h
 | `BLOG has no command <name>` | the first argument is not a command above |
 | `LENT table User index by_email is unique, and row <id> already has email=<email>` | `user` reuses an email |
 
-A command that fails changes nothing.
+A data command that fails changes nothing. For migration recovery, follow
+the [paged migration rules](../../README.md#what-it-contains).

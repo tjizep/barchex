@@ -22,16 +22,28 @@ beside a development server.
   checks that bad rows are refused before anything is stored.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
-  checks the errors for a missing table and an unknown index field.
+  checks the errors for a missing table, an unknown index field and invalid
+  hook declarations.
 - `test_migrate.py` runs the layout and migration self-checks, migrates a
   space twice over stored rows, and checks the catalog, the index entries
-  built and dropped, and that a unique index broken by stored rows rolls the
-  whole migration back.
+  built and dropped, and that a unique index broken by stored rows rolls a
+  single-page migration back.
+- `test_migrate_pages.py` checks bounded index builds and drops, readiness,
+  query fallback, live writes, unique checks beyond the build cursor, and
+  repair after a failed unique page. It covers concurrent builders and
+  writers, timeouts, saved-server restarts, transaction boundaries, and
+  rebuilds after encoding or default changes, with all row formats and both
+  id kinds.
 - `test_client.py` runs the client self-check, then creates, reads, updates
   and deletes rows in optimistic and pessimistic transactions. It checks the
   index entries after each step, that a refused create leaves nothing
   behind, that old rows read a new field's default, the error messages, and
   that a migration committed during a transaction makes it conflict.
+- `test_bulk.py` checks `createMany` and `upsert` with integer and UUID ids,
+  all three row formats, defaults, hooks, indexes and edges. It checks
+  rollback after a batch error, the writes kept when an error is caught,
+  invalid inputs, immutable fields and concurrent upserts in optimistic and
+  pessimistic transactions.
 - `test_uuid.py` creates rows with `barch.uuid()` ids and checks that they
   sort in creation order, that get, by, update, delete, queries and edges
   work with them, including edges to a table with integer ids, the errors
@@ -43,13 +55,34 @@ beside a development server.
   and unlinks edges, checks that `delete` removes a row's edges, runs `has`
   filters both ways and nested, loads edges with `with`, pages with
   `cursor` and `after` in each order, and checks the query and edge errors.
+- `test_query_writes.py` checks query-wide `update` and `delete`, their
+  affected-row counts, filters, edge follows, order and pagination. It
+  checks hooks, rules, index and edge upkeep, rollback and caught errors,
+  fixed selections while hooks add or remove rows, writes across index scan
+  pages, and conflicts with new matching rows. The checks cover optimistic
+  and pessimistic transactions, integer and UUID ids, and all row formats.
+- `test_aggregates.py` checks `sum`, `min`, `max` and `aggregate` over
+  filtered, ordered and limited queries and empty selections, `groupBy` on
+  fields, several fields and an edge, and the aggregate errors.
+- `test_computed.py` reads computed fields from rows, hooks, edge follows,
+  filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
+  ignores them and that a client without the graph lacks them, and checks
+  the errors for writing one and for a value of the wrong kind.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
-  `updateDefault`, immutable fields and hooks through `lent.open`, that a
-  client without the graph still enforces the catalog's rules, the error
-  messages, and the migrations that time fields and function defaults allow
-  and refuse.
+  `updateDefault`, immutable fields and hooks through `lent.open`. It checks
+  plain-table, builder and mixed hook declarations and their execution order
+  in optimistic and pessimistic transactions. It also checks catalog rules
+  in a client opened without the graph, error messages, and the migrations
+  that time fields and function defaults allow and refuse.
+- `test_field_kinds.py` checks enum, JSON and bytes fields with both id
+  kinds, all row formats, optimistic and pessimistic transactions, indexes,
+  cursors, upsert and query writes. It checks structural JSON equality,
+  null and missing values, empty arrays and objects, exact large integers,
+  copied defaults and hook snapshots, immutable nested values, input errors,
+  paged default migrations, enum expansion and storage compatibility.
 - `test_blog.py` installs the blog example from `examples/blog/` and runs its
-  commands: users, posts, follows, stars, timelines and its errors.
+  commands: users, posts, follows, stars, timelines, paged migrations and its
+  errors.
 - `test_vectors.py` builds a clustered corpus, inserts it through
   `vectors.SET`, and checks the answers against a brute-force nearest
   neighbour: exact match under the default cosine metric, recall for `k`

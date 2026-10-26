@@ -37,8 +37,11 @@
 -- version of the table gave out and numbers new fields after the highest id
 -- ever used, so a removed field's id is never reused.
 
-local KINDS = { string = true, int = true, float = true, bool = true, time = true }
+local VALUES = require("lent.VALUES")
+local KINDS = { string = true, int = true, float = true, bool = true, time = true,
+                enum = true, json = true, bytes = true }
 local NUMERIC = { int = true, float = true, time = true }
+local LENGTH = { string = true, enum = true, bytes = true }
 local FORMATS = { json = true, text = true, binary = true }
 local IDS = { uuid = true, int = true }
 local MAX_INT = 2 ^ 53
@@ -60,7 +63,8 @@ local function snake(name: string): string
 end
 
 local function fits(kind: string, v: any): boolean
-    if kind == "string" then return type(v) == "string" end
+    if kind == "string" or kind == "enum" or kind == "bytes" then return type(v) == "string" end
+    if kind == "json" then return (pcall(VALUES.json, v)) end
     if kind == "bool" then return type(v) == "boolean" end
     if kind == "float" then return type(v) == "number" and v == v end
     return type(v) == "number" and v == math.floor(v) and v <= MAX_INT and v >= -MAX_INT
@@ -73,9 +77,28 @@ function now(): number
     return barch.time()
 end
 
+function jsonArray(list: any?): any
+    return VALUES.array(list)
+end
+
+function parseJson(text: string): any
+    return VALUES.parse_json(text)
+end
+
+function encodeJson(value: any): string
+    return VALUES.json(value)
+end
+
 -- Why value `v` breaks a rule of compiled field `f`, or nil when it keeps
 -- them all. lent.CLIENT checks every value it writes with this.
 function broken(f: any, v: any): string?
+    if f.kind == "enum" then
+        local why = VALUES.enum_error(f.values, v)
+        if why then return why end
+    elseif f.kind == "json" then
+        local ok, why = pcall(VALUES.json, v)
+        if not ok then return "wants JSON: " .. tostring(why) end
+    end
     if f.kind == "time" and not fits("int", v) then
         return "wants a time in Unix milliseconds, got " .. tostring(v)
     end
@@ -151,7 +174,7 @@ function Field:max(n: number)
     return self
 end
 
--- Bounds for a string field's length in bytes, inclusive.
+-- Bounds for a string, enum or bytes field's length in bytes, inclusive.
 function Field:minLen(n: number)
     self.minLen_ = n
     return self
@@ -168,7 +191,7 @@ function Field:notEmpty()
     return self
 end
 
--- A Luau string pattern that a string field's value has to contain; anchor
+-- A Luau string pattern that a string or enum value has to contain; anchor
 -- it with ^ and $ to match the whole value.
 function Field:match(pattern: string)
     self.match_ = pattern
@@ -190,6 +213,19 @@ function Field:was(old: string)
     return self
 end
 
+-- A field whose value fn(row) computes each time lent.CLIENT reads the row.
+-- It is never stored, so it takes no other option except an enum's values,
+-- and only a client opened with the graph has it.
+function Field:computed(fn: (any) -> any)
+    self.computed_ = fn
+    return self
+end
+
+function Field:values(...: string)
+    self.values_ = { ... }
+    return self
+end
+
 local function builder(kind: string)
     return function(name: string)
         ident(name, kind .. " field")
@@ -204,6 +240,9 @@ field = {
     bool = builder("bool"),
     -- Unix milliseconds, stored as an int
     time = builder("time"),
+    enum = builder("enum"),
+    json = builder("json"),
+    bytes = builder("bytes"),
 }
 
 -- indexes ---------------------------------------------------------------------
@@ -320,7 +359,8 @@ local FIELD_KEYS = {
     kind = "string", name = "string", optional = "boolean", unique = "boolean",
     default = "any", was = "string", immutable = "boolean", min = "number",
     max = "number", minLen = "number", maxLen = "number", notEmpty = "boolean",
-    match = "string", validate = "any", updateDefault = "function",
+    match = "string", validate = "any", updateDefault = "function", values = "table",
+    computed = "function",
 }
 
 local function plain_field(where: string, t: any): any
@@ -332,6 +372,7 @@ local function plain_field(where: string, t: any): any
         fail(where .. " field " .. tostring(t.name) .. " has no kind " .. tostring(t.kind))
     end
     local f = field[t.kind](t.name)
+    if t.values ~= nil then f.values_ = t.values end
     if t.optional then f:optional() end
     if t.unique then f:unique() end
     if t.immutable then f:immutable() end
@@ -339,6 +380,7 @@ local function plain_field(where: string, t: any): any
     if t.default ~= nil then f:default(t.default) end
     if t.was then f:was(t.was) end
     if t.updateDefault then f:updateDefault(t.updateDefault) end
+    if t.computed then f:computed(t.computed) end
     for _, k in { "min", "max", "minLen", "maxLen", "match" } do
         if t[k] ~= nil then
             f[k](f, t[k])
@@ -382,6 +424,54 @@ local function plain_edge(where: string, t: any): any
     return e
 end
 
+-- Builder hooks run first, then each operation's plain list, in list order.
+local function plain_hooks(where: string, spec: any): any
+    local out = { create = {}, update = {}, delete = {} }
+    if spec == nil then return out end
+    if type(spec) ~= "table" then
+        fail(where .. " hooks must be a table")
+    end
+    local count = 0
+    for op in spec do
+        if type(op) == "number" and op >= 1 and op == math.floor(op) then
+            count += 1
+        elseif out[op] == nil then
+            fail(where .. " hooks has no operation " .. tostring(op))
+        end
+    end
+    for i = 1, count do
+        local h = spec[i]
+        if getmetatable(h) ~= Hook then
+            fail(where .. " hooks must list hooks made with lent.hook")
+        end
+        table.insert(out[h.op], h.fn)
+    end
+    for op, into in out do
+        local fns = spec[op]
+        if fns ~= nil then
+            local at = where .. " hooks." .. op
+            if type(fns) ~= "table" then
+                fail(at .. " takes a list of functions, got " .. type(fns))
+            end
+            local n = 0
+            for i in fns do
+                if type(i) ~= "number" or i < 1 or i ~= math.floor(i) then
+                    fail(at .. " takes a list of functions")
+                end
+                n += 1
+            end
+            for i = 1, n do
+                local fn = fns[i]
+                if type(fn) ~= "function" then
+                    fail(at .. " takes a function at " .. i .. ", got " .. type(fn))
+                end
+                table.insert(into, fn)
+            end
+        end
+    end
+    return out
+end
+
 local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true,
                   hooks = true }
 
@@ -394,14 +484,14 @@ local function rules(where: string, f: any, out: any)
                 fail(where .. " " .. k .. " takes a number, got " .. tostring(n))
             end
             local numeric = k == "min" or k == "max"
-            if numeric and not NUMERIC[f.kind] or not numeric and f.kind ~= "string" then
+            if numeric and not NUMERIC[f.kind] or not numeric and not LENGTH[f.kind] then
                 fail(where .. " is a " .. f.kind .. " field, which takes no " .. k)
             end
             out[k] = n
         end
     end
     if f.match_ ~= nil then
-        if f.kind ~= "string" then
+        if f.kind ~= "string" and f.kind ~= "enum" then
             fail(where .. " is a " .. f.kind .. " field, which takes no match")
         end
         if type(f.match_) ~= "string" or not pcall(string.find, "", f.match_) then
@@ -423,16 +513,41 @@ local function rules(where: string, f: any, out: any)
     out.immutable = f.immutable_ == true
 end
 
+-- The options a computed field may have besides its function.
+local COMPUTED_KEEPS = { kind = true, name = true, computed_ = true, values_ = true }
+
+-- Checks computed field f and answers { name, kind, values?, fn }.
+local function computed_field(where: string, f: any): any
+    if type(f.computed_) ~= "function" then
+        fail(where .. " computed takes a function, got " .. type(f.computed_))
+    end
+    for k in f do
+        if not COMPUTED_KEEPS[k] then
+            local option = string.gsub(k, "_$", "")
+            if option == "hasDefault" then option = "default" end
+            fail(where .. " is computed, which takes no " .. option)
+        end
+    end
+    local out = { name = f.name, kind = f.kind, fn = f.computed_ }
+    if f.kind == "enum" then
+        out.values = VALUES.enum_values(f.values_, "SCHEMA " .. where)
+    elseif f.values_ ~= nil then
+        fail(where .. " is a " .. f.kind .. " field, which takes no values")
+    end
+    return out
+end
+
 -- One table:
 -- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
---     default, was, immutable, min?, max?, minLen?, maxLen?, match? } },
+--     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
 --     indexes = { { name, on, unique } },
 --     edges = { { name, dir, target, unique, ref } } }
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
--- given to lent.open: each field's `code` = { default?, update?, validate }
--- and the table's `hooks` = { create, update, delete } lists of functions.
+-- given to lent.open: each field's `code` = { default?, update?, validate },
+-- the table's `hooks` = { create, update, delete } lists of functions, and
+-- its `computed` = { { name, kind, values?, fn } } fields, which no row stores.
 function schema(name: string)
     ident(name, "table")
     return function(spec: any)
@@ -454,17 +569,22 @@ function schema(name: string)
             fail(where .. " ids are uuid or int, got " .. tostring(id))
         end
         local t = { name = name, key = snake(name), format = format, id = id,
-                    fields = {}, indexes = {}, edges = {} }
+                    fields = {}, indexes = {}, edges = {}, computed = {} }
 
-        local byName, was = {}, {}
+        local byName, was, computed = {}, {}, {}
         for _, f in spec.fields or {} do
             f = plain_field(where, f)
             local fname = f.name
             if fname == "id" then
                 fail(where .. " field id is the primary key, which every table has")
             end
-            if byName[fname] then
+            if byName[fname] or computed[fname] then
                 fail(where .. " field " .. fname .. " is declared twice")
+            end
+            if f.computed_ ~= nil then
+                computed[fname] = true
+                t.computed[#t.computed + 1] = computed_field(where .. " field " .. fname, f)
+                continue
             end
             local fn = type(f.default_) == "function"
             if f.hasDefault and not fn and not fits(f.kind, f.default_) then
@@ -480,9 +600,16 @@ function schema(name: string)
             local out = { name = fname, kind = f.kind, optional = f.optional_ == true,
                           unique = f.unique_ == true, was = f.was_,
                           code = { update = f.updateDefault_,
-                                   validate = table.clone(f.validate_ or {}) } }
+                                    validate = table.clone(f.validate_ or {}) } }
+            if f.kind == "enum" then
+                out.values = VALUES.enum_values(f.values_, "SCHEMA " .. where .. " field " .. fname)
+            elseif f.values_ ~= nil then
+                fail(where .. " field " .. fname .. " is a " .. f.kind .. " field, which takes no values")
+            end
             if fn then
                 out.code.default = f.default_
+            elseif f.kind == "json" and f.default_ ~= nil then
+                out.default = VALUES.copy_json(f.default_)
             else
                 out.default = f.default_
             end
@@ -515,6 +642,7 @@ function schema(name: string)
         end
         for _, f in t.fields do
             if f.unique then
+                if f.kind == "json" then fail(where .. " field " .. f.name .. " is json, which takes no index") end
                 add_index({ name = "by_" .. f.name, on = { f.name }, unique = true })
             end
         end
@@ -522,8 +650,14 @@ function schema(name: string)
             ix = plain_index(where, ix)
             local seen = {}
             for _, fname in ix.on do
+                if computed[fname] then
+                    fail(where .. " field " .. fname .. " is computed, which takes no index")
+                end
                 if byName[fname] == nil then
                     fail(where .. " index on " .. tostring(fname) .. ", which is not a field")
+                end
+                if byName[fname].kind == "json" then
+                    fail(where .. " field " .. fname .. " is json, which takes no index")
                 end
                 if seen[fname] then
                     fail(where .. " index names field " .. fname .. " twice")
@@ -537,7 +671,7 @@ function schema(name: string)
         local edges = {}
         for _, e in spec.edges or {} do
             e = plain_edge(where, e)
-            if edges[e.name] or byName[e.name] then
+            if edges[e.name] or byName[e.name] or computed[e.name] then
                 fail(where .. " edge " .. e.name .. " has the name of another edge or field")
             end
             if e.dir == "from" and e.ref_ == nil then
@@ -552,13 +686,7 @@ function schema(name: string)
             t.edges[#t.edges + 1] = out
         end
 
-        t.hooks = { create = {}, update = {}, delete = {} }
-        for _, h in spec.hooks or {} do
-            if getmetatable(h) ~= Hook then
-                fail(where .. " hooks must be made with lent.hook")
-            end
-            table.insert(t.hooks[h.op], h.fn)
-        end
+        t.hooks = plain_hooks(where, spec.hooks)
         return t
     end
 end
@@ -645,7 +773,8 @@ function ids(t: any, previous: any?)
             fail("table " .. t.name .. " has used every field id")
         end
         out[f.name] = id
-        list[#list + 1] = { name = f.name, kind = f.kind, id = id, optional = f.optional }
+        list[#list + 1] = { name = f.name, kind = f.kind, id = id, optional = f.optional,
+                           values = f.values and table.clone(f.values) }
     end
     return { ids = out, next = nextId }, list
 end
@@ -748,6 +877,8 @@ function selftest(): (boolean, string?)
     end
 
     -- plain tables compile to what the builders do
+    local first, second = function() end, function() end
+    local hooks = { create = { first, second }, update = { second }, delete = {} }
     local Plain = schema "Post" {
         id = "int",
         fields = {
@@ -756,6 +887,7 @@ function selftest(): (boolean, string?)
         },
         indexes = { { on = { "rank", "title" }, unique = true, name = "by_both" } },
         edges = { { dir = "from", name = "author", target = "User", ref = "posts", unique = true } },
+        hooks = hooks,
     }
     local Built = schema "Post" {
         id = "int",
@@ -763,6 +895,7 @@ function selftest(): (boolean, string?)
                    field.int "rank":min(1):default(2):was("score") },
         indexes = { index("rank", "title"):unique():name("by_both") },
         edges = { edge.from "author" "User":ref "posts":unique() },
+        hooks = { hook.create(first), hook.create(second), hook.update(second) },
     }
     local function shape(t)
         local out = {}
@@ -781,6 +914,27 @@ function selftest(): (boolean, string?)
     end
     if shape(Plain) ~= shape(Built) then
         return false, "plain tables: " .. shape(Plain) .. " vs " .. shape(Built)
+    end
+    for op, fns in Plain.hooks do
+        if #fns ~= #Built.hooks[op] then return false, "plain hooks count " .. op end
+        for i, fn in fns do
+            if fn ~= Built.hooks[op][i] then return false, "plain hooks order " .. op end
+        end
+    end
+    hooks.create[1] = second
+    table.insert(hooks.delete, first)
+    if Plain.hooks.create[1] ~= first or #Plain.hooks.delete ~= 0 then
+        return false, "plain hooks share declaration lists"
+    end
+
+    local Shift = schema "Shift" { fields = {
+        field.time "clockIn",
+        { kind = "int", name = "worked", computed = function(r) return 1 end },
+        field.enum "size":values("s", "l"):computed(function() return "s" end),
+    } }
+    if #Shift.fields ~= 1 or #Shift.computed ~= 2 or Shift.computed[1].kind ~= "int"
+        or Shift.computed[2].values[2] ~= "l" or Shift.computed[1].fn({}) ~= 1 then
+        return false, "computed fields"
     end
 
     local refused = {
@@ -807,6 +961,18 @@ function selftest(): (boolean, string?)
         { function() schema "U" { fields = { { kind = "int", name = "a", uniqe = true } } } end,
           "field a has no option uniqe" },
         { function() schema "U" { fields = { { kind = "date", name = "a" } } } end, "no kind date" },
+        { function() schema "U" { fields = { field.int "a", field.int "b":computed(5) } } end,
+          "computed takes a function" },
+        { function() schema "U" { fields = { field.int "a",
+            field.int "b":computed(now):optional() } } end, "field b is computed, which takes no optional" },
+        { function() schema "U" { fields = { field.int "a", field.int "b":computed(now):default(1) } } end,
+          "is computed, which takes no default" },
+        { function() schema "U" { fields = { field.int "a", field.int "b":computed(now) },
+            indexes = { index("b") } } end, "field b is computed, which takes no index" },
+        { function() schema "U" { fields = { field.int "a", field.int "a":computed(now) } } end,
+          "declared twice" },
+        { function() schema "U" { fields = { field.int "b":computed(now) } } end,
+          "needs at least one field" },
         { function() schema "U" { fields = { { kind = "int", name = "a", min = "1" } } } end,
           "option min takes a number" },
         { function() schema "U" { fields = { field.int "a" }, edges = {

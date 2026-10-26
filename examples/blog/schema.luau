@@ -1,5 +1,5 @@
 -- The blog's tables. BLOG requires this module and passes app() to MIGRATE,
--- so a change here reaches the space on the next `CALLF BLOG migrate`.
+-- so a change here reaches the space as `CALLF BLOG migrate` completes.
 --
 --   SCHEMA                  -> the table names, a check that the schema builds
 
