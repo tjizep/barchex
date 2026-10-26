@@ -895,20 +895,37 @@ for _, g in c.Post:query():groupBy("author"):aggregate {
 end
 ```
 
-| function | `field` | answers | for no values |
-|---|---|---|---|
-| `count` | optional | the rows, or the rows where `field` has a value | `0` |
-| `sum` | required; `int` or `float` | the total | `0` |
-| `min`, `max` | required; any kind except `json` | the least or greatest value, in the order `order` uses | `nil` |
+To aggregate a value worked out from each row, give a function in `value`
+in place of `field`. It receives the row with its computed fields and
+answers the value, or `nil` to skip the row:
 
-Rows without a value for the field are skipped. `groupBy` answers one row
-per group, holding the group's key values under their names and each
-aggregate under its name. Groups come in key order, with missing values
-first, the same order an index keeps. A row without a value, or without a
-link through the edge, joins the group whose key is `nil`. Call
-`aggregate()` with no spec to list the distinct key values. An aggregate
-with the name of a group key raises an error, and so does a `groupBy` on a
-`json` field or on an edge that can link a row to many rows.
+```lua
+c.Post:query():aggregate {
+    letters = { fn = "sum", value = function(p) return #p.body end },
+    starred = { fn = "count", value = function(p) return p.stars >= 4 or nil end },
+}
+```
+
+Use `value` for a one-off value; declare a computed field for a value that
+queries reuse.
+
+| function | `field` or `value` | answers | for no values |
+|---|---|---|---|
+| `count` | optional | the rows, or the rows with a value | `0` |
+| `sum` | required; an `int` or `float` field, or a function answering numbers | the total | `0` |
+| `min`, `max` | required; any field kind except `json`, or a function answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
+
+A spec with both `field` and `value` raises an error. For `min` and `max`, a
+function must answer one type for every row; a number after a string raises
+an error. Rows without a value are skipped.
+
+`groupBy` answers one row per group, holding the group's key values under
+their names and each aggregate under its name. Groups come in key order,
+with missing values first, the same order an index keeps. A row without a
+value, or without a link through the edge, joins the group whose key is
+`nil`. Call `aggregate()` with no spec to list the distinct key values. An
+aggregate with the name of a group key raises an error, and so does a
+`groupBy` on a `json` field or on an edge that can link a row to many rows.
 
 Aggregates run over the rows the query selects after its filters, order,
 offset, limit and cursor, so `order("stars", "desc"):limit(10):sum("stars")`

@@ -62,8 +62,9 @@ beside a development server.
   pages, and conflicts with new matching rows. The checks cover optimistic
   and pessimistic transactions, integer and UUID ids, and all row formats.
 - `test_aggregates.py` checks `sum`, `min`, `max` and `aggregate` over
-  filtered, ordered and limited queries and empty selections, `groupBy` on
-  fields, several fields and an edge, and the aggregate errors.
+  filtered, ordered and limited queries and empty selections, aggregates of
+  `value` functions, `groupBy` on fields, several fields and an edge, and the
+  aggregate errors.
 - `test_computed.py` reads computed fields from rows, hooks, edge follows,
   filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
   ignores them and that a client without the graph lacks them, and checks

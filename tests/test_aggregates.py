@@ -88,6 +88,34 @@ function steps.totals(c)
     }
 end
 
+function steps.values(c)
+    local q = c.Post:query()
+    local t = q:aggregate {
+        -- stars plus a bonus for news; titles longer than one letter
+        weighted = { fn = "sum", value = function(p)
+            return p.stars + (p.kind == "news" and 10 or 0)
+        end },
+        long = { fn = "count", value = function(p)
+            if #p.title > 1 then return true end
+            return nil
+        end },
+        lowscore = { fn = "min", value = function(p) return p.score and -p.score end },
+        tag = { fn = "max", value = function(p) return p.kind .. "/" .. p.title end },
+    }
+    local out = { rows({ t }, { "weighted", "long", "lowscore", "tag" })[1] }
+    for _, line in rows(q:groupBy("author"):aggregate {
+        half = { fn = "sum", value = function(p) return p.stars / 2 end },
+    }, { "author", "half" }) do
+        out[#out + 1] = line
+    end
+    local none = c.Post:query():where("stars", ">", 9):aggregate {
+        s = { fn = "sum", value = function(p) return p.stars end },
+        m = { fn = "max", value = function(p) return p.stars end },
+    }
+    out[#out + 1] = show(none.s) .. " " .. show(none.m)
+    return out
+end
+
 function steps.groups(c)
     local out = {}
     local spec = { n = { fn = "count" }, stars = { fn = "sum", field = "stars" },
@@ -126,6 +154,22 @@ local bad = {
     groupname = function(c) c.Post:query():groupBy("nothing") end,
     groupjson = function(c) c.Post:query():groupBy("meta") end,
     groupmany = function(c) c.User:query():groupBy("posts") end,
+    both = function(c)
+        c.Post:query():aggregate { n = { fn = "sum", field = "stars", value = function() return 1 end } }
+    end,
+    valuefn = function(c) c.Post:query():aggregate { n = { fn = "sum", value = 1 } } end,
+    sumvalue = function(c)
+        c.Post:query():aggregate { n = { fn = "sum", value = function(p) return p.title end } }
+    end,
+    novalueorder = function(c)
+        c.Post:query():aggregate { n = { fn = "max", value = function(p) return {} end } }
+    end,
+    mixed = function(c)
+        c.Post:query():aggregate { n = { fn = "min", value = function(p)
+            if p.stars > 2 then return p.stars end
+            return p.title
+        end } }
+    end,
     clash = function(c) c.Post:query():groupBy("kind"):aggregate { kind = { fn = "count" } } end,
 }
 
@@ -164,6 +208,17 @@ def test_aggregates(run):
     ]
 
 
+def test_aggregate_values(run):
+    assert run("values") == [
+        # a and c are news: 5+10 + 1 + 3+10 + 2
+        "weighted=31 long=0 lowscore=-2.25 tag=note/d",
+        "author=nil half=1",
+        "author=1 half=3",
+        "author=2 half=1.5",
+        "0 nil",
+    ]
+
+
 def test_group_by(run):
     assert run("groups") == [
         "kind=news n=2 stars=8 best=c",
@@ -187,7 +242,7 @@ ERRORS = {
     "entry": "LENT table Post query aggregate takes a table of name = { fn = ..., field = ... }",
     "option": "LENT table Post query aggregate n has no option as",
     "fn": "LENT table Post query aggregate n has no function avg; use count, sum, min or max",
-    "nofield": "LENT table Post query aggregate n needs a field for sum",
+    "nofield": "LENT table Post query aggregate n needs a field or value for sum",
     "field": "LENT table Post has no field missing",
     "sumkind": "LENT table Post field title is string, so sum needs int or float",
     "sumtime": "LENT table Post field at is time, so sum needs int or float",
@@ -196,6 +251,11 @@ ERRORS = {
     "groupname": "LENT table Post has no field or edge nothing",
     "groupjson": "LENT table Post field meta is json, so groupBy cannot use it",
     "groupmany": "LENT table User edge posts can link a row to many rows, so groupBy cannot use it",
+    "both": "LENT table Post query aggregate n has both field and value; give one",
+    "valuefn": "LENT table Post query aggregate n value must be a function, got 1",
+    "sumvalue": "LENT table Post query aggregate n value answered a, so sum needs a number",
+    "novalueorder": "LENT table Post query aggregate n value answered a table, which has no order",
+    "mixed": "LENT table Post query aggregate n value answered a string after a number",
     "clash": "LENT table Post query aggregate kind has the name of a groupBy key",
 }
 

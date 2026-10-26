@@ -30,6 +30,8 @@
 --       c.Post:query():sum("stars")        -- also min and max
 --       c.Post:query():groupBy("author"):aggregate {
 --           posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }
+--       c.Post:query():aggregate {      -- or over a value worked out per row
+--           words = { fn = "sum", value = function(p) return #p.body end } }
 --   end)
 --
 -- lent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
@@ -1329,24 +1331,33 @@ end
 
 local AGGREGATES = { count = true, sum = true, min = true, max = true }
 
--- Checks the aggregate `name` = { fn, field? }.
+-- Checks the aggregate `name` = { fn, field? } or { fn, value }.
 local function aggregate_spec(tbl: any, name: any, spec: any): any
     if type(name) ~= "string" or type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
     end
     local at = tbl.where .. " query aggregate " .. name
     for k in spec do
-        if k ~= "fn" and k ~= "field" then
+        if k ~= "fn" and k ~= "field" and k ~= "value" then
             fail(at .. " has no option " .. tostring(k))
         end
     end
-    local fn, field = spec.fn, spec.field
+    local fn, field, value = spec.fn, spec.field, spec.value
     if not AGGREGATES[fn] then
         fail(at .. " has no function " .. tostring(fn) .. "; use count, sum, min or max")
     end
+    if value ~= nil then
+        if field ~= nil then
+            fail(at .. " has both field and value; give one")
+        end
+        if type(value) ~= "function" then
+            fail(at .. " value must be a function, got " .. tostring(value))
+        end
+        return { name = name, fn = fn, value = value, at = at }
+    end
     if field == nil then
         if fn ~= "count" then
-            fail(at .. " needs a field for " .. fn)
+            fail(at .. " needs a field or value for " .. fn)
         end
         return { name = name, fn = fn }
     end
@@ -1360,16 +1371,41 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
     return { name = name, fn = fn, field = field }
 end
 
+local ORDERED = { number = true, string = true, boolean = true }
+
+-- The value aggregate a reads from row r: the field's value, or what the
+-- value function answers, checked against the earlier values in acc.
+local function fold_value(a: any, acc: any, r: any): any
+    if a.value == nil then
+        return r[a.field]
+    end
+    local v = a.value(r)
+    if v == nil or a.fn == "count" then
+        return v
+    end
+    local t = type(v)
+    if a.fn == "sum" then
+        if t ~= "number" then
+            fail(a.at .. " value answered " .. tostring(v) .. ", so sum needs a number")
+        end
+    elseif not ORDERED[t] then
+        fail(a.at .. " value answered a " .. t .. ", which has no order")
+    elseif acc ~= nil and type(acc) ~= t then
+        fail(a.at .. " value answered a " .. t .. " after a " .. type(acc))
+    end
+    return v
+end
+
 -- Adds row r to aggregate a's running value acc. Rows without a value for
--- the field are skipped.
+-- the field, or whose value function answers nil, are skipped.
 local function fold(a: any, acc: any, r: any): any
     if a.fn == "count" then
-        if a.field == nil or r[a.field] ~= nil then
+        if (a.field == nil and a.value == nil) or fold_value(a, acc, r) ~= nil then
             return (acc or 0) + 1
         end
         return acc
     end
-    local v = r[a.field]
+    local v = fold_value(a, acc, r)
     if v == nil then
         return acc
     elseif a.fn == "sum" then
