@@ -307,9 +307,39 @@ local function check_row(self: any, r: any, old: any)
     end
 end
 
+-- How deep hooks may nest: a hook's write runs the written table's hooks,
+-- and those may write again.
+local MAX_HOOK_DEPTH = 16
+
+-- Runs the table's `op` hooks. A run that would nest more than
+-- MAX_HOOK_DEPTH deep raises an error naming the operations on the way.
 local function run_hooks(self: any, op: string, ...: any)
-    for _, fn in self.hooks[op] do
-        fn(self.peers, ...)
+    local list = self.hooks[op]
+    if #list == 0 then
+        return
+    end
+    local stack = self.hookStack
+    if #stack >= MAX_HOOK_DEPTH then
+        local names, seen = {}, {}
+        for _, name in stack do
+            if not seen[name] then
+                seen[name] = true
+                names[#names + 1] = name
+            end
+        end
+        fail(self.where .. " " .. op .. " hooks nest more than " .. MAX_HOOK_DEPTH
+            .. " deep; each write from a hook runs hooks again, here through "
+            .. table.concat(names, ", "))
+    end
+    stack[#stack + 1] = self.where .. " " .. op
+    local ok, err = pcall(function(...)
+        for _, fn in list do
+            fn(self.peers, ...)
+        end
+    end, ...)
+    table.remove(stack)
+    if not ok then
+        error(err, 0)
     end
 end
 
@@ -2314,10 +2344,17 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?):
             table.insert(pathUses[h.store], { p = s, i = i })
         end
     end
-    -- policy rules read and write through a client that has no rules
+    -- policy rules read and write through a client that has no rules, and
+    -- whose hooks count toward the same depth
     local rules
+    local hookStack = {}
     local function rulesClient(): any
-        rules = rules or client(pessimistic, app, nil, true)
+        if rules == nil then
+            rules = client(pessimistic, app, nil, true)
+            for _, b in rules do
+                b.hookStack = hookStack
+            end
+        end
         return rules
     end
     for _, b in c do
@@ -2327,6 +2364,7 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?):
         b.pathUses = pathUses
         b.viewer = viewer
         b.rulesClient = rulesClient
+        b.hookStack = hookStack
     end
     return setmetatable(c, {
         __index = function(_, name)

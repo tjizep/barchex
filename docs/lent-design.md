@@ -159,7 +159,10 @@ that writes another table atomic with the write. Each write call runs in a
 with its own, and a caller that catches the error goes on with the
 transaction as it was before the call. Calls nest: a hook that catches a
 refused write it made keeps its other writes. A multi-row write is one
-call, so a refusal takes back all of its rows.
+call, so a refusal takes back all of its rows. Hooks nest at most 16 deep
+per client, so hooks whose writes run each other end with an error naming
+the tables in the loop, before the Luau stack or the function timeout
+does.
 
 Policies follow Go ent's privacy layer: rules answer allow, deny or skip,
 and a call goes ahead when every rule skips. Go ent carries the viewer in a

@@ -515,6 +515,17 @@ A hook may change `row` and may read and write other tables through `c`.
 An error it raises refuses the write and takes back what the hook wrote, as
 described for `lent.tx` below.
 
+A write from a hook runs the written table's hooks too, so hooks can nest.
+They nest at most 16 deep, counting the hooks that policy rules' writes
+run. A hook run past that limit raises an error such as `LENT table Ping
+create hooks nest more than 16 deep; each write from a hook runs hooks
+again, here through table Ping create, table Pong create`, which names each
+table and operation on the way. This stops a hook that creates a row of its
+own table, or two tables whose hooks create each other, without an end
+condition. The error passes up through each hook like any hook error, so
+unless a hook catches it, the first write is refused and every row the
+chain wrote is taken back.
+
 Declare a `policy` to decide which rows a viewer reads and which writes a
 viewer makes, as in Go ent's privacy layer. `query` rules run when a query
 starts, and `mutation` rules run before each write's hooks:

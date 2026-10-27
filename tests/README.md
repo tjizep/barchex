@@ -97,6 +97,10 @@ beside a development server.
   against a walk of the hops after links, unlinks and deletes on each hop,
   reads the hops while a fill runs, drops the stores when the edges are
   unstored, and refuses an `edge.to` that takes a stored path edge's name.
+- `test_hook_depth.py` nests create hooks 16 deep, checks that a 17th
+  level raises the depth error and takes back the chain's rows, and stops
+  two tables whose hooks create each other, in optimistic and pessimistic
+  transactions.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order
