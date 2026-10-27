@@ -24,9 +24,3 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
 
 - **Privacy rules:** read and write policies per table, as in Go ent. They
   could build on hooks.
-
-## barch
-
-- **Savepoints.** When a write is refused and the caller catches the error,
-  the writes its hooks made stay in the transaction. A savepoint would let
-  lent roll back to the start of the call.

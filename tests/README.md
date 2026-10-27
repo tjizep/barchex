@@ -41,7 +41,7 @@ beside a development server.
   that a migration committed during a transaction makes it conflict.
 - `test_bulk.py` checks `createMany` and `upsert` with integer and UUID ids,
   all three row formats, defaults, hooks, indexes and edges. It checks
-  rollback after a batch error, the writes kept when an error is caught,
+  rollback after a batch error, that a caught error takes back the whole call,
   invalid inputs, immutable fields and concurrent upserts in optimistic and
   pessimistic transactions.
 - `test_uuid.py` creates rows with `barch.uuid()` ids and checks that they
@@ -101,8 +101,9 @@ beside a development server.
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order
   in optimistic and pessimistic transactions. It also checks catalog rules
-  in a client opened without the graph, error messages, and the migrations
-  that time fields and function defaults allow and refuse.
+  in a client opened without the graph, error messages, that a refused call
+  takes back its hooks' writes, and the migrations that time fields and
+  function defaults allow and refuse.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id
   kinds, all row formats, optimistic and pessimistic transactions, indexes,
   cursors, upsert and query writes. It checks structural JSON equality,

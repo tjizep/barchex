@@ -700,7 +700,7 @@ planning self-check and answers `ok`.
 CLIENT reads and writes the rows of a migrated space and keeps their indexes
 current. Call `lent.tx` from the application's space:
 
-```lua
+```luau
 local lent = require("lent.CLIENT")
 lent.tx(function(c)
     local u = c.User:create { email = "a@b", name = "ann" }  -- u.id, a uuid

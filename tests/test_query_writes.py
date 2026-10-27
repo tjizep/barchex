@@ -351,20 +351,20 @@ def test_query_write_errors_roll_back_rows_indexes_edges_and_hooks(client, mode,
     assert run("inspect") == before
 
 
+# A caught error takes back the whole query write, the rows it already
+# wrote and their hooks' writes included. The update before the delete stays.
 @pytest.mark.parametrize("which", ["unique", "update_hook", "delete_hook"])
-def test_caught_query_write_errors_keep_completed_writes(client, which):
+def test_caught_query_write_errors_take_back_the_whole_call(client, which):
     run = app(client, "query_write_caught_" + which)
     ok, err, state, log = run("caught", which)
     assert ok == "false"
     assert ERRORS[which] in err
     rows = BASE_ROWS.copy()
     if which == "delete_hook":
-        rows.pop(0)
-        rows[0] = "b:2:delete_refuse:nil:1:2:cb"
-        assert log == "update b; delete a; delete b"
+        rows[1] = "b:2:delete_refuse:nil:1:2:cb"
+        assert log == "update b"
     else:
-        rows[0] = "a:1:old:memo:1:2:same" if which == "unique" else "a:1:refuse:memo:1:2:ca"
-        assert log == "update a; update b"
+        assert log == ""
     assert state == " ".join(rows)
 
 

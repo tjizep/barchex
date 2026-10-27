@@ -785,8 +785,8 @@ function Table:create(values: { [string]: any }): any
     return compute(self, r)
 end
 
--- Creates each row in input order in the caller's transaction. If the caller
--- catches an error, earlier rows and the hooks' writes stay in the transaction.
+-- Creates each row in input order in the caller's transaction. An error
+-- takes back every row it created, with the hooks' writes.
 function Table:createMany(rows: { any }): { any }
     local where = self.where .. " createMany"
     if type(rows) ~= "table" then
@@ -2147,6 +2147,25 @@ function client(pessimistic: boolean?, app: any?): any
         end,
     })
 end
+
+-- Each write call runs in a savepoint: when it raises, every key it wrote,
+-- its hooks' writes included, goes back to what the transaction held before
+-- the call, and the error comes out as it was. Outside a transaction the
+-- call runs as it is.
+local function atomic(write: (...any) -> ...any): (...any) -> ...any
+    return function(...)
+        if barch.tx.open() then
+            return barch.tx.savepoint(write, ...)
+        end
+        return write(...)
+    end
+end
+
+for _, name in { "create", "createMany", "update", "upsert", "delete", "link", "unlink" } do
+    Table[name] = atomic(Table[name])
+end
+Query.update = atomic(Query.update)
+Query.delete = atomic(Query.delete)
 
 -- Runs fn(c) in a transaction and answers what it answers.
 function tx(fn: (any) -> any, pessimistic: boolean?, app: any?): any

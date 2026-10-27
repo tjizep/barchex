@@ -246,15 +246,16 @@ def test_bulk_error_rolls_back_the_transaction(client, mode, ids, kind, error):
     assert run("bulk")[:3] == [2, "a b", ("number" if ids == "int" else "string") + " true"]
 
 
+# A caught error takes back the whole createMany: the first row, the hook
+# writes and the pk counter, so the next create gets id 1.
 @pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
-def test_caught_bulk_error_keeps_the_completed_prefix_and_hook_writes(client, mode):
-    run = app(client, "bulk_caught_" + mode, mode)
-    out = run("caught", "duplicate")
+@pytest.mark.parametrize("kind", FAILURES)
+def test_caught_bulk_error_takes_back_the_whole_call(client, mode, kind):
+    run = app(client, f"bulk_caught_{mode}_{kind}", mode)
+    out = run("caught", kind)
     assert out[:1] == ["false"]
-    assert FAILURES["duplicate"] in out[1]
-    assert out[2:] == [
-        1, 2, "by_email=1 by_flag=0 by_name=2 identity=2", "create a; create a; create next",
-    ]
+    assert FAILURES[kind] in out[1]
+    assert out[2:] == [0, 1, "by_email=0 by_flag=0 by_name=1 identity=1", "create next"]
 
 
 ERRORS = {

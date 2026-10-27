@@ -152,9 +152,12 @@ only in a client made with `lent.open(app)`. Go ent compiles both into
 generated code; here the catalog keeps what it can.
 
 Hooks run before the write in the caller's transaction, which makes a hook
-that writes another table atomic with the write. barch has no savepoints,
-so a hook's writes stay when the write it ran for is refused and the caller
-catches the error.
+that writes another table atomic with the write. Each write call runs in a
+`barch.tx.savepoint`, so a refused call takes back its hooks' writes along
+with its own, and a caller that catches the error goes on with the
+transaction as it was before the call. Calls nest: a hook that catches a
+refused write it made keeps its other writes. A multi-row write is one
+call, so a refusal takes back all of its rows.
 
 A `time` field is an `int` of Unix milliseconds, and `lent.now()` answers
 `barch.time()`. A call replayed from a Raft log reads the time its entry was

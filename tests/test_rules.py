@@ -120,6 +120,28 @@ function steps.plain(c)
     return { tostring(ok) .. " " .. string.match(err, "ROWCODEC.*"), r.created .. " " .. r.updated, bad, logs(c) }
 end
 
+-- A refused call takes back its hooks' writes. A call that returned keeps
+-- its writes when a later call in the same function is refused.
+function steps.caught(c)
+    local a = c.Post:create { title = "Kept" }
+    local function refused(fn, ...)
+        return tostring((pcall(fn, ...)))
+    end
+    local got = {
+        refused(c.Post.create, c.Post, { title = "S", stars = -1 }),
+        refused(c.Post.update, c.Post, a.id, { title = "Changed", stars = 9 }),
+        refused(function()
+            c.Post:create { title = "Also kept" }
+            c.Post:create { title = "lower" }
+        end),
+    }
+    local titles = {}
+    for _, p in c.Post:query():order("slug"):all() do
+        titles[#titles + 1] = p.title
+    end
+    return { table.concat(got, " "), table.concat(titles, ","), logs(c) }
+end
+
 local errors = {
     empty = function(c) c.Post:create { title = "" } end,
     long = function(c) c.Post:create { title = string.rep("A", 21) } end,
@@ -234,6 +256,15 @@ def test_rule_errors(client):
         client.execute_command("CALLF", "RULES", "unmigrated")
     assert ("LENT table Post field extra is declared, and this space's catalog lacks it;"
             " run MIGRATE") in str(err.value)
+
+
+def test_caught_refusals_take_back_hook_writes(client):
+    setup(client, "rules_caught")
+    assert client.execute_command("CALLF", "RULES", "caught") == [
+        "false false false",
+        "Also kept,Kept",
+        "create kept; create also-kept",
+    ]
 
 
 def test_migrate_rules(client):
