@@ -141,7 +141,7 @@ local function check_pk(self: any, pk: any)
         if not kc.is_uuid(pk) then
             fail(self.where .. " wants a uuid id, got " .. tostring(pk))
         end
-    elseif type(pk) ~= "number" or pk < 1 or pk ~= math.floor(pk) then
+    elseif type(pk) ~= "number" or pk < 1 or pk > 2 ^ 53 or pk ~= math.floor(pk) then
         fail(self.where .. " wants an integer id, got " .. tostring(pk))
     end
 end
@@ -236,7 +236,7 @@ end
 local function set_fields(self: any, r: any, values: any)
     for k, v in values do
         if k == "id" then
-            fail(self.where .. " gives out ids itself, so a row cannot set id")
+            fail(self.where .. " keeps each row's id; only create takes an id")
         end
         if self.edgeByName[k] then
             linkable(self, self.edgeByName[k])
@@ -812,12 +812,19 @@ end
 function Table:create(values: { [string]: any }): any
     writable(self)
     local r, plain, links = {}, {}, {}
+    local given = values.id
     for k, v in values do
         local e = self.edgeByName[k]
         if e then
             links[#links + 1] = { linkable(self, e), ids_in(self, e, v) }
-        else
+        elseif k ~= "id" then
             plain[k] = v
+        end
+    end
+    if given ~= nil then
+        check_pk(self, given)
+        if get(self, lay.row(self.t, given), true) ~= nil then
+            fail(self.where .. " already has a row " .. tostring(given))
         end
     end
     set_fields(self, r, plain)
@@ -838,7 +845,16 @@ function Table:create(values: { [string]: any }): any
     check_row(self, r, nil)
     -- a uuid needs no shared key, so creates in one table do not conflict
     local counter, pk
-    if lay.id_kind(self.t) == "uuid" then
+    if given ~= nil then
+        pk = given
+        -- automatic ids continue above the greatest given id
+        if lay.id_kind(self.t) == "int" then
+            local key = lay.counter(self.t)
+            if pk > (tonumber(get(self, key, true)) or 0) then
+                counter = key
+            end
+        end
+    elseif lay.id_kind(self.t) == "uuid" then
         pk = barch.uuid()
     else
         counter = lay.counter(self.t)
@@ -968,12 +984,26 @@ end
 
 -- Creates a row or updates the row selected by the unique fields in values.
 -- All indexed fields must be supplied before defaults and hooks run. The
--- unique key is locked exclusively in a pessimistic transaction.
+-- unique key is locked exclusively in a pessimistic transaction. The name
+-- "id" selects the row by values.id.
 function Table:upsert(name: string, values: { [string]: any }): (any, boolean)
-    local ix = unique_index(self, name)
     if type(values) ~= "table" then
         fail(self.where .. " upsert takes a table of values")
     end
+    if name == "id" then
+        local pk = values.id
+        if pk == nil then
+            fail(self.where .. " upsert by id needs a value for id")
+        end
+        check_pk(self, pk)
+        if read(self, pk, true) == nil then
+            return self:create(values), true
+        end
+        local rest = table.clone(values)
+        rest.id = nil
+        return self:update(pk, rest), false
+    end
+    local ix = unique_index(self, name)
     local on = table.create(#ix.on)
     for i, fname in ix.on do
         if values[fname] == nil then

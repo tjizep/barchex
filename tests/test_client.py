@@ -90,7 +90,8 @@ function call(which, pessimistic)
         elseif which == "missing" then
             return c.User:update(99, { name = "z" })
         elseif which == "id" then
-            return c.User:create { id = 5, email = "x", name = "y" }
+            c.User:create { email = "x", name = "y" }
+            return c.User:update(1, { id = 5 })
         end
     end, p)
 end
@@ -155,7 +156,7 @@ def test_client_rows_and_indexes(client, mode):
     ("field", "LENT table User has no field nick"),
     ("kind", "ROWCODEC field name wants string, got 3"),
     ("missing", "LENT table User has no row 99"),
-    ("id", "LENT table User gives out ids itself, so a row cannot set id"),
+    ("id", "LENT table User keeps each row's id; only create takes an id"),
 ])
 def test_client_errors(client, which, error):
     app(client, "client_errors")

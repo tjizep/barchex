@@ -327,7 +327,7 @@ ERRORS = {
     "clear": "query update clear takes a list of fields",
     "field": "has no field unknown",
     "clearfield": "has no field unknown",
-    "id": "gives out ids itself",
+    "id": "keeps each row's id",
     "edge": "edge group changes with link and unlink",
     "rule": "field score wants at least 0, got -1",
     "kind": "field score wants int, got x",

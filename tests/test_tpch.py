@@ -22,12 +22,12 @@ local f = lent.field
 local app = lent.graph {
     lent.schema "Region" {
         id = "int",
-        fields = { f.int "key":unique(), f.string "name", f.string "comment" },
+        fields = { f.string "name", f.string "comment" },
         edges = { lent.edge.to "nations" "Nation" },
     },
     lent.schema "Nation" {
         id = "int",
-        fields = { f.int "key":unique(), f.string "name", f.string "comment" },
+        fields = { f.string "name", f.string "comment" },
         edges = {
             lent.edge.from "region" "Region":ref "nations":unique(),
             lent.edge.to "customers" "Customer",
@@ -37,7 +37,7 @@ local app = lent.graph {
     lent.schema "Part" {
         id = "int",
         fields = {
-            f.int "key":unique(), f.string "name", f.string "mfgr", f.string "brand",
+            f.string "name", f.string "mfgr", f.string "brand",
             f.string "type", f.int "size", f.string "container", f.int "retailprice",
             f.string "comment",
         },
@@ -53,7 +53,7 @@ local app = lent.graph {
     lent.schema "Supplier" {
         id = "int",
         fields = {
-            f.int "key":unique(), f.string "name", f.string "address", f.string "phone",
+            f.string "name", f.string "address", f.string "phone",
             f.int "acctbal", f.string "comment",
         },
         edges = {
@@ -65,7 +65,7 @@ local app = lent.graph {
     lent.schema "Customer" {
         id = "int",
         fields = {
-            f.int "key":unique(), f.string "name", f.string "address", f.string "phone",
+            f.string "name", f.string "address", f.string "phone",
             f.int "acctbal",
             f.enum "mktsegment":values("AUTOMOBILE", "BUILDING", "FURNITURE",
                                        "HOUSEHOLD", "MACHINERY"),
@@ -79,7 +79,7 @@ local app = lent.graph {
     lent.schema "Order" {
         id = "int",
         fields = {
-            f.int "key":unique(), f.enum "orderstatus":values("F", "O", "P"),
+            f.enum "orderstatus":values("F", "O", "P"),
             f.int "totalprice", f.time "orderdate", f.string "orderpriority",
             f.string "clerk", f.int "shippriority", f.string "comment",
         },
@@ -144,27 +144,24 @@ end
 local q = {}
 
 function q.load(c, data)
-    local ids = { Region = {}, Nation = {}, Part = {}, Supplier = {}, Customer = {}, Order = {} }
-    local function add(tbl, rows, refs)
+    -- each row keeps its TPC-H key as its id, so edges name rows by their keys
+    local function add(tbl, rows)
         for _, r in rows do
-            for edge, target in refs do r[edge] = ids[target][r[edge]] end
-            ids[tbl][r.key] = c[tbl]:create(r).id
+            r.id, r.key = r.key, nil
+            c[tbl]:create(r)
         end
     end
-    add("Region", data.region, {})
-    add("Nation", data.nation, { region = "Region" })
-    add("Part", data.part, {})
-    add("Supplier", data.supplier, { nation = "Nation" })
+    add("Region", data.region)
+    add("Nation", data.nation)
+    add("Part", data.part)
+    add("Supplier", data.supplier)
     for _, ps in data.partsupp do
-        c.Part:link("supplies", ids.Part[ps.part], ids.Supplier[ps.supplier],
+        c.Part:link("supplies", ps.part, ps.supplier,
                     { availqty = ps.availqty, supplycost = ps.supplycost, comment = ps.comment })
     end
-    add("Customer", data.customer, { nation = "Nation" })
-    add("Order", data.orders, { customer = "Customer" })
-    for _, l in data.lineitem do
-        l.order, l.part, l.supplier = ids.Order[l.order], ids.Part[l.part], ids.Supplier[l.supplier]
-        c.Lineitem:create(l)
-    end
+    add("Customer", data.customer)
+    add("Order", data.orders)
+    c.Lineitem:createMany(data.lineitem)
     return "ok"
 end
 
@@ -192,7 +189,7 @@ function q.q3(c, p)
         :groupBy("order"):aggregate { revenue = { fn = "sum", value = revenue } }
     for _, g in groups do
         local o = c.Order:get(g.order)
-        g.key, g.orderdate, g.shippriority = o.key, o.orderdate, o.shippriority
+        g.key, g.orderdate, g.shippriority = o.id, o.orderdate, o.shippriority
     end
     sort(groups, { "-revenue", "orderdate", "key" })
     return pick(groups, { "key", "revenue", "orderdate", "shippriority" }, 10)
@@ -223,7 +220,7 @@ function q.q10(c, p)
         :groupBy("customer"):aggregate { revenue = { fn = "sum", value = revenue } }
     for _, g in groups do
         local cu = c.Customer:query():where("id", "=", g.customer):withNation():first()
-        g.key, g.name, g.acctbal, g.nation = cu.key, cu.name, cu.acctbal, cu.nation.name
+        g.key, g.name, g.acctbal, g.nation = cu.id, cu.name, cu.acctbal, cu.nation.name
     end
     sort(groups, { "-revenue", "key" })
     return pick(groups, { "key", "name", "revenue", "acctbal", "nation" }, 20)
@@ -243,7 +240,7 @@ function q.q11(c, p)
     local out = {}
     for part, v in value do
         if v * p.inverse > total then
-            out[#out + 1] = { key = c.Part:get(part).key, value = v }
+            out[#out + 1] = { key = part, value = v }
         end
     end
     sort(out, { "-value", "key" })
@@ -304,7 +301,7 @@ function q.q18(c, p)
     for _, g in groups do
         if g.qty > p.qty then
             local o = c.Order:query():where("id", "=", g.order):withCustomer():first()
-            out[#out + 1] = { name = o.customer.name, custkey = o.customer.key, key = o.key,
+            out[#out + 1] = { name = o.customer.name, custkey = o.customer.id, key = o.id,
                               orderdate = o.orderdate, totalprice = o.totalprice, qty = g.qty }
         end
     end

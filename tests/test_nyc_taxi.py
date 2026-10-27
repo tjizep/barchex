@@ -34,8 +34,7 @@ local app = lent.graph {
     lent.schema "Zone" {
         id = "int",
         fields = {
-            f.int "location":unique(), f.string "borough", f.string "zone",
-            f.string "service",
+            f.string "borough", f.string "zone", f.string "service",
         },
         edges = { lent.edge.to "pickups" "Trip", lent.edge.to "dropoffs" "Trip" },
     },
@@ -75,12 +74,12 @@ end
 local q = {}
 
 function q.load(c, data)
-    local zones = {}
-    for _, z in data.zones do zones[z.location] = c.Zone:create(z).id end
-    for _, t in data.trips do
-        t.origin, t.destination = zones[t.origin], zones[t.destination]
-        c.Trip:create(t)
+    -- each zone keeps its location id, which the trips name
+    for _, z in data.zones do
+        z.id, z.location = z.location, nil
+        c.Zone:create(z)
     end
+    c.Trip:createMany(data.trips)
     return "ok"
 end
 

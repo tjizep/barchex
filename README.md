@@ -391,7 +391,16 @@ By default each new row's id is a `barch.uuid()` string, such as
 order, and creates in one table never conflict over the id. Set
 `id = "int"` for ids 1, 2, 3 and so on from a counter per table, which makes
 concurrent creates in that table conflict and retry. A table keeps its id
-kind once it has a catalog; see MIGRATE. A table's keys use its name in snake case, so `BlogPost` stores as
+kind once it has a catalog; see MIGRATE.
+
+To keep a dataset's own keys, give `id` to `create`. The value must fit the
+table's id kind, and `create` raises `already has a row <id>` when that id is
+taken. In an `id = "int"` table, a given id above the counter moves the
+counter up, so later rows without an id continue above it. A row keeps its
+id: `update` and query `update` raise `keeps each row's id; only create
+takes an id` when `values` holds `id`.
+
+A table's keys use its name in snake case, so `BlogPost` stores as
 `blog_post`. `lent.edge.to "posts" "Post"` on `User` stores as `user_posts`,
 and an `lent.edge.from` reads that edge backwards.
 
@@ -798,12 +807,12 @@ end)
 
 | call | answers | raises an error when |
 |---|---|---|
-| `create(values)` | the row with its new `id` | a unique index already holds its values, a field is unknown, a value has the wrong kind or breaks a value rule, or a required field is missing |
+| `create(values)` | the row with its `id`, given or new | a given `id` does not fit the table's id kind or is taken, a unique index already holds its values, a field is unknown, a value has the wrong kind or breaks a value rule, or a required field is missing |
 | `createMany(rows)` | the created rows in input order; `{}` for an empty list | the list is malformed, or any row fails `create` |
 | `get(id)` | the row, or `nil` | `id` does not fit the table's id kind: a lowercase uuid, or a positive integer for `id = "int"` |
 | `by(index, values...)` | the row, or `nil` | there is no such ready unique index, or the number of values differs from its fields |
 | `update(id, values, clear)` | the stored row | there is no row `id`, it changes an immutable field, or as for `create` |
-| `upsert(index, values)` | the row and a `created` boolean | the index is missing, building or non-unique, an indexed field is missing from `values`, or the selected `create` or `update` fails |
+| `upsert(index, values)` | the row and a `created` boolean | `index` is `"id"` and `values.id` is missing or does not fit the table's id kind, the index is missing, building or non-unique, an indexed field is missing from `values`, or the selected `create` or `update` fails |
 | `delete(id)` | `true`, or `false` if there was no row | `id` does not fit the table's id kind |
 
 `by` takes an index name, such as `by_email`, or a field name with a unique
@@ -887,6 +896,9 @@ missing match runs `create`. The returned `created` flag is `true` for a new
 row and `false` for an update. Each branch runs its usual defaults, rules
 and hooks, and maintains every affected index. Edge values work on the
 create branch; use `link` and `unlink` to change an existing row's edges.
+
+`upsert("id", values)` selects the row by `values.id`. It updates that row
+with the other values, or creates a row with that id.
 
 Concurrent upserts of the same indexed values select one row. Optimistic
 transactions retry conflicts; pessimistic transactions take an exclusive

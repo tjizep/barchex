@@ -53,7 +53,7 @@ their line items, with 22 queries.
 | SQL | lent |
 |---|---|
 | `REGION`, `NATION`, `PART`, `SUPPLIER`, `CUSTOMER`, `ORDERS`, `LINEITEM` | one `lent.schema` each, with `id = "int"` |
-| primary keys such as `O_ORDERKEY` | an `int` field `key` with `:unique()`; lent gives out its own ids |
+| primary keys such as `O_ORDERKEY` | the row's `id`, given to `create` |
 | foreign keys such as `O_CUSTKEY` | `edge.from "customer" "Customer":ref "orders":unique()` |
 | `PARTSUPP`, keyed by part and supplier | `edge.to "supplies" "Supplier"` on `Part`, with `:fields` for `PS_AVAILQTY`, `PS_SUPPLYCOST` and `PS_COMMENT` |
 | `LINEITEM` key `(L_ORDERKEY, L_LINENUMBER)` | a `linenumber` field and the `order` edge; lent does not enforce the pair as unique |
@@ -62,8 +62,8 @@ their line items, with 22 queries.
 | `CHAR(1)` flags and fixed lists | `enum` |
 | line item to customer, used for grouping | `edge.through "customer" "Customer":via "order.customer"` |
 
-The loader looks up each row's lent id by its TPC-H key, because `create`
-gives out ids and refuses an `id` value.
+The loader gives each row its TPC-H key as its `id`, so foreign key values
+name the linked rows directly.
 
 ### Queries
 
@@ -108,6 +108,7 @@ codes and money amounts, and a lookup table of 265 zones.
 | `trip_distance` and the money columns | `float`; `DECIMAL` would keep cents exact |
 | `VendorID`, `RatecodeID`, `payment_type` | `int` codes; an `enum` needs string labels |
 | `store_and_fwd_flag` | `bool` |
+| `LocationID` of the zone table | the zone's `id`, given to `create` |
 | `PULocationID`, `DOLocationID` | `edge.from` to `Zone`, named `origin` and `destination` |
 
 The common taxi benchmark runs four queries over the whole table:
@@ -138,7 +139,7 @@ section is based on the schema text and has no test.
 
 | Sakila feature | lent |
 |---|---|
-| `SMALLINT UNSIGNED AUTO_INCREMENT` keys | `id = "int"` |
+| `SMALLINT UNSIGNED AUTO_INCREMENT` keys | `id = "int"`; a load gives each row its key as `id` |
 | `film_actor` and `film_category`, keyed by two foreign keys plus `last_update` | an edge with a `time` field |
 | `last_update ... ON UPDATE CURRENT_TIMESTAMP` | `:default(lent.now):updateDefault(lent.now)` |
 | `rating ENUM(...)` | `enum` |
@@ -165,10 +166,10 @@ item it belongs to.
 2. **`count()` reads rows.** An unfiltered `count()` decodes every row,
    at the same speed as a sum. A key count over the table or an index range
    would answer it without decoding.
-3. **Natural keys.** TPC-H, the taxi zones and Sakila all arrive with their
-   own keys. Loading them needs a key-to-id map, and an edge cannot name a
-   row by its key. Options are to accept `id` in `create` for `id = "int"`
-   tables, or to let an edge refer to a unique field.
+3. **Natural keys.** Done: `create` takes an `id`, so a table keyed by one
+   positive integer or a uuid keeps its keys, and edges name rows by them.
+   String and composite keys still need a unique field and a key-to-id map
+   when loading.
 4. **Decimal values.** Money is `DECIMAL` in TPC-H and Sakila. A `decimal`
    field kind with a fixed scale, stored as a scaled integer, would keep
    sums exact and keep the scale out of every query.
