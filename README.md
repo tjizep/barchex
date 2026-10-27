@@ -601,7 +601,11 @@ table's pk counter. `lay.walk(prefix, each)` calls `each(key)` for every key
 under a prefix, a page at a time, and `each` may remove the key it is given.
 `lay.scan(lo, hi, each)` and `lay.scan_back(lo, hi, each)` call `each(key)`
 for the keys in `[lo, hi)`, in key order or highest first, and stop when
-`each` answers `true`.
+`each` answers `true`. `lay.scan_values(lo, hi, each, first)` and
+`lay.scan_back_values(lo, hi, each, first)` call `each(key, value)` the same
+way. Their first page holds `first` keys, 1000 by default, and each later
+page twice as many up to 1000; pass a small `first` when `each` will stop
+early.
 `lent.LAYOUT` runs the module's self-check and answers `ok`.
 
 MIGRATE applies a schema and builds or removes its indexes in bounded

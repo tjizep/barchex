@@ -51,9 +51,10 @@ beside a development server.
   id kind.
 - `test_query.py` runs queries in optimistic and pessimistic transactions
   and checks the rows and the index each one picks. It counts the rows a
-  `desc` query reads to check that it stops at the limit. It also links, follows
-  and unlinks edges, checks that `delete` removes a row's edges, runs `has`
-  filters both ways and nested, loads edges with `with`, pages with
+  `desc` query reads to check that it stops at the limit, and checks the
+  keys and values the paged `lay.scan_values` scans give. It also links,
+  follows and unlinks edges, checks that `delete` removes a row's edges, runs
+  `has` filters both ways and nested, loads edges with `with`, pages with
   `cursor` and `after` in each order, and checks the query and edge errors.
 - `test_query_writes.py` checks query-wide `update` and `delete`, their
   affected-row counts, filters, edge follows, order and pagination. It

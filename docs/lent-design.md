@@ -246,7 +246,11 @@ the index with the longest prefix matched by its equality filters plus one
 range filter. Without a matching index it scans the table and filters each
 row. `:using(index)` names the index to use, and `:explain()` answers the
 plan. Index bounds may let in extra keys, so every filter is checked again
-on the row.
+on the row. A table scan reads each row's value with its key, and a unique
+index scan reads each pk the same way, with `barch.store.rangeValues`. A
+scan that stops at a limit starts with a page of that many keys, at least
+16, and doubles each page up to 1000, so it reads few values past the
+limit. Other index scans read keys only, since their keys hold the pk.
 
 Following an edge collects the linked ids, then reads those rows in id
 order. When the query's filters narrow an index on the target, or its order
@@ -296,5 +300,3 @@ a relationship worth joining on is declared as an edge.
   with a range read, which takes a shared lock. Two links to one row at once
   can both hold it and deadlock; `barch.tx.run` retries on `TXDEADLOCK`. An
   exclusive range read would order them instead.
-- **Range with values.** A range that answers keys and values would remove
-  the `get` per row.

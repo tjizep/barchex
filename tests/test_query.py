@@ -160,6 +160,16 @@ function steps.desc(c)
         back[#back + 1] = tostring(lay.row_pk(U.t, k))
         return #back == 5
     end, 2)
+    -- the values variants give each key with its stored value
+    local function values(scan, first, stop)
+        local got = {}
+        scan(lo, kc.after(lo), function(k, v)
+            local same = v == barch.store.get(k) and "" or "?"
+            got[#got + 1] = tostring(lay.row_pk(U.t, k)) .. same
+            return #got == stop
+        end, first)
+        return table.concat(got, ",")
+    end
     return {
         read(U:query():order("age", "desc"):limit(2)),
         read(U:query():where("age", ">=", 30):order("age", "desc"):limit(3)),
@@ -168,6 +178,10 @@ function steps.desc(c)
         read(U:query():order("name", "desc"):limit(2)),
         read(U:query():where("id", "=", 1):queryPosts():order("id", "desc"):limit(1)),
         table.concat(back, ","),
+        values(lay.scan_values, 1),
+        values(lay.scan_values, 2, 3),
+        values(lay.scan_back_values, 2),
+        values(lay.scan_back_values, nil, 2),
     }
 end
 
@@ -282,6 +296,11 @@ def test_desc_reads_from_the_end(client, mode):
         "2 edge user_posts 1",
         # pages of two from the end, stopped after five keys
         "6,5,4,3,2",
+        # pages of one, two and four keys, then stops
+        "1,2,3,4,5,6",
+        "1,2,3",
+        "6,5,4,3,2,1",
+        "6,5",
     ]
 
 

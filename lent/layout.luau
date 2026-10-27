@@ -241,6 +241,53 @@ function scan_back(lo: string, hi: string, each: (string) -> boolean?, limit: nu
     return false
 end
 
+-- The page size after `page`: twice as many keys, up to 1000.
+local function grow(page: number): number
+    return math.min(page * 2, 1000)
+end
+
+-- scan with each key's value: calls each(key, value) for every key from
+-- `lo` up to `hi`, until `each` answers true, and answers whether it stopped
+-- early. Each page reads keys and values together. The first page holds
+-- `first` keys, 1000 by default, and each later page twice as many up to
+-- 1000, so a scan that stops after a few keys reads few values.
+function scan_values(lo: string, hi: string, each: (string, string) -> boolean?,
+                     first: number?): boolean
+    local page = math.clamp(first or 1000, 1, 1000)
+    while true do
+        local keys, values = barch.store.rangeValues(lo, hi, page)
+        for i, k in keys do
+            if each(k, values[i]) then
+                return true
+            end
+        end
+        if #keys < page then
+            return false
+        end
+        lo = keys[#keys] .. "\2"
+        page = grow(page)
+    end
+end
+
+-- scan_back with each key's value, paged as scan_values is.
+function scan_back_values(lo: string, hi: string, each: (string, string) -> boolean?,
+                          first: number?): boolean
+    local page = math.clamp(first or 1000, 1, 1000)
+    local pos = barch.store.count(lo, hi)
+    while pos > 0 do
+        local from = math.max(0, pos - page)
+        local keys, values = barch.store.rangeValues(lo, hi, pos - from, from)
+        for i = #keys, 1, -1 do
+            if each(keys[i], values[i]) then
+                return true
+            end
+        end
+        pos = from
+        page = grow(page)
+    end
+    return false
+end
+
 function selftest(): (boolean, string?)
     local t = {
         key = "user",

@@ -426,9 +426,8 @@ local function drop(t: any, ix: any)
     end)
 end
 
-local function build_row(t: any, ix: any, fields: any, k: string)
-    local stored = barch.store.get(k)
-    if stored == nil then return end
+-- Stores index ix's entry for the row at key k, whose value is `stored`.
+local function build_row(t: any, ix: any, fields: any, k: string, stored: string)
     local pk = lay.row_pk(t, k)
     local r = lay.fill(t, rc.decode(fields, stored))
     local key, value = lay.entry(t, ix, r, pk)
@@ -443,12 +442,10 @@ local function build_row(t: any, ix: any, fields: any, k: string)
     barch.store.set(key, value)
 end
 
--- Computes the stored computed fields `names` of the row at key k with
--- their functions `fns`, and stores the row again.
+-- Computes the stored computed fields `names` of the row at key k, whose
+-- value is `stored`, with their functions `fns`, and stores the row again.
 local function fill_row(t: any, names: { string }, fns: any, fields: any, version: number,
-                        k: string)
-    local stored = barch.store.get(k)
-    if stored == nil then return end
+                        k: string, stored: string)
     local r = lay.fill(t, (rc.decode(fields, stored)))
     for _, name in names do
         local v = fns[name](table.clone(r))
@@ -504,9 +501,10 @@ local function fill_paths(t: any, p: any, edges: any, k: string)
 end
 
 local function build(t: any, ix: any)
-    local fields = row_fields(t)
-    lay.walk(lay.row(t), function(k)
-        build_row(t, ix, fields, k)
+    local fields, rows = row_fields(t), lay.row(t)
+    lay.scan_values(rows, kc.after(rows), function(k, v)
+        build_row(t, ix, fields, k, v)
+        return false
     end)
 end
 
@@ -586,9 +584,10 @@ function apply(p: any)
         elseif s.op == "drop" then
             drop(s.table, s.index)
         elseif s.op == "fill" then
-            local fields = row_fields(s.table)
-            lay.walk(lay.row(s.table), function(k)
-                fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k)
+            local fields, rows = row_fields(s.table), lay.row(s.table)
+            lay.scan_values(rows, kc.after(rows), function(k, v)
+                fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k, v)
+                return false
             end)
         else
             build(s.table, s.index)
@@ -641,16 +640,22 @@ local function advance(c: any, budget: number, app: any): number
         local lo = rows and work.cursor and work.cursor .. "\2" or prefix
         local hi = kc.after(prefix)
         local limit = budget - processed
-        local keys = barch.store.range(lo, hi, limit)
+        -- the row steps read each row with its key
+        local keys, values
+        if rows then
+            keys, values = barch.store.rangeValues(lo, hi, limit)
+        else
+            keys = barch.store.range(lo, hi, limit)
+        end
         local fields = rows and row_fields(t)
         local fns = step.op == "fill" and fill_fns(app, t, step.fields)
-        for _, k in keys do
+        for i, k in keys do
             if step.op == "drop" then
                 barch.store.remove(k)
             elseif step.op == "fill" then
-                fill_row(t, step.fields, fns, fields, c.version, k)
+                fill_row(t, step.fields, fns, fields, c.version, k, values[i])
             else
-                build_row(t, ix, fields, k)
+                build_row(t, ix, fields, k, values[i])
             end
         end
         processed += #keys

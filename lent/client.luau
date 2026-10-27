@@ -192,14 +192,19 @@ end
 
 -- The row at pk, filled with defaults and computed fields, or nil. A pessimistic caller about
 -- to write the row reads it with the exclusive lock.
+-- The row at pk, from `v`, the value stored at its key.
+local function row_of(self: any, pk: any, v: string): any
+    local r = lay.fill(self.t, (rc.decode(self.fields, v)))
+    r.id = pk
+    return compute(self, r)
+end
+
 local function read(self: any, pk: any, exclusive: boolean?): any
     local v = get(self, lay.row(self.t, pk), exclusive)
     if v == nil then
         return nil
     end
-    local r = lay.fill(self.t, (rc.decode(self.fields, v)))
-    r.id = pk
-    return compute(self, r)
+    return row_of(self, pk, v)
 end
 
 local function no_field(self: any, k: any)
@@ -318,14 +323,13 @@ local function check_free(self: any, ix: any, key: string, pk: any, r: any)
         duplicate(self, ix, other, r)
     end
     if ix.state == "building" then
-        lay.walk(lay.row(self.t), function(k)
+        local rows = lay.row(self.t)
+        lay.scan_values(rows, kc.after(rows), function(k, v)
             local otherPk = lay.row_pk(self.t, k)
-            if otherPk ~= pk then
-                local row = read(self, otherPk)
-                if row and lay.entry(self.t, ix, row, otherPk) == key then
-                    duplicate(self, ix, tostring(otherPk), r)
-                end
+            if otherPk ~= pk and lay.entry(self.t, ix, row_of(self, otherPk, v), otherPk) == key then
+                duplicate(self, ix, tostring(otherPk), r)
             end
+            return false
         end)
     end
 end
@@ -1560,8 +1564,9 @@ local function rows(q: any, loading: boolean?): { any }
     local want = q.lim and q.skip + q.lim
     local ordered, early, back = p.ordered, false, false
     local out = {}
-    local function consider(pk: number): boolean
-        local r = read(tbl, pk)
+    -- `v` is the row's stored value when the scan read it with the key
+    local function consider(pk: number, v: string?): boolean
+        local r = if v then row_of(tbl, pk, v) else read(tbl, pk)
         if r and matches(q, r) then
             out[#out + 1] = r
             return early and #out >= want
@@ -1574,23 +1579,34 @@ local function rows(q: any, loading: boolean?): { any }
         ordered, early, back = o, o and want ~= nil, o and q.desc
     end
     -- Reads the rows of index plan ix's keys, only those in `only` when
-    -- given. Answers false when it gave up after `budget` keys.
+    -- given. Answers false when it gave up after `budget` keys. A scan of
+    -- the rows themselves reads each row with its key, and one of a unique
+    -- index reads each pk with its key; one that stops at a limit starts
+    -- with a page of that many keys.
     local function scan_index(ix: any, only: any, budget: number?): boolean
         local seen, over = 0, false
-        local scan = back and lay.scan_back or lay.scan
-        scan(ix.lo, ix.hi, function(k)
+        local primary, unique = ix.ix.primary, ix.ix.unique
+        local rowValues = primary and only == nil
+        local function each(k: string, v: string?): boolean
             seen += 1
             if budget and seen > budget then
                 over = true
                 return true
             end
-            local pk = if ix.ix.primary then lay.row_pk(tbl.t, k)
-                else lay.pk_of(tbl.t, ix.ix, k, ix.ix.unique and barch.store.get(k) or nil)
+            local pk = if primary then lay.row_pk(tbl.t, k) else lay.pk_of(tbl.t, ix.ix, k, v)
             if only and not only[pk] then
                 return false
             end
-            return consider(pk)
-        end)
+            return consider(pk, if rowValues then v else nil)
+        end
+        if rowValues or (unique and not primary) then
+            local first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
+            local scan = back and lay.scan_back_values or lay.scan_values
+            scan(ix.lo, ix.hi, each, first)
+        else
+            local scan = back and lay.scan_back or lay.scan
+            scan(ix.lo, ix.hi, each)
+        end
         return not over
     end
     local done = false

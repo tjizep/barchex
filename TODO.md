@@ -27,8 +27,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
 
 ## barch
 
-- **Range with values.** A range that answers keys and values would remove
-  the `get` for each row read through an index.
 - **Savepoints.** When a write is refused and the caller catches the error,
   the writes its hooks made stay in the transaction. A savepoint would let
   lent roll back to the start of the call.
