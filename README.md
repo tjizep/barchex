@@ -509,9 +509,8 @@ in its named list. Unknown operation names, invalid lists and non-function
 entries in a named list raise a `SCHEMA` error when the schema loads.
 
 A hook may change `row` and may read and write other tables through `c`.
-An error it raises refuses the write. Writes a hook made before a refusal
-stay in the transaction, so a caller that catches the error and goes on
-keeps them.
+An error it raises refuses the write and takes back what the hook wrote, as
+described for `lent.tx` below.
 
 Use `:computed(fn)` for a value derived from the row each time it is read,
 such as the time between two `time` fields:
@@ -743,8 +742,17 @@ unique entry about to be written is read with the exclusive lock, so two
 writers of one value wait for each other. Inside a transaction you already
 run, `lent.client(pessimistic)` answers the same `c`. A table with
 `id = "int"` takes each new id from one counter, so concurrent creates in
-that table conflict and retry. A refused single-row call writes nothing apart
-from what its hooks wrote, so `fn` can catch its error and go on.
+that table conflict and retry.
+
+Each write call (`create`, `createMany`, `update`, `upsert`, `delete`,
+`link`, `unlink`, and query `update` and `delete`) runs in a
+`barch.tx.savepoint`. When the call raises an error, every key it wrote,
+including its hooks' writes, goes back to what the transaction held before
+the call, and the error comes out unchanged. `fn` can catch the error and go
+on with the transaction as it was. In a pessimistic transaction, the locks
+the refused call took stay held until the transaction ends. Call the write
+methods inside a transaction: outside one, a refused call keeps what it
+wrote before the error.
 
 Use `createMany` to create several rows and `upsert` to create or update a
 row selected by a unique index:
@@ -768,10 +776,9 @@ transaction; split large lists into separate transactions to stay within
 the function deadline.
 
 Multi-row writes (`createMany`, query `update` and query `delete`) stop at
-the first error. Let the error leave the transaction callback to roll back
-the writes, including those made by hooks. If the callback catches the
-error and completes, earlier row writes and hook writes stay in the
-transaction.
+the first error and take back every row they wrote, including the hooks'
+writes. A caller that catches the error keeps the rows written by earlier
+calls.
 
 `upsert` accepts the same index names and field-name shorthand as `by`.
 Supply a non-`nil` value for every field of the unique index, including all
