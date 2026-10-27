@@ -89,6 +89,64 @@ function now(): number
     return barch.time()
 end
 
+local function checked(name: string, v: any, why: string?): any
+    if v == nil then error(name .. " " .. tostring(why), 0) end
+    return v
+end
+
+-- Unix milliseconds for a UTC date and time, from ISO 8601 text, as in
+-- lent.date("1995-03-15") or lent.date("1995-03-15T10:20:30Z"), or from
+-- parts, as in lent.date(1995, 3, 15, 10, 20, 30).
+function date(y: any, ...: any): number
+    if type(y) == "string" then return checked("date", VALUES.parse_date(y)) end
+    return checked("date", VALUES.date(y, ...))
+end
+
+-- The calendar parts of a time: year, month, day, hour, minute, second,
+-- millisecond and weekday, 1 for Monday. nil answers nil, so a computed
+-- field may read an optional time.
+local function parts(name: string, t: any): any
+    if t == nil then return nil end
+    return checked(name, VALUES.date_parts(t))
+end
+
+function dateParts(t: any): any
+    return parts("dateParts", t)
+end
+
+function year(t: any): number?
+    local p = parts("year", t)
+    return p and p.year
+end
+
+function month(t: any): number?
+    local p = parts("month", t)
+    return p and p.month
+end
+
+function day(t: any): number?
+    local p = parts("day", t)
+    return p and p.day
+end
+
+-- Time t moved by n calendar months; a day past the end of the new month
+-- becomes its last day.
+function addMonths(t: any, n: any): number?
+    if t == nil then return nil end
+    return checked("addMonths", VALUES.add_months(t, n))
+end
+
+-- "1995-03-15" for a time, and "1995-03-15T10:20:30.000Z" with its time of day.
+function formatDate(t: any): string?
+    if t == nil then return nil end
+    return checked("formatDate", VALUES.format_date(t))
+end
+
+function formatTime(t: any): string?
+    if t == nil then return nil end
+    return checked("formatTime", VALUES.format_date(t, true))
+end
+
 function jsonArray(list: any?): any
     return VALUES.array(list)
 end

@@ -5,8 +5,14 @@
 -- An expression reads the row's fields and the parameters by name, and uses
 -- literals (numbers, strings, true, false, nil), `and`, `or`, `not`, the
 -- comparisons == ~= < <= > >=, the arithmetic + - * / // % ^, unary minus,
--- `..`, `#` and parentheses. Nothing else parses, so an expression reaches
--- only the row and its parameters.
+-- `..`, `#`, parentheses, and the date calls below. Nothing else parses, so
+-- an expression reaches only the row and its parameters.
+--
+--   date('1995-03-15')   Unix milliseconds of ISO 8601 text, as lent.date
+--   year(t), month(t), day(t)   the UTC calendar part of a time
+--
+-- A call on a constant is worked out once, so `shipdate >= date('1994-01-01')`
+-- is a comparison with a value that an index can use.
 --
 -- Required, not called: `local EXPR = require("lent.EXPR")`. A function key
 -- has to define call(), so this one answers a self-check:
@@ -47,6 +53,21 @@ local BINARY = {
     ["^"] = { 10, 9 },
 }
 local UNARY = 8
+
+-- The functions an expression may call: the type of value each takes, and
+-- a function answering the result, or nil and why.
+local function part(name: string)
+    return function(t)
+        local p, why = VALUES.date_parts(t)
+        return p and p[name], why
+    end
+end
+local CALLS = {
+    date = { takes = "string", fn = VALUES.parse_date },
+    year = { takes = "number", fn = part("year") },
+    month = { takes = "number", fn = part("month") },
+    day = { takes = "number", fn = part("day") },
+}
 
 local ARITH = {
     ["+"] = function(x, y) return x + y end,
@@ -193,7 +214,8 @@ local function tokenize(src: string, bad: any): { any }
 end
 
 -- The tree of src. Nodes are { k = "const", v }, { k = "name", name },
--- { k = "un", op, a } and { k = "bin", op, a, b }, each with its column `at`.
+-- { k = "call", name, a }, { k = "un", op, a } and { k = "bin", op, a, b },
+-- each with its column `at`.
 local function parse_tree(src: string, bad: any): any
     local toks = tokenize(src, bad)
     local pos = 1
@@ -204,6 +226,17 @@ local function parse_tree(src: string, bad: any): any
         if t.k == "const" then
             pos += 1
             return { k = "const", v = t.v, at = t.at }
+        elseif t.k == "name" and toks[pos + 1].k == "(" then
+            if CALLS[t.v] == nil then
+                bad(t.at, "has no function " .. t.v .. "; expressions call date, year, month and day")
+            end
+            pos += 2
+            local node = { k = "call", name = t.v, a = expr(0), at = t.at }
+            if toks[pos].k ~= ")" then
+                bad(t.at, "has a call to " .. t.v .. " without its )")
+            end
+            pos += 1
+            return node
         elseif t.k == "name" then
             pos += 1
             return { k = "name", name = t.v, at = t.at }
@@ -319,7 +352,19 @@ local function build(n: any, bad: any): (any) -> any
     end
     local op = n.op
     local fa = build(n.a, bad)
-    if n.k == "un" then
+    if n.k == "call" then
+        local name, at, call = n.name, n.at, CALLS[n.name]
+        return function(r)
+            local x = fa(r)
+            if x == nil then return nil end
+            if type(x) ~= call.takes then
+                bad(at, name .. " takes a " .. call.takes .. ", got " .. type(x))
+            end
+            local v, why = call.fn(x)
+            if v == nil then bad(at, name .. " " .. tostring(why)) end
+            return v
+        end
+    elseif n.k == "un" then
         local checked = n.a.t == "any"
         if op == "not" then
             return function(r) return not fa(r) end
@@ -463,7 +508,20 @@ local function resolve(n: any, kindOf: any, params: any, bad: any): any
         end
         bad(n.at, "has no field or parameter " .. n.name)
     end
-    local out = { k = n.k, op = n.op, at = n.at, a = resolve(n.a, kindOf, params, bad) }
+    local out = { k = n.k, op = n.op, name = n.name, at = n.at,
+                  a = resolve(n.a, kindOf, params, bad) }
+    if n.k == "call" then
+        local takes = CALLS[n.name].takes
+        if out.a.t ~= takes and out.a.t ~= "any" and out.a.t ~= "nil" then
+            bad(n.at, n.name .. " takes a " .. takes .. ", got " .. describe(out.a))
+        end
+        out.t = "number"
+        if out.a.k == "const" then
+            local v = build(out, bad)(nil)
+            return { k = "const", v = v, t = type_of(v) }
+        end
+        return out
+    end
     if n.b then
         out.b = resolve(n.b, kindOf, params, bad)
     end
@@ -674,7 +732,13 @@ function call()
             return "failed: ranges " .. i .. ": " .. ranges(c[1])
         end
     end
-    local r = { age = 30, salary = 500, name = "ann", active = true, tags = { "a" } }
+    local dated = compile("at >= date('1995-03-15') and year(at) == 1995",
+                          function(name) return name == "at" and "time" or nil end, nil, "EXPR")
+    if #dated ~= 2 or dated[1].value ~= 795225600000 or dated[2].fn == nil then
+        return "failed: date calls"
+    end
+    local r = { age = 30, salary = 500, name = "ann", active = true, tags = { "a" },
+                at = 795225600000 }
     local cases = {
         { "age > 10 and age <= 100 and salary < 1000", true },
         { "(age or 0) * 2 ^ 2 // 1 % 1000 == 120", true },
@@ -686,9 +750,11 @@ function call()
         { "tags == want", true },
         { "1_000 == 0x3e8 and 1e3 == 1000 and 0b11 == 3 and '\\65\\x42' == 'AB'", true },
         { "name < 'bob' and not active == false", true },
+        { "year(at) == 1995 and month(at) == 3 and day(at + 86400000) == 16", true },
+        { "at < date('1995-03-15T00:00:00.001Z') and year(missing) == nil", true },
     }
     local extra = { age = "int", missing = "int", nope = "string", salary = "float",
-                    name = "string", active = "bool", tags = "json" }
+                    name = "string", active = "bool", tags = "json", at = "time" }
     for i, c in cases do
         if eval(c[1], extra, { lo = 4, want = { "a" } }, r) ~= c[2] then
             return "failed: case " .. i
@@ -707,6 +773,13 @@ function call()
         { "function() end", 'EXPR "function() end" at column 1: takes no function; an expression'
             .. " has values, names and operators" },
         { "age > 3 3", 'EXPR "age > 3 3" at column 9: has 3 after the end of the expression' },
+        { "now() > 1", 'EXPR "now() > 1" at column 1: has no function now; expressions call'
+            .. " date, year, month and day" },
+        { "year(name) > 1", 'EXPR "year(name) > 1" at column 1: year takes a number, got field'
+            .. " name (string)" },
+        { "age > date('1995-02-30')", 'EXPR "age > date(\'1995-02-30\')" at column 7: date wants'
+            .. ' a date such as 1995-03-15 or 1995-03-15T10:20:30Z, got "1995-02-30"' },
+        { "year(age 1)", 'EXPR "year(age 1)" at column 1: has a call to year without its )' },
     }
     for i, c in errors do
         local got = err(function() eval(c[1], kinds, nil, r) end)

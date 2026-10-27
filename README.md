@@ -411,6 +411,36 @@ the current time that way, from `barch.time()`. In a call replayed from a
 Raft log, it answers the time the entry was logged, so every member stores
 the same value.
 
+Use the date helpers to read and write times as calendar dates. They work
+in UTC on the Gregorian calendar, for years 1 to 9999:
+
+| helper | answers |
+|---|---|
+| `lent.date(text)` | the time of ISO 8601 text: a date such as `"1995-03-15"`, or a date and time such as `"1995-03-15T10:20:30.250Z"`; a space may replace `T`, seconds and milliseconds are optional, and the zone is `Z`, `+hh:mm` or `-hh:mm`, or UTC when left out |
+| `lent.date(year, month, day, hour, minute, second, ms)` | the time of those parts; the parts after `day` default to 0 |
+| `lent.dateParts(t)` | a table of `year`, `month`, `day`, `hour`, `minute`, `second`, `millisecond` and `weekday`, from 1 for Monday to 7 for Sunday |
+| `lent.year(t)`, `lent.month(t)`, `lent.day(t)` | one part of `t` |
+| `lent.addMonths(t, n)` | `t` moved by `n` calendar months at the same time of day; a day past the end of the new month becomes its last day, so January 31 plus one month is February 28 or 29 |
+| `lent.formatDate(t)`, `lent.formatTime(t)` | `"1995-03-15"`, and `"1995-03-15T10:20:30.250Z"` |
+
+Every helper except `lent.date` answers `nil` for a `nil` time, so a
+computed field can read an optional `time` field. Invalid text, an
+impossible date such as `1995-02-29`, and a time that is not a whole number
+of milliseconds raise an error that names the helper, such as
+`date wants a date such as 1995-03-15 or 1995-03-15T10:20:30Z, got "1995-02-29"`.
+A day is 86400000 milliseconds, so add days with arithmetic:
+
+```lua
+local Order = lent.schema "Order" {
+    fields = {
+        lent.field.time "placed",
+        lent.field.int "year":computed(function(o) return lent.year(o.placed) end):stored(),
+    },
+    indexes = { lent.index("year") },
+}
+local due = lent.date("1995-03-15") + 90 * 86400000
+```
+
 Use a `decimal` field for amounts such as money, which keep a fixed number
 of digits after the point. `:scale(n)` is required and sets that number,
 from 0 to 15:
@@ -1080,18 +1110,26 @@ c.Emp:query():where("(age or 0) * 2 > salary / 10 or name .. '!' == shout",
 
 It takes numbers, strings, `true`, `false` and `nil`, the names of fields,
 computed fields and parameters, `and`, `or`, `not`, `==`, `~=`, `<`, `<=`,
-`>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#` and parentheses.
-Anything else is a syntax error, so an expression reads only the row and its
+`>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#`, parentheses, and
+the calls `date(text)`, `year(t)`, `month(t)` and `day(t)`, which work as
+the `lent` helpers of the same names. Anything else is a syntax error, so an expression reads only the row and its
 parameters. A parameter is a number, string, boolean or JSON table; a name
 that is both a field and a parameter is an error, and so is a name that is
 neither. Pass values through `params` to keep them out of the expression
 text. A parameter set to `nil` is missing from its table, so compare with
 the literal `nil` instead.
 
+A call on a value or parameter is worked out once, so
+`placed >= date('1995-01-01')` compares the field with a number, and an
+index on `placed` can serve it. A call on a field runs for each row, so
+`year(placed) == 1995` checks every row the rest of the query selects. To
+read one year through an index on `placed`, compare with its bounds:
+`placed >= date('1995-01-01') and placed < date('1996-01-01')`.
+
 A missing field value is `nil`. A range comparison with `nil` is false, as
 in `where(field, op, value)`, so `not (age > 20)` keeps rows without an age.
-Arithmetic, `..` and `#` with `nil` give `nil`. `==` and `~=` compare JSON
-fields structurally. `where` checks the expression against the field kinds
+Arithmetic, `..`, `#` and calls with `nil` give `nil`. `==` and `~=` compare
+JSON fields structurally. `where` checks the expression against the field kinds
 when it is called: it raises an error for a range comparison on a `bool` or
 `json` field, for a comparison of different kinds such as `age > 'ten'`, and
 for arithmetic on a string. A value whose kind is known only per row, such

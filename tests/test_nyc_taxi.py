@@ -19,17 +19,6 @@ local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
 local f = lent.field
 
--- the year of a Unix millisecond time, by the civil-from-days algorithm
-local function year(t)
-    local z = t // 86400000 + 719468
-    local era = z // 146097
-    local doe = z - era * 146097
-    local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
-    local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
-    local mp = (5 * doy + 2) // 153
-    return yoe + era * 400 + (mp >= 10 and 1 or 0)
-end
-
 local app = lent.graph {
     lent.schema "Zone" {
         id = "int",
@@ -45,7 +34,7 @@ local app = lent.graph {
             f.bool "stored", f.int "payment", f.float "fare", f.float "extra",
             f.float "mta", f.float "tip", f.float "tolls", f.float "improvement",
             f.float "total", f.float "congestion",
-            f.int "year":computed(function(r) return year(r.pickup) end),
+            f.int "year":computed(function(r) return lent.year(r.pickup) end),
             f.int "miles":computed(function(r) return math.round(r.distance) end),
         },
         indexes = { lent.index("pickup") },

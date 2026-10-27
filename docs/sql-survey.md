@@ -34,9 +34,7 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
-2. **Dates.** `DATE` values need Unix milliseconds, and group keys such as
-   the year of a date need hand-written computed fields.
-3. **Missing query forms.** `avg`, `count(distinct)`, `HAVING`, ordering
+2. **Missing query forms.** `avg`, `count(distinct)`, `HAVING`, ordering
    by an aggregate, grouping by a field of a linked row, anti-joins
    (`NOT EXISTS`), correlated subqueries and views all take Luau code.
 
@@ -57,7 +55,7 @@ their line items, with 22 queries.
 | `PARTSUPP`, keyed by part and supplier | `edge.to "supplies" "Supplier"` on `Part`, with `:fields` for `PS_AVAILQTY`, `PS_SUPPLYCOST` and `PS_COMMENT` |
 | `LINEITEM` key `(L_ORDERKEY, L_LINENUMBER)` | a `linenumber` field and the `order` edge; lent does not enforce the pair as unique |
 | `DECIMAL(15,2)` | `decimal` with `:scale(2)`; the test keeps `int` cents and percent so revenue products stay exact |
-| `DATE` | `time` at midnight UTC |
+| `DATE` | `time` at midnight UTC; `lent.date("1995-03-15")` and `date('1995-03-15')` in an expression |
 | `CHAR(1)` flags and fixed lists | `enum` |
 | line item to customer, used for grouping | `edge.through "customer" "Customer":via "order.customer"` |
 
@@ -120,8 +118,7 @@ The common taxi benchmark runs four queries over the whole table:
 | count per passenger count, year and rounded distance, ordered by year and count | as above with a computed `miles` field, sorted in Luau |
 
 All four are verified in `tests/test_nyc_taxi.py`. The `year` computed
-field converts Unix milliseconds to a calendar year with a short Luau
-function in the test, because Luau in barch has no `os.date`.
+field is `lent.year(r.pickup)`.
 
 These queries read every row, so they show the size limit most clearly. In
 a run on one machine, `count()`, `sum` and each benchmark query took about
@@ -172,10 +169,12 @@ item it belongs to.
 4. **Decimal values.** Done: a `decimal` field rounds each value to its
    scale and sums it exactly. A `sum` with a `value` function, such as
    TPC-H revenue `l_extendedprice * (1 - l_discount)`, still adds floats.
-5. **Dates and their parts.** TPC-H uses `DATE` literals and
-   `EXTRACT(YEAR ...)` in Q7, Q8 and Q9, and the taxi benchmark groups by
-   year. Helpers such as `lent.date("1995-03-15")` and year, month and day
-   parts for computed fields and expressions would cover them.
+5. **Dates and their parts.** Done: `lent.date("1995-03-15")`,
+   `lent.year`, `lent.month`, `lent.day` and `lent.addMonths` cover `DATE`
+   literals, `EXTRACT` and `INTERVAL` months in computed fields, and
+   expressions call `date`, `year`, `month` and `day`. A filter such as
+   `year(shipdate) = 1995` checks each row; compare with date bounds to read
+   an index.
 6. **More aggregates and group forms.** `avg` (Q1, the taxi benchmark),
    `count(distinct)` (Q16), `HAVING` (Q11, Q18), and ordering and limiting
    groups by an aggregate (Q3, Q10, Q15, Q18) each take Luau code today.
@@ -192,7 +191,7 @@ item it belongs to.
     only, so `(L_ORDERKEY, L_LINENUMBER)` cannot be unique.
 11. **String patterns.** A `LIKE` prefix works as a range on an index. A
     pattern elsewhere in the string needs a `where` function, because
-    expressions take no function calls.
+    expressions call only the date functions.
 12. **Luau integers.** `simdjson.parse` answers whole numbers beyond 32
     bits, such as millisecond times, as the Luau `integer` type. lent
     fields accept only `number`, and the error reads `wants a time in Unix

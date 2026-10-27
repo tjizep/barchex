@@ -249,6 +249,148 @@ function decimal_units(v: number, scale: number): number
     return math.round(v * 10 ^ scale)
 end
 
+-- Dates are Unix milliseconds in UTC, on the proleptic Gregorian calendar,
+-- for years 1 to 9999.
+local DAY_MS = 86400000
+
+-- Days from 1970-01-01 to year y, month m, day d, and back, by Howard
+-- Hinnant's days_from_civil and civil_from_days.
+local function days_from_civil(y: number, m: number, d: number): number
+    y -= m <= 2 and 1 or 0
+    local era = y // 400
+    local yoe = y - era * 400
+    local doy = (153 * ((m + 9) % 12) + 2) // 5 + d - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+end
+
+local function civil_from_days(z: number): (number, number, number)
+    z += 719468
+    local era = z // 146097
+    local doe = z - era * 146097
+    local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    local mp = (5 * doy + 2) // 153
+    local m = mp < 10 and mp + 3 or mp - 9
+    return yoe + era * 400 + (m <= 2 and 1 or 0), m, doy - (153 * mp + 2) // 5 + 1
+end
+
+local function month_days(y: number, m: number): number
+    if m == 2 then
+        return (y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)) and 29 or 28
+    end
+    return (m == 4 or m == 6 or m == 9 or m == 11) and 30 or 31
+end
+
+local function whole(v: any, lo: number, hi: number): boolean
+    return type(v) == "number" and v == math.floor(v) and v >= lo and v <= hi
+end
+
+-- The Unix milliseconds of a UTC date and time, or nil and why there is no
+-- such time.
+function date(y: any, mo: any, d: any, h: any?, mi: any?, s: any?, ms: any?): (number?, string?)
+    local parts = { y, mo, d, h or 0, mi or 0, s or 0, ms or 0 }
+    for i = 1, 7 do
+        if type(parts[i]) == "integer" then parts[i] = integer.tonumber(parts[i]) end
+    end
+    y, mo, d, h, mi, s, ms = table.unpack(parts, 1, 7)
+    if not (whole(y, 1, 9999) and whole(mo, 1, 12) and whole(h, 0, 23) and whole(mi, 0, 59)
+        and whole(s, 0, 59) and whole(ms, 0, 999)) or not whole(d, 1, month_days(y, mo)) then
+        local text = {}
+        for i = 1, 7 do text[i] = tostring(parts[i]) end
+        return nil, "has no date and time year " .. text[1] .. ", month " .. text[2]
+            .. ", day " .. text[3] .. ", " .. text[4] .. ":" .. text[5] .. ":" .. text[6]
+            .. "." .. text[7]
+    end
+    return days_from_civil(y, mo, d) * DAY_MS + ((h * 60 + mi) * 60 + s) * 1000 + ms
+end
+
+-- The Unix milliseconds of ISO 8601 text: a date such as 1995-03-15, or a
+-- date and time such as 1995-03-15T10:20:30.250Z, with T or a space before
+-- the time, optional seconds and milliseconds, and a zone of Z, +hh:mm or
+-- -hh:mm; a time without a zone is UTC. Answers nil and why for other text.
+function parse_date(text: any): (number?, string?)
+    local why = "wants a date such as 1995-03-15 or 1995-03-15T10:20:30Z, got "
+        .. (type(text) == "string" and json(text) or tostring(text))
+    if type(text) ~= "string" then return nil, why end
+    local y, mo, d, rest = string.match(text, "^(%d%d%d%d)%-(%d%d)%-(%d%d)(.*)$")
+    if y == nil then return nil, why end
+    local h, mi, s, ms, offset = "0", "0", "0", "0", 0
+    if rest ~= "" then
+        h, mi, rest = string.match(rest, "^[T ](%d%d):(%d%d)(.*)$")
+        if h == nil then return nil, why end
+        local ss, tail = string.match(rest, "^:(%d%d)(.*)$")
+        if ss then
+            s, rest = ss, tail
+            local frac, tail2 = string.match(rest, "^%.(%d%d?%d?)(.*)$")
+            if frac then ms, rest = string.sub(frac .. "00", 1, 3), tail2 end
+        end
+        local sign, zh, zm = string.match(rest, "^([+-])(%d%d):(%d%d)$")
+        if sign then
+            if tonumber(zh) > 23 or tonumber(zm) > 59 then return nil, why end
+            offset = (sign == "-" and -1 or 1) * (tonumber(zh) * 60 + tonumber(zm)) * 60000
+        elseif rest ~= "" and rest ~= "Z" then
+            return nil, why
+        end
+    end
+    local t = date(tonumber(y), tonumber(mo), tonumber(d), tonumber(h), tonumber(mi),
+                   tonumber(s), tonumber(ms))
+    if t == nil then return nil, why end
+    return t - offset
+end
+
+-- t as a Luau number, or nil and why t is no time in Unix milliseconds.
+local function time_value(t: any): (number?, string?)
+    if type(t) == "integer" then t = integer.tonumber(t) end
+    if type(t) ~= "number" or t ~= math.floor(t) or math.abs(t) > 2 ^ 53 then
+        return nil, "takes a time in Unix milliseconds, got " .. tostring(t)
+    end
+    return t
+end
+
+-- The UTC calendar parts of time t: year, month, day, hour, minute,
+-- second, millisecond, and the ISO weekday, 1 for Monday to 7 for Sunday.
+-- Answers nil and why when t is no time.
+function date_parts(t: any): (any, string?)
+    local v, why = time_value(t)
+    if v == nil then return nil, why end
+    local days = v // DAY_MS
+    local ms = v - days * DAY_MS
+    local y, m, d = civil_from_days(days)
+    return {
+        year = y, month = m, day = d, hour = ms // 3600000, minute = ms // 60000 % 60,
+        second = ms // 1000 % 60, millisecond = ms % 1000, weekday = (days + 3) % 7 + 1,
+    }
+end
+
+-- Time t moved by n calendar months, keeping its time of day. A day past
+-- the end of the new month becomes its last day, so January 31 plus one
+-- month is February 28 or 29.
+function add_months(t: any, n: any): (number?, string?)
+    local p, why = date_parts(t)
+    if p == nil then return nil, why end
+    if type(n) == "integer" then n = integer.tonumber(n) end
+    if not whole(n, -120000, 120000) then
+        return nil, "takes a whole number of months, got " .. tostring(n)
+    end
+    local months = p.year * 12 + p.month - 1 + n
+    local y, m = months // 12, months % 12 + 1
+    return date(y, m, math.min(p.day, month_days(y, m)), p.hour, p.minute, p.second,
+                p.millisecond)
+end
+
+-- Time t as ISO 8601 text: 1995-03-15, or 1995-03-15T10:20:30.250Z with
+-- the time of day.
+function format_date(t: any, withTime: boolean?): (string?, string?)
+    local p, why = date_parts(t)
+    if p == nil then return nil, why end
+    local text = string.format("%04d-%02d-%02d", p.year, p.month, p.day)
+    if withTime then
+        text ..= string.format("T%02d:%02d:%02d.%03dZ", p.hour, p.minute, p.second,
+                               p.millisecond)
+    end
+    return text
+end
+
 function call()
     local value = parse_json('{"z":[],"a":[{},null,1099511627776]}')
     if json(value) ~= '{"a":[{},null,1099511627776],"z":[]}'
@@ -264,6 +406,27 @@ function call()
     if decimal(1e15, 0) ~= nil or decimal(1e13, 2) ~= nil or decimal(0 / 0, 2) ~= nil
         or decimal("1", 2) ~= nil or decimal_units(decimal(12.34, 2) :: number, 2) ~= 1234 then
         return "failed: decimal limits"
+    end
+    for _, case in { { "1970-01-01", 0 }, { "1995-03-15", 795225600000 },
+                     { "2000-02-29T23:59:59.999Z", 951868799999 }, { "1969-12-31 23:00", -3600000 },
+                     { "1970-01-01T02:00:00+02:00", 0 }, { "1970-01-01T00:00:00.5", 500 },
+                     { "0001-01-01", -62135596800000 }, { "9999-12-31", 253402214400000 },
+                     { "1995-02-29", nil }, { "1995-3-15", nil }, { "1995-03-15T24:00", nil },
+                     { "1995-03-15Z", nil }, { "1995-03-15T10:00:00.1234", nil } } do
+        if parse_date(case[1]) ~= case[2] then
+            return "failed: date " .. case[1]
+        end
+    end
+    local p = date_parts(-1)
+    if p.year ~= 1969 or p.month ~= 12 or p.day ~= 31 or p.hour ~= 23 or p.millisecond ~= 999
+        or p.weekday ~= 3 or date_parts(0).weekday ~= 4 or date_parts(1.5) ~= nil then
+        return "failed: date parts"
+    end
+    if format_date(add_months(parse_date("2024-01-31T10:00Z"), 1), true)
+            ~= "2024-02-29T10:00:00.000Z"
+        or format_date(add_months(parse_date("2024-03-31"), -13) :: number) ~= "2023-02-28"
+        or add_months(parse_date("9999-12-01"), 1) ~= nil then
+        return "failed: add months"
     end
     return "ok"
 end
