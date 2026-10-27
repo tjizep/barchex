@@ -100,7 +100,8 @@ beside a development server.
 - `test_hook_depth.py` nests create hooks 16 deep, checks that a 17th
   level raises the depth error and takes back the chain's rows, and stops
   two tables whose hooks create each other, in optimistic and pessimistic
-  transactions.
+  transactions. It also checks a client opened with `hookDepth = 4` and the
+  errors for invalid `lent.open` options.
 - `test_rules.py` checks value rules, `time` fields, function defaults,
   `updateDefault`, immutable fields and hooks through `lent.open`. It checks
   plain-table, builder and mixed hook declarations and their execution order

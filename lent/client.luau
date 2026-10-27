@@ -307,19 +307,19 @@ local function check_row(self: any, r: any, old: any)
     end
 end
 
--- How deep hooks may nest: a hook's write runs the written table's hooks,
--- and those may write again.
-local MAX_HOOK_DEPTH = 16
+-- How deep hooks may nest unless open sets hookDepth: a hook's write runs
+-- the written table's hooks, and those may write again.
+local HOOK_DEPTH = 16
 
--- Runs the table's `op` hooks. A run that would nest more than
--- MAX_HOOK_DEPTH deep raises an error naming the operations on the way.
+-- Runs the table's `op` hooks. A run that would nest more than the
+-- client's hookDepth raises an error naming the operations on the way.
 local function run_hooks(self: any, op: string, ...: any)
     local list = self.hooks[op]
     if #list == 0 then
         return
     end
-    local stack = self.hookStack
-    if #stack >= MAX_HOOK_DEPTH then
+    local stack, limit = self.hookStack, self.hookDepth
+    if #stack >= limit then
         local names, seen = {}, {}
         for _, name in stack do
             if not seen[name] then
@@ -327,7 +327,7 @@ local function run_hooks(self: any, op: string, ...: any)
                 names[#names + 1] = name
             end
         end
-        fail(self.where .. " " .. op .. " hooks nest more than " .. MAX_HOOK_DEPTH
+        fail(self.where .. " " .. op .. " hooks nest more than " .. limit
             .. " deep; each write from a hook runs hooks again, here through "
             .. table.concat(names, ", "))
     end
@@ -2299,7 +2299,8 @@ end
 -- The tables of this space's schema, by name, for a transaction the caller
 -- runs. Reading the catalog makes the transaction conflict with a migration
 -- that commits before it does.
-function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?): any
+function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
+                hookDepth: number?): any
     local compiled = mig.load()
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
@@ -2352,7 +2353,7 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?):
         if rules == nil then
             rules = client(pessimistic, app, nil, true)
             for _, b in rules do
-                b.hookStack = hookStack
+                b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH
             end
         end
         return rules
@@ -2364,7 +2365,7 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?):
         b.pathUses = pathUses
         b.viewer = viewer
         b.rulesClient = rulesClient
-        b.hookStack = hookStack
+        b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH
     end
     return setmetatable(c, {
         __index = function(_, name)
@@ -2393,26 +2394,40 @@ Query.update = atomic(Query.update)
 Query.delete = atomic(Query.delete)
 
 -- Runs fn(c) in a transaction and answers what it answers.
-function tx(fn: (any) -> any, pessimistic: boolean?, app: any?, viewer: any?): any
+function tx(fn: (any) -> any, pessimistic: boolean?, app: any?, viewer: any?,
+            hookDepth: number?): any
     return barch.tx.run(function()
-        return fn(client(pessimistic, app, viewer))
+        return fn(client(pessimistic, app, viewer, nil, hookDepth))
     end, pessimistic == true)
 end
 
 -- A client bound to `app`, the graph the space was migrated with, so its
 -- function defaults, validate functions, hooks and policy rules run:
 -- db.tx(fn, pessimistic, viewer) and db.client(pessimistic, viewer) work as
--- tx and client do, and the rules get `viewer`.
-function open(app: any): any
+-- tx and client do, and the rules get `viewer`. options.hookDepth sets how
+-- deep hooks may nest, 16 when left out.
+function open(app: any, options: any?): any
     if type(app) ~= "table" or type(app.tables) ~= "table" then
         fail("open takes the graph from lent.graph")
     end
+    if options ~= nil and type(options) ~= "table" then
+        fail("open takes a table of options, got " .. type(options))
+    end
+    local hookDepth
+    for k, v in options or {} do
+        if k ~= "hookDepth" then
+            fail("open has no option " .. tostring(k) .. "; it takes hookDepth")
+        elseif type(v) ~= "number" or v < 1 or v ~= math.floor(v) then
+            fail("open option hookDepth takes a whole number of at least 1, got " .. tostring(v))
+        end
+        hookDepth = v
+    end
     return {
         tx = function(fn: (any) -> any, pessimistic: boolean?, viewer: any?): any
-            return tx(fn, pessimistic, app, viewer)
+            return tx(fn, pessimistic, app, viewer, hookDepth)
         end,
         client = function(pessimistic: boolean?, viewer: any?): any
-            return client(pessimistic, app, viewer)
+            return client(pessimistic, app, viewer, nil, hookDepth)
         end,
     }
 end

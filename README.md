@@ -517,7 +517,8 @@ described for `lent.tx` below.
 
 A write from a hook runs the written table's hooks too, so hooks can nest.
 They nest at most 16 deep, counting the hooks that policy rules' writes
-run. A hook run past that limit raises an error such as `LENT table Ping
+run; set a different limit with `lent.open(app, { hookDepth = n })`. A hook
+run past that limit raises an error such as `LENT table Ping
 create hooks nest more than 16 deep; each write from a hook runs hooks
 again, here through table Ping create, table Pong create`, which names each
 table and operation on the way. This stops a hook that creates a row of its
@@ -819,6 +820,15 @@ db.tx(function(c) ... end, false, viewer)   -- db.client(pessimistic, viewer) in
 
 `viewer` is optional and can be any value, such as the signed-in user's
 row. The policy rules receive it, and they receive `nil` when it is left out.
+
+`lent.open(app, options)` takes an optional table of options:
+
+| option | default | valid values | effect |
+|---|---|---|---|
+| `hookDepth` | `16` | a whole number of at least `1` | how deep hooks may nest before a write raises the depth error; see hooks above |
+
+An unknown option or an invalid value raises an error when `lent.open` is
+called.
 
 `lent.open` raises an error when the graph declares a table or field that the
 space's catalog lacks; run `migrate` first. Value rules stored in the catalog

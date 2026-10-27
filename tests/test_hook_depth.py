@@ -36,6 +36,7 @@ local app = lent.graph {
     },
 }
 local db = client.open(app)
+local shallow = client.open(app, { hookDepth = 4 })
 
 local function err(fn)
     local ok, e = pcall(fn)
@@ -54,6 +55,21 @@ function steps.chain(c)
     return { deep, after, c.Step:query():count() }
 end
 
+-- a client opened with hookDepth = 4 lets 4 nested runs through
+function steps.shallow(c)
+    c.Step:create { n = 1, stop = 4 }
+    return { err(function() c.Step:create { n = 1, stop = 5 } end), c.Step:query():count() }
+end
+
+function steps.options()
+    return {
+        err(function() client.open(app, 3) end),
+        err(function() client.open(app, { depth = 3 }) end),
+        err(function() client.open(app, { hookDepth = 0 }) end),
+        err(function() client.open(app, { hookDepth = 2.5 }) end),
+    }
+end
+
 function steps.loop(c)
     return { err(function() c.Ping:create { n = 0 } end), c.Ping:query():count(),
              c.Pong:query():count() }
@@ -63,7 +79,8 @@ function call(step, mode)
     if step == "migrate" then
         return m.migrate(app).done and "done" or "more"
     end
-    return db.tx(function(c) return steps[step](c) end, mode == "pessimistic")
+    local d = step == "shallow" and shallow or db
+    return d.tx(function(c) return steps[step](c) end, mode == "pessimistic")
 end
 """
 
@@ -94,4 +111,21 @@ def test_hooks_that_write_each_other_stop(run):
         " hooks again, here through table Ping create, table Pong create",
         0,
         0,
+    ]
+
+
+def test_open_sets_the_hook_depth(run):
+    assert run("shallow") == [
+        "LENT table Step create hooks nest more than 4 deep; each write from a hook runs"
+        " hooks again, here through table Step create",
+        4,
+    ]
+
+
+def test_open_checks_its_options(run):
+    assert run("options") == [
+        "LENT open takes a table of options, got number",
+        "LENT open has no option depth; it takes hookDepth",
+        "LENT open option hookDepth takes a whole number of at least 1, got 0",
+        "LENT open option hookDepth takes a whole number of at least 1, got 2.5",
     ]
