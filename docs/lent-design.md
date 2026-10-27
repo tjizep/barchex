@@ -24,6 +24,7 @@ remains.
 | edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| privacy policies: query and mutation rules with a viewer | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | computed fields, computed on read or stored and filled by `migrate` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [README](../README.md#what-it-contains) |
 | aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
@@ -158,6 +159,19 @@ with its own, and a caller that catches the error goes on with the
 transaction as it was before the call. Calls nest: a hook that catches a
 refused write it made keeps its other writes. A multi-row write is one
 call, so a refusal takes back all of its rows.
+
+Policies follow Go ent's privacy layer: rules answer allow, deny or skip,
+and a call goes ahead when every rule skips. Go ent carries the viewer in a
+`context.Context`; Luau has none, so `lent.open(app).tx` takes the viewer as
+an argument and gives it to each rule. Query rules run when a query starts
+and narrow it with filters, so every path that starts a query on the table,
+`get`, `follow` and `with` among them, reads through them. Rules read
+through a second client of the same transaction that runs no policy, which
+lets a rule check stored rows the viewer cannot read and keeps one table's
+rules from calling another's without end. `has` uses the same rule-free
+reads for the far table, as Go ent's edge predicates do in SQL. Mutation
+rules run before hooks, inside the call's savepoint, so a refusal takes back
+the writes of the rules and hooks that ran before it.
 
 A `time` field is an `int` of Unix milliseconds, and `lent.now()` answers
 `barch.time()`. A call replayed from a Raft log reads the time its entry was

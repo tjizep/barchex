@@ -36,9 +36,10 @@
 --   end)
 --
 -- lent.tx(fn, pessimistic) runs fn(c) in barch.tx.run, which retries on a
--- conflict. lent.open(app).tx(fn, pessimistic) does the same and also runs
--- the graph's function defaults, validate functions and hooks; the value
--- rules stored in the catalog apply either way. Inside a transaction the caller already runs, lent.client(p)
+-- conflict. lent.open(app).tx(fn, pessimistic, viewer) does the same and
+-- also runs the graph's function defaults, validate functions, hooks and
+-- policy rules, which get `viewer`; the value rules stored in the catalog
+-- apply either way. Inside a transaction the caller already runs, lent.client(p)
 -- answers the same `c`. Each answers rows as tables of field values with
 -- the row's `id`: a barch.uuid() string, or an integer for a table declared
 -- with id = "int". A field the row lacks reads as its default.
@@ -63,9 +64,10 @@ Table.__index = Table
 local NO_HOOKS = { create = {}, update = {}, delete = {} }
 
 -- `decl` is the table as lent.schema declared it, for the parts that stay in
--- code: function defaults, validate functions, hooks and computed fields.
--- nil leaves them out.
-local function bind(t: any, version: number, pessimistic: boolean?, decl: any?): any
+-- code: function defaults, validate functions, hooks, policy rules and
+-- computed fields. nil leaves them out, and `free` leaves out the rules.
+local function bind(t: any, version: number, pessimistic: boolean?, decl: any?,
+                    free: boolean?): any
     local byName, edgeByName, code = {}, {}, {}
     for _, f in t.fields do
         byName[f.name] = f
@@ -101,7 +103,10 @@ local function bind(t: any, version: number, pessimistic: boolean?, decl: any?):
     for _, f in computed do
         computedByName[f.name] = f
     end
+    local policy = not free and decl and decl.policy
     return setmetatable({
+        queryRules = policy and #policy.query > 0 and policy.query or nil,
+        mutationRules = policy and #policy.mutation > 0 and policy.mutation or nil,
         t = t, fields = rc.fields(t.fields), byName = byName, edgeByName = edgeByName,
         code = code, hooks = decl and decl.hooks or NO_HOOKS,
         computed = computed, computedByName = computedByName,
@@ -303,6 +308,37 @@ end
 local function run_hooks(self: any, op: string, ...: any)
     for _, fn in self.hooks[op] do
         fn(self.peers, ...)
+    end
+end
+
+-- Runs the table's policy rules `part` as fn(rules client, viewer, arg)
+-- until one answers lent.allow or lent.deny. A deny raises an error that
+-- names `what`; when every rule answers nil the call goes ahead.
+local function decide(self: any, part: string, what: string, arg: any)
+    local rules = if part == "query" then self.queryRules else self.mutationRules
+    local rc = self.rulesClient()
+    for i, fn in rules do
+        local d = fn(rc, self.viewer, arg)
+        if d ~= nil then
+            local kind = type(d) == "table" and d.decision
+            if kind ~= "allow" and kind ~= "deny" then
+                fail(self.where .. " policy." .. part .. " rule " .. i .. " answered "
+                    .. tostring(d) .. "; a rule answers lent.allow, lent.deny or nil")
+            end
+            if kind == "deny" then
+                fail(self.where .. " policy denies " .. what
+                    .. (d.reason and ": " .. tostring(d.reason) or ""))
+            end
+            return
+        end
+    end
+end
+
+-- Runs the mutation rules for a link or unlink of row pk and row `other`.
+local function decide_link(self: any, op: string, e: any, pk: any, other: any, values: any)
+    if self.mutationRules then
+        decide(self, "mutation", op .. " " .. e.name .. " from row " .. tostring(pk) .. " to row "
+            .. tostring(other), { op = op, edge = e.name, id = pk, other = other, values = values })
     end
 end
 
@@ -662,6 +698,7 @@ function Table:link(name: string, pk: any, other: any, values: { [string]: any }
         fail(self.where .. " has no row " .. pk)
     end
     check_link(self, e, pk, other)
+    decide_link(self, "link", e, pk, other, values)
     local old = link_values(self, e, pk, other, true)
     if old and values == nil then
         return old
@@ -680,8 +717,13 @@ end
 -- or nil when the rows are not linked.
 function Table:edge(name: string, pk: any, other: any): any
     local e = linkable(self, find_edge(self, name))
+    local target = self.peers[e.target]
     check_pk(self, pk)
-    check_pk(self.peers[e.target], other)
+    check_pk(target, other)
+    -- a row the viewer cannot read has no links to read
+    if self.queryRules and self:get(pk) == nil or target.queryRules and target:get(other) == nil then
+        return nil
+    end
     return link_values(self, e, pk, other)
 end
 
@@ -691,6 +733,7 @@ function Table:unlink(name: string, pk: any, other: any): boolean
     local s = self.allEdges[e.store]
     check_pk(self, pk)
     check_pk(self.peers[e.target], other)
+    decide_link(self, "unlink", e, pk, other, nil)
     local from, to = ends(e, pk, other)
     local key = lay.edge(s, from, to)
     if not barch.store.exists(key) then
@@ -753,6 +796,9 @@ function Table:create(values: { [string]: any }): any
     end
     lay.fill(self.t, r)
     r = clone_row(self, r)
+    if self.mutationRules then
+        decide(self, "mutation", "create", { op = "create", row = r })
+    end
     run_hooks(self, "create", r)
     for _, f in self.stored do
         compute_stored(self, f, r)
@@ -773,6 +819,7 @@ function Table:create(values: { [string]: any }): any
         l[3] = {}
         for i, other in l[2] do
             check_link(self, l[1], pk, other)
+            decide_link(self, "link", l[1], pk, other, nil)
             l[3][i] = (link_value(self, l[1], nil, nil))
         end
     end
@@ -814,6 +861,9 @@ end
 -- The row with this id, or nil.
 function Table:get(pk: any): any
     check_pk(self, pk)
+    if self.queryRules then
+        return self:query():where("id", "=", pk):first()
+    end
     return read(self, pk)
 end
 
@@ -841,7 +891,7 @@ function Table:by(name: string, ...: any): any
             .. select("#", ...))
     end
     local pk = barch.store.get(lay.index(self.t, ix, values))
-    return pk and read(self, lay.unique_pk(self.t, pk))
+    return pk and self:get(lay.unique_pk(self.t, pk))
 end
 
 -- Sets the fields in `values` and clears the fields named in `clear`, then
@@ -872,6 +922,10 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
         end
     end
     r = clone_row(self, r)
+    if self.mutationRules then
+        decide(self, "mutation", "update of row " .. tostring(pk),
+            { op = "update", id = pk, row = r, old = clone_row(self, old) })
+    end
     run_hooks(self, "update", pk, r, clone_row(self, old))
     for _, f in self.stored do
         compute_stored(self, f, r)
@@ -910,6 +964,10 @@ function Table:delete(pk: any): boolean
     local old = read(self, pk, true)
     if old == nil then
         return false
+    end
+    if self.mutationRules then
+        decide(self, "mutation", "delete of row " .. tostring(pk),
+            { op = "delete", id = pk, old = clone_row(self, old) })
     end
     run_hooks(self, "delete", pk, clone_row(self, old))
     for _, ix in self.t.indexes do
@@ -995,10 +1053,19 @@ local function fits(kind: string, v: any): boolean
     return type(v) == (kind == "string" and "string" or "boolean")
 end
 
--- Starts a query over this table's rows.
-function Table:query(): any
-    return setmetatable({ tbl = self, conds = {}, preds = {}, checks = {}, loads = {}, skip = 0 },
+local function new_query(tbl: any): any
+    return setmetatable({ tbl = tbl, conds = {}, preds = {}, checks = {}, loads = {}, skip = 0 },
         Query)
+end
+
+-- Starts a query over this table's rows that the policy's query rules let
+-- the viewer read.
+function Table:query(): any
+    local q = new_query(self)
+    if self.queryRules then
+        decide(self, "query", "query", q)
+    end
+    return q
 end
 
 -- Raises an error when q is a links query, whose rows are links.
@@ -1990,7 +2057,7 @@ function Query:follow(...: string): any
     end
     rows_only(self, "follow")
     local ids, stores, last = self:ids(), {}, nil
-    for _, name in names do
+    for i, name in names do
         local e = find_edge(tbl, name)
         for _, h in hops(tbl, e) do
             stores[#stores + 1] = h.e.store
@@ -1999,6 +2066,12 @@ function Query:follow(...: string): any
         last = { tbl = tbl, e = e, from = ids }
         ids = reach(tbl, e, ids)
         tbl = tbl.peers[e.target]
+        if tbl.queryRules and i < #names then
+            -- the next hop starts from the rows the viewer can read
+            local q = tbl:query()
+            q.idset, q.via = ids, table.concat(stores, "/")
+            ids = q:ids()
+        end
     end
     local q = tbl:query()
     q.idset, q.via, q.edgeOf = ids, table.concat(stores, "/"), last
@@ -2025,7 +2098,7 @@ function Query:links(name: string): any
     for fname, f in es and es.byName or {} do
         byName[fname] = f
     end
-    return Table.query({ where = tbl.where .. " links " .. name, byName = byName,
+    return new_query({ where = tbl.where .. " links " .. name, byName = byName,
                          computedByName = {}, edgeByName = {}, t = tbl.t,
                          linksOf = { tbl = tbl, e = e, q = self } })
 end
@@ -2042,7 +2115,9 @@ function Query:has(name: string, fn: ((any) -> any)?): any
         if type(fn) ~= "function" then
             fail(tbl.where .. " query has takes a function, got " .. tostring(fn))
         end
-        sub = tbl.peers[e.target]:query()
+        -- the far table's query rules leave has alone, as Go ent's edge
+        -- predicates do, so rules may filter with has
+        sub = new_query(tbl.peers[e.target])
         sub.edgeOf = { tbl = tbl, e = e }
         sub = fn(sub) or sub
         if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 or sub.cur then
@@ -2090,7 +2165,7 @@ end
 -- The tables of this space's schema, by name, for a transaction the caller
 -- runs. Reading the catalog makes the transaction conflict with a migration
 -- that commits before it does.
-function client(pessimistic: boolean?, app: any?): any
+function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?): any
     local compiled = mig.load()
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
@@ -2104,7 +2179,7 @@ function client(pessimistic: boolean?, app: any?): any
         end
     end
     for _, t in compiled.tables do
-        c[t.name] = bind(t, compiled.version, pessimistic, app and app.tables[t.name])
+        c[t.name] = bind(t, compiled.version, pessimistic, app and app.tables[t.name], free)
         c[t.name].dropping = dropping[t.key]
     end
     for name in app and app.tables or {} do
@@ -2135,11 +2210,19 @@ function client(pessimistic: boolean?, app: any?): any
             table.insert(pathUses[h.store], { p = s, i = i })
         end
     end
+    -- policy rules read and write through a client that has no rules
+    local rules
+    local function rulesClient(): any
+        rules = rules or client(pessimistic, app, nil, true)
+        return rules
+    end
     for _, b in c do
         b.peers = c
         b.allEdges = compiled.edges
         b.links = links
         b.pathUses = pathUses
+        b.viewer = viewer
+        b.rulesClient = rulesClient
     end
     return setmetatable(c, {
         __index = function(_, name)
@@ -2168,25 +2251,26 @@ Query.update = atomic(Query.update)
 Query.delete = atomic(Query.delete)
 
 -- Runs fn(c) in a transaction and answers what it answers.
-function tx(fn: (any) -> any, pessimistic: boolean?, app: any?): any
+function tx(fn: (any) -> any, pessimistic: boolean?, app: any?, viewer: any?): any
     return barch.tx.run(function()
-        return fn(client(pessimistic, app))
+        return fn(client(pessimistic, app, viewer))
     end, pessimistic == true)
 end
 
 -- A client bound to `app`, the graph the space was migrated with, so its
--- function defaults, validate functions and hooks run: db.tx(fn,
--- pessimistic) and db.client(pessimistic) work as tx and client do.
+-- function defaults, validate functions, hooks and policy rules run:
+-- db.tx(fn, pessimistic, viewer) and db.client(pessimistic, viewer) work as
+-- tx and client do, and the rules get `viewer`.
 function open(app: any): any
     if type(app) ~= "table" or type(app.tables) ~= "table" then
         fail("open takes the graph from lent.graph")
     end
     return {
-        tx = function(fn: (any) -> any, pessimistic: boolean?): any
-            return tx(fn, pessimistic, app)
+        tx = function(fn: (any) -> any, pessimistic: boolean?, viewer: any?): any
+            return tx(fn, pessimistic, app, viewer)
         end,
-        client = function(pessimistic: boolean?): any
-            return client(pessimistic, app)
+        client = function(pessimistic: boolean?, viewer: any?): any
+            return client(pessimistic, app, viewer)
         end,
     }
 end

@@ -402,6 +402,21 @@ hook = {
     delete = hook_builder("delete"),
 }
 
+-- privacy ---------------------------------------------------------------------
+
+-- The answers of a policy rule. A rule answers allow to let the read or
+-- write through, deny or deny("reason") to refuse it, or nil to leave the
+-- decision to the next rule. lent.CLIENT reads `decision` and `reason`.
+allow = { decision = "allow" }
+deny = setmetatable({ decision = "deny" }, {
+    __call = function(_, reason: any)
+        if type(reason) ~= "string" then
+            fail("deny takes a reason string, got " .. type(reason))
+        end
+        return { decision = "deny", reason = reason }
+    end,
+})
+
 -- tables ----------------------------------------------------------------------
 
 -- plain tables ----------------------------------------------------------------
@@ -507,6 +522,28 @@ local function plain_edge(where: string, t: any): any
     return e
 end
 
+-- Appends the functions of the list `fns`, when given, to `into`.
+local function functions(at: string, fns: any, into: { any })
+    if fns == nil then return end
+    if type(fns) ~= "table" then
+        fail(at .. " takes a list of functions, got " .. type(fns))
+    end
+    local n = 0
+    for i in fns do
+        if type(i) ~= "number" or i < 1 or i ~= math.floor(i) then
+            fail(at .. " takes a list of functions")
+        end
+        n += 1
+    end
+    for i = 1, n do
+        local fn = fns[i]
+        if type(fn) ~= "function" then
+            fail(at .. " takes a function at " .. i .. ", got " .. type(fn))
+        end
+        table.insert(into, fn)
+    end
+end
+
 -- Builder hooks run first, then each operation's plain list, in list order.
 local function plain_hooks(where: string, spec: any): any
     local out = { create = {}, update = {}, delete = {} }
@@ -530,33 +567,31 @@ local function plain_hooks(where: string, spec: any): any
         table.insert(out[h.op], h.fn)
     end
     for op, into in out do
-        local fns = spec[op]
-        if fns ~= nil then
-            local at = where .. " hooks." .. op
-            if type(fns) ~= "table" then
-                fail(at .. " takes a list of functions, got " .. type(fns))
-            end
-            local n = 0
-            for i in fns do
-                if type(i) ~= "number" or i < 1 or i ~= math.floor(i) then
-                    fail(at .. " takes a list of functions")
-                end
-                n += 1
-            end
-            for i = 1, n do
-                local fn = fns[i]
-                if type(fn) ~= "function" then
-                    fail(at .. " takes a function at " .. i .. ", got " .. type(fn))
-                end
-                table.insert(into, fn)
-            end
+        functions(where .. " hooks." .. op, spec[op], into)
+    end
+    return out
+end
+
+-- `policy = { query = { rules }, mutation = { rules } }`, each part optional.
+local function plain_policy(where: string, spec: any): any
+    local out = { query = {}, mutation = {} }
+    if spec == nil then return out end
+    if type(spec) ~= "table" then
+        fail(where .. " policy must be a table")
+    end
+    for part in spec do
+        if out[part] == nil then
+            fail(where .. " policy has no part " .. tostring(part) .. "; it takes query and mutation")
         end
+    end
+    for part, into in out do
+        functions(where .. " policy." .. part, spec[part], into)
     end
     return out
 end
 
 local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true,
-                  hooks = true }
+                  hooks = true, policy = true }
 
 -- Checks the value rules of field `f` and copies them into `out`.
 local function rules(where: string, f: any, out: any)
@@ -697,7 +732,8 @@ local function edge_fields(where: string, list: { any }): { any }
 end
 
 -- One table:
--- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks? }`.
+-- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks?,
+-- policy? }`.
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
@@ -706,7 +742,8 @@ end
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
 -- given to lent.open: each field's `code` = { default?, update?, validate,
 -- computed? }, the table's `hooks` = { create, update, delete } lists of
--- functions, and its `computed` = { { name, kind, values?, fn } } fields,
+-- functions, its `policy` = { query, mutation } lists of rules, and its
+-- `computed` = { { name, kind, values?, fn } } fields,
 -- which no row stores. A stored computed field is in `fields`, with its
 -- revision in `computed` and its function in `code.computed`.
 function schema(name: string)
@@ -858,6 +895,7 @@ function schema(name: string)
         end
 
         t.hooks = plain_hooks(where, spec.hooks)
+        t.policy = plain_policy(where, spec.policy)
         return t
     end
 end
@@ -1130,8 +1168,18 @@ function selftest(): (boolean, string?)
     local title, rank, at = Doc.fields[1], Doc.fields[2], Doc.fields[3]
     if title.minLen ~= 1 or title.maxLen ~= 5 or rank.min ~= 1 or not at.immutable
         or at.default ~= nil or at.code.default ~= now or #Doc.hooks.create ~= 1
-        or #Doc.hooks.delete ~= 0 then
+        or #Doc.hooks.delete ~= 0 or #Doc.policy.query ~= 0 then
         return false, "rules"
+    end
+    local rule = function() return allow end
+    local Private = schema "Private" {
+        fields = { field.int "a" },
+        policy = { mutation = { rule, function() return deny end } },
+    }
+    if #Private.policy.query ~= 0 or Private.policy.mutation[1] ~= rule
+        or #Private.policy.mutation ~= 2 or deny("no").reason ~= "no"
+        or deny.decision ~= "deny" or allow.decision ~= "allow" then
+        return false, "policy"
     end
     if broken(title, "Hi") or not broken(title, "hi") or not broken(title, "Hello!")
         or not broken(title, "") or broken(rank, 9) or not broken(rank, 10)
@@ -1247,6 +1295,12 @@ function selftest(): (boolean, string?)
           "takes no updateDefault" },
         { function() schema "User" { fields = { field.int "a" }, hooks = { 1 } } end, "lent.hook" },
         { function() hook.create(nil) end, "takes a function" },
+        { function() schema "U" { fields = { field.int "a" }, policy = 1 } end, "policy must be a table" },
+        { function() schema "U" { fields = { field.int "a" }, policy = { read = {} } } end,
+          "policy has no part read; it takes query and mutation" },
+        { function() schema "U" { fields = { field.int "a" }, policy = { query = { allow } } } end,
+          "policy.query takes a function at 1, got table" },
+        { function() deny(1) end, "deny takes a reason string, got number" },
         { function() schema "U" { fields = { { kind = "int", name = "a", uniqe = true } } } end,
           "field a has no option uniqe" },
         { function() schema "U" { fields = { { kind = "date", name = "a" } } } end, "no kind date" },

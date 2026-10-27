@@ -486,8 +486,8 @@ as they are.
 `update` checks only the values it changes.
 
 Functions stay in code: `:validate`, `:updateDefault`, a function
-`:default`, `:computed` and hooks run only in a client opened with the graph; see
-`lent.open` under CLIENT. A function default fills only new rows, so a new
+`:default`, `:computed`, hooks and policies run only in a client opened with
+the graph; see `lent.open` under CLIENT. A function default fills only new rows, so a new
 required field also needs a value default, or `:optional()`, for the rows
 stored before it.
 
@@ -511,6 +511,77 @@ entries in a named list raise a `SCHEMA` error when the schema loads.
 A hook may change `row` and may read and write other tables through `c`.
 An error it raises refuses the write and takes back what the hook wrote, as
 described for `lent.tx` below.
+
+Declare a `policy` to decide which rows a viewer reads and which writes a
+viewer makes, as in Go ent's privacy layer. `query` rules run when a query
+starts, and `mutation` rules run before each write's hooks:
+
+```lua
+lent.schema "Post" {
+    fields = { lent.field.string "title", lent.field.bool "public":default(false),
+               lent.field.int "owner" },
+    policy = {
+        query = {
+            function(c, viewer, q)
+                if viewer and viewer.admin then return lent.allow end
+            end,
+            function(c, viewer, q)
+                -- everyone reads public posts; members also read their own
+                local id = viewer and viewer.id
+                q:where(function(r) return r.public or r.owner == id end)
+            end,
+        },
+        mutation = {
+            function(c, viewer, m)
+                if viewer == nil then return lent.deny("sign in") end
+                -- c reads every post, so the rule sees the stored owner
+                if m.op ~= "create" and c.Post:get(m.id).owner ~= viewer.id then
+                    return lent.deny("not the owner")
+                end
+            end,
+        },
+    },
+}
+```
+
+Each part is an optional list of functions, called in list order as
+`fn(c, viewer, q)` or `fn(c, viewer, m)`. A rule answers `lent.allow` to let
+the call through, `lent.deny` or `lent.deny("reason")` to refuse it, or `nil`
+to leave the decision to the next rule. When every rule answers `nil`, the
+call goes ahead; end a list with a rule that answers `lent.deny` to refuse
+whatever the rules before it leave undecided. A refusal raises
+`LENT table Post policy denies <call>`, followed by `: reason` when the rule
+gave one, such as `LENT table Post policy denies update of row 3: not the
+owner`. Any other answer raises an error that names the rule.
+
+`viewer` is the value given to `db.tx` or `db.client`; see `lent.open` under
+CLIENT. `c` is a client of the same transaction that runs no policy, so a
+rule can read rows the viewer cannot read. Hooks get the viewer's client, so
+their reads and writes go through the policies.
+
+A query rule receives the new query `q` and narrows it with `where` or
+`has`. The rules run for every query on the table, including those that
+`get`, `by`, `follow`, `with` and each hop of a multi-edge `follow` make, so
+those calls answer only the rows the viewer can read. Query `update` and
+`delete` write only those rows. `has` filters and `links` queries read links
+without the far table's query rules, as Go ent's edge predicates do, which
+lets a rule filter with `has`. `edge` answers `nil` when the viewer cannot
+read either row. An `edge.through` reaches its target without the rules of
+the tables between.
+
+A mutation rule receives `m`, whose fields depend on `m.op`:
+
+| `m.op` | fields of `m` | runs for |
+|---|---|---|
+| `create` | `row`, after defaults | `create`, `createMany` and an `upsert` that creates |
+| `update` | `id`, `row` after `updateDefault`, `old` | `update`, query `update` and an `upsert` that updates |
+| `delete` | `id`, `old` | `delete` and query `delete` when the row exists |
+| `link` | `edge`, `id`, `other`, `values` | `link`, and each link that `create` makes after its `create` rules |
+| `unlink` | `edge`, `id`, `other` | `unlink` |
+
+The table whose method makes the call runs its rules: `c.User:link("posts",
+u, p)` runs User's rules and leaves Post's alone. Deleting a row removes its
+links without `unlink` rules.
 
 Use `:computed(fn)` for a value derived from the row each time it is read,
 such as the time between two `time` fields:
@@ -724,13 +795,16 @@ end)
 `by_<field>` index. Rows are tables of field values plus `id`. A field the
 stored row lacks reads as its `:default()`.
 
-To run a schema's function defaults, `:validate` functions and hooks, open
-the client with the graph the space was migrated with:
+To run a schema's function defaults, `:validate` functions, hooks and
+policies, open the client with the graph the space was migrated with:
 
 ```lua
-local db = lent.open(app)        -- app: the answer of lent.graph
-db.tx(function(c) ... end)      -- db.client(pessimistic) inside a transaction
+local db = lent.open(app)                   -- app: the answer of lent.graph
+db.tx(function(c) ... end, false, viewer)   -- db.client(pessimistic, viewer) inside a transaction
 ```
+
+`viewer` is optional and can be any value, such as the signed-in user's
+row. The policy rules receive it, and they receive `nil` when it is left out.
 
 `lent.open` raises an error when the graph declares a table or field that the
 space's catalog lacks; run `migrate` first. Value rules stored in the catalog

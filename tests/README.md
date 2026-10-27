@@ -104,6 +104,12 @@ beside a development server.
   in a client opened without the graph, error messages, that a refused call
   takes back its hooks' writes, and the migrations that time fields and
   function defaults allow and refuse.
+- `test_privacy.py` declares query and mutation policies and runs them for a
+  signed-out viewer, two members and an admin. It checks the rows that
+  queries, `get`, `by`, `follow`, `with` and `edge` answer, that `has` reads
+  links without the far table's rules, each write a rule allows or refuses,
+  that a refused call takes back its hooks' writes, the error for a rule's
+  invalid answer, and that a client without the graph runs no policy.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id
   kinds, all row formats, optimistic and pessimistic transactions, indexes,
   cursors, upsert and query writes. It checks structural JSON equality,

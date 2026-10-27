@@ -6,7 +6,7 @@ with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
 `groupBy`, edges, path edges and computed fields (each stored or not), edge
 joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
-`bytes` fields, and hooks are built.
+`bytes` fields, hooks and privacy policies are built.
 
 ## Limits of what is built
 
@@ -19,8 +19,3 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   at once can deadlock on the shared lock of the unique check.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
   order the two calls.
-
-## Features
-
-- **Privacy rules:** read and write policies per table, as in Go ent. They
-  could build on hooks.
