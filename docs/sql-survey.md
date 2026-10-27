@@ -34,9 +34,8 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
-2. **Missing value kinds.** `DECIMAL` money and `DATE` values need scaled
-   integers and Unix milliseconds, and group keys such as the year of a
-   date need hand-written computed fields.
+2. **Dates.** `DATE` values need Unix milliseconds, and group keys such as
+   the year of a date need hand-written computed fields.
 3. **Missing query forms.** `avg`, `count(distinct)`, `HAVING`, ordering
    by an aggregate, grouping by a field of a linked row, anti-joins
    (`NOT EXISTS`), correlated subqueries and views all take Luau code.
@@ -57,7 +56,7 @@ their line items, with 22 queries.
 | foreign keys such as `O_CUSTKEY` | `edge.from "customer" "Customer":ref "orders":unique()` |
 | `PARTSUPP`, keyed by part and supplier | `edge.to "supplies" "Supplier"` on `Part`, with `:fields` for `PS_AVAILQTY`, `PS_SUPPLYCOST` and `PS_COMMENT` |
 | `LINEITEM` key `(L_ORDERKEY, L_LINENUMBER)` | a `linenumber` field and the `order` edge; lent does not enforce the pair as unique |
-| `DECIMAL(15,2)` | `int` in cents; discount and tax as `int` percent |
+| `DECIMAL(15,2)` | `decimal` with `:scale(2)`; the test keeps `int` cents and percent so revenue products stay exact |
 | `DATE` | `time` at midnight UTC |
 | `CHAR(1)` flags and fixed lists | `enum` |
 | line item to customer, used for grouping | `edge.through "customer" "Customer":via "order.customer"` |
@@ -105,7 +104,7 @@ codes and money amounts, and a lookup table of 265 zones.
 |---|---|
 | `tpep_pickup_datetime`, `tpep_dropoff_datetime` | `time` |
 | `passenger_count`, nullable | `int` with `:optional()` |
-| `trip_distance` and the money columns | `float`; `DECIMAL` would keep cents exact |
+| `trip_distance` and the money columns | `float`; `decimal` with `:scale(2)` keeps sums of cents exact |
 | `VendorID`, `RatecodeID`, `payment_type` | `int` codes; an `enum` needs string labels |
 | `store_and_fwd_flag` | `bool` |
 | `LocationID` of the zone table | the zone's `id`, given to `create` |
@@ -145,7 +144,7 @@ section is based on the schema text and has no test.
 | `rating ENUM(...)` | `enum` |
 | `special_features SET(...)` | a `json` list, or one `bool` field per choice |
 | `release_year YEAR` | `int` with `:min` and `:max` |
-| `rental_rate DECIMAL(4,2)`, `amount DECIMAL(5,2)` | `int` cents until lent has a decimal kind |
+| `rental_rate DECIMAL(4,2)`, `amount DECIMAL(5,2)` | `decimal` with `:scale(2)` |
 | `staff.picture BLOB` | `bytes` |
 | `address.location GEOMETRY` with a spatial index | `bytes` or `json`; lent has no spatial index |
 | `film_text` with a `FULLTEXT` index | lent has no text search |
@@ -170,9 +169,9 @@ item it belongs to.
    positive integer or a uuid keeps its keys, and edges name rows by them.
    String and composite keys still need a unique field and a key-to-id map
    when loading.
-4. **Decimal values.** Money is `DECIMAL` in TPC-H and Sakila. A `decimal`
-   field kind with a fixed scale, stored as a scaled integer, would keep
-   sums exact and keep the scale out of every query.
+4. **Decimal values.** Done: a `decimal` field rounds each value to its
+   scale and sums it exactly. A `sum` with a `value` function, such as
+   TPC-H revenue `l_extendedprice * (1 - l_discount)`, still adds floats.
 5. **Dates and their parts.** TPC-H uses `DATE` literals and
    `EXTRACT(YEAR ...)` in Q7, Q8 and Q9, and the taxi benchmark groups by
    year. Helpers such as `lent.date("1995-03-15")` and year, month and day

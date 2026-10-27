@@ -151,12 +151,23 @@ local function fits_kind(f: any, v: any): boolean
         return type(v) == "number" and v == math.floor(v)
     elseif f.kind == "float" then
         return type(v) == "number" and v == v
+    elseif f.kind == "decimal" then
+        return VALUES.decimal(v, f.scale) ~= nil
     elseif f.kind == "bool" then
         return type(v) == "boolean"
     elseif f.kind == "time" or f.kind == "enum" or f.kind == "json" then
         return SCHEMA.broken(f, v) == nil
     end
     return type(v) == "string"
+end
+
+-- Value `v` of field `f`, rounded to the field's scale when it is a
+-- decimal that fits.
+local function rounded(f: any, v: any): any
+    if f.kind == "decimal" and v ~= nil then
+        return VALUES.decimal(v, f.scale) or v
+    end
+    return v
 end
 
 -- Sets stored computed field f of row r to its function's value.
@@ -171,7 +182,7 @@ local function compute_stored(self: any, f: any, r: any)
     if why then
         fail(self.where .. " field " .. f.name .. " " .. why)
     end
-    r[f.name] = v
+    r[f.name] = rounded(f, v)
 end
 
 -- Sets each computed field of row r to fn(r), in declaration order, so a
@@ -192,7 +203,7 @@ local function compute(self: any, r: any): any
             fail(self.where .. " field " .. f.name .. " is a computed " .. f.kind
                 .. ", and its function answered " .. tostring(v))
         end
-        r[f.name] = v
+        r[f.name] = rounded(f, v)
     end
     return r
 end
@@ -281,6 +292,12 @@ local function check_row(self: any, r: any, old: any)
     end
     for _, f in self.t.fields do
         local v = r[f.name]
+        -- a decimal is stored rounded to its scale; one that does not fit
+        -- stays as it is for broken() to refuse
+        if f.kind == "decimal" and v ~= nil and (old == nil or v ~= old[f.name]) then
+            v = rounded(f, v)
+            r[f.name] = v
+        end
         if f.kind == "json" and v ~= nil then
             local why = SCHEMA.broken(f, v)
             if why then fail(self.where .. " field " .. f.name .. " " .. why) end
@@ -1111,7 +1128,7 @@ local function kind_of(tbl: any, field: string): string
 end
 
 local function fits(kind: string, v: any): boolean
-    if kind == "int" or kind == "float" or kind == "time" then
+    if kind == "int" or kind == "float" or kind == "decimal" or kind == "time" then
         return type(v) == "number" and v == v
     end
     if kind == "uuid" then
@@ -1955,13 +1972,17 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
         return { name = name, fn = fn }
     end
     local kind = kind_of(tbl, field)
-    if fn == "sum" and kind ~= "int" and kind ~= "float" then
-        fail(tbl.where .. " field " .. field .. " is " .. kind .. ", so sum needs int or float")
+    if fn == "sum" and kind ~= "int" and kind ~= "float" and kind ~= "decimal" then
+        fail(tbl.where .. " field " .. field .. " is " .. kind
+            .. ", so sum needs int, float or decimal")
     end
     if (fn == "min" or fn == "max") and kind == "json" then
         fail(tbl.where .. " field " .. field .. " is json, which has no order")
     end
-    return { name = name, fn = fn, field = field }
+    local f = tbl.byName[field] or tbl.computedByName[field]
+    -- a decimal sum adds whole units of its scale, so it is exact
+    local scale = fn == "sum" and kind == "decimal" and f.scale or nil
+    return { name = name, fn = fn, field = field, scale = scale }
 end
 
 local ORDERED = { number = true, string = true, boolean = true }
@@ -2002,6 +2023,9 @@ local function fold(a: any, acc: any, r: any): any
     if v == nil then
         return acc
     elseif a.fn == "sum" then
+        if a.scale then
+            return (acc or 0) + VALUES.decimal_units(v, a.scale)
+        end
         return (acc or 0) + v
     elseif acc == nil then
         return v
@@ -2103,6 +2127,9 @@ local function aggregate(q: any, keys: { any }, spec: any): { any }
             local v = g.acc[a.name]
             if v == nil and (a.fn == "count" or a.fn == "sum") then
                 v = 0
+            end
+            if a.scale then
+                v = v / 10 ^ a.scale
             end
             row[a.name] = v
         end

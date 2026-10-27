@@ -67,9 +67,9 @@ local FLIP = { ["<"] = ">", ["<="] = ">=", [">"] = "<", [">="] = "<=", ["=="] = 
                ["~="] = "~=" }
 
 -- The value type of each lent field kind.
-local KIND_TYPE = { int = "number", float = "number", time = "number", string = "string",
-                    enum = "string", bytes = "string", uuid = "string", bool = "boolean",
-                    json = "json" }
+local KIND_TYPE = { int = "number", float = "number", decimal = "number", time = "number",
+                    string = "string", enum = "string", bytes = "string", uuid = "string",
+                    bool = "boolean", json = "json" }
 
 local function quote(src: string): string
     return string.format("%q", src)

@@ -49,9 +49,9 @@
 -- ever used, so a removed field's id is never reused.
 
 local VALUES = require("lent.VALUES")
-local KINDS = { string = true, int = true, float = true, bool = true, time = true,
-                enum = true, json = true, bytes = true }
-local NUMERIC = { int = true, float = true, time = true }
+local KINDS = { string = true, int = true, float = true, decimal = true, bool = true,
+                time = true, enum = true, json = true, bytes = true }
+local NUMERIC = { int = true, float = true, decimal = true, time = true }
 local LENGTH = { string = true, enum = true, bytes = true }
 local FORMATS = { json = true, text = true, binary = true }
 local IDS = { uuid = true, int = true }
@@ -78,6 +78,7 @@ local function fits(kind: string, v: any): boolean
     if kind == "json" then return (pcall(VALUES.json, v)) end
     if kind == "bool" then return type(v) == "boolean" end
     if kind == "float" then return type(v) == "number" and v == v end
+    if kind == "decimal" then return type(v) == "number" end
     return type(v) == "number" and v == math.floor(v) and v <= MAX_INT and v >= -MAX_INT
 end
 
@@ -123,6 +124,10 @@ function broken(f: any, v: any): string?
     elseif f.kind == "json" then
         local ok, why = pcall(VALUES.json, v)
         if not ok then return "wants JSON: " .. tostring(why) end
+    end
+    if f.kind == "decimal" then
+        local _, why = VALUES.decimal(v, f.scale)
+        if why then return why end
     end
     if f.kind == "time" and not fits("int", v) then
         return "wants a time in Unix milliseconds, got " .. tostring(v)
@@ -188,7 +193,14 @@ function Field:immutable()
     return self
 end
 
--- Bounds for an int, float or time field's value, inclusive.
+-- The digits a decimal field keeps after the point, from 0 to 15. A
+-- decimal field needs it.
+function Field:scale(n: number)
+    self.scale_ = n
+    return self
+end
+
+-- Bounds for an int, float, decimal or time field's value, inclusive.
 function Field:min(n: number)
     self.min_ = n
     return self
@@ -271,6 +283,8 @@ field = {
     string = builder("string"),
     int = builder("int"),
     float = builder("float"),
+    -- a number rounded to :scale(n) digits after the point, at most 15 digits
+    decimal = builder("decimal"),
     bool = builder("bool"),
     -- Unix milliseconds, stored as an int
     time = builder("time"),
@@ -447,7 +461,7 @@ local FIELD_KEYS = {
     default = "any", was = "string", immutable = "boolean", min = "number",
     max = "number", minLen = "number", maxLen = "number", notEmpty = "boolean",
     match = "string", validate = "any", updateDefault = "function", values = "table",
-    computed = "function", stored = "any",
+    computed = "function", stored = "any", scale = "number",
 }
 
 local function plain_field(where: string, t: any): any
@@ -460,6 +474,7 @@ local function plain_field(where: string, t: any): any
     end
     local f = field[t.kind](t.name)
     if t.values ~= nil then f.values_ = t.values end
+    if t.scale ~= nil then f:scale(t.scale) end
     if t.optional then f:optional() end
     if t.unique then f:unique() end
     if t.immutable then f:immutable() end
@@ -633,10 +648,27 @@ end
 
 -- The options a computed field may have besides its function, and the
 -- ones a stored computed field adds.
-local COMPUTED_KEEPS = { kind = true, name = true, computed_ = true, values_ = true }
+local COMPUTED_KEEPS = { kind = true, name = true, computed_ = true, values_ = true,
+                         scale_ = true }
 local STORED_KEEPS = { stored_ = true, unique_ = true, was_ = true }
 
--- Checks computed field f and answers { name, kind, values?, fn }.
+-- Checks the scale of field `f` and copies it into `out`.
+local function scale(where: string, f: any, out: any)
+    if f.kind ~= "decimal" then
+        if f.scale_ ~= nil then
+            fail(where .. " is a " .. f.kind .. " field, which takes no scale")
+        end
+        return
+    end
+    local n = f.scale_
+    if type(n) ~= "number" or n ~= math.floor(n) or n < 0 or n > VALUES.DECIMAL_SCALE then
+        fail(where .. " is a decimal field, which needs :scale(n) with n from 0 to "
+            .. VALUES.DECIMAL_SCALE .. ", got " .. tostring(n))
+    end
+    out.scale = n
+end
+
+-- Checks computed field f and answers { name, kind, values?, scale?, fn }.
 local function computed_field(where: string, f: any): any
     if type(f.computed_) ~= "function" then
         fail(where .. " computed takes a function, got " .. type(f.computed_))
@@ -654,6 +686,7 @@ local function computed_field(where: string, f: any): any
     elseif f.values_ ~= nil then
         fail(where .. " is a " .. f.kind .. " field, which takes no values")
     end
+    scale(where, f, out)
     return out
 end
 
@@ -673,6 +706,7 @@ local function stored_field(where: string, f: any): any
     elseif f.values_ ~= nil then
         fail(where .. " field " .. fname .. " is a " .. f.kind .. " field, which takes no values")
     end
+    scale(where .. " field " .. fname, f, out)
     if fn then
         out.code.default = f.default_
     elseif f.kind == "json" and f.default_ ~= nil then
@@ -681,6 +715,9 @@ local function stored_field(where: string, f: any): any
         out.default = f.default_
     end
     rules(where .. " field " .. fname, f, out)
+    if f.kind == "decimal" and type(out.default) == "number" then
+        out.default = VALUES.decimal(out.default, out.scale) or out.default
+    end
     if out.default ~= nil then
         local why = broken(out, out.default)
         if why then

@@ -263,6 +263,7 @@ local keys = barch.store.range(lo, kc.after(lo), 100)            -- every age 42
 | `bool` | `false`, `true` | `false` first |
 | `uuid` | 36 lowercase characters, as `barch.uuid()` answers | the uuid's text order |
 | `time` | as `int`, for Unix milliseconds | numeric |
+| `decimal` | as `float`; SCHEMA rounds values to the field's scale | numeric |
 | `enum` | a string label; SCHEMA and ROWCODEC check the allowed values | byte order of the label |
 | `bytes` | any bytes in a Luau string | the same byte order as `string` |
 
@@ -293,7 +294,7 @@ local row, version, format = rc.decode(users, barch.store.get("lent.r.user.1"))
 | field key | required | values |
 |---|---|---|
 | `name` | yes | a letter, then letters, digits and `_` |
-| `kind` | yes | `string`, `int`, `float`, `bool`, `time`, `enum`, `json` or `bytes`; `time` uses integer storage |
+| `kind` | yes | `string`, `int`, `float`, `decimal`, `bool`, `time`, `enum`, `json` or `bytes`; `time` uses integer storage and `decimal` float storage |
 | `id` | yes | 1 to 65535, unique in the table; keep it when the field is renamed |
 | `optional` | no | `true` lets the row leave the field nil; default `false` |
 | `values` | for `enum` | a non-empty list of distinct, non-empty UTF-8 strings |
@@ -352,6 +353,7 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 | builder | modifiers |
 |---|---|
 | `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
+| `lent.field.decimal` | the same modifiers, plus required `:scale(n)` |
 | `lent.field.enum` | the same modifiers, plus required `:values("choice", ...)` |
 | `lent.field.bytes` | the same modifiers and byte-length rules |
 | `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
@@ -377,7 +379,7 @@ local Post = lent.schema "Post" {
 
 | plain table | keys |
 |---|---|
-| field | `kind` and `name` (required), `values` (required for `enum`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
+| field | `kind` and `name` (required), `values` (required for `enum`), `scale` (required for `decimal`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `unique`, `name` |
 | edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names), `stored` |
 
@@ -408,6 +410,30 @@ A `time` field holds Unix milliseconds as an integer. `lent.now()` answers
 the current time that way, from `barch.time()`. In a call replayed from a
 Raft log, it answers the time the entry was logged, so every member stores
 the same value.
+
+Use a `decimal` field for amounts such as money, which keep a fixed number
+of digits after the point. `:scale(n)` is required and sets that number,
+from 0 to 15:
+
+```lua
+lent.field.decimal "price":scale(2):min(0)
+```
+
+Decimal values are Luau numbers. Each write rounds the value to the scale,
+half away from zero, as the number's shortest text reads, so `2.675` stores
+as `2.68` and `0.1 + 0.2` as `0.3`. Defaults and computed fields round the
+same way. A value holds at most 15 digits, so a scale of 2 allows up to
+`9999999999999.99`. A larger value, a string, NaN or an infinity raises
+`wants a decimal of at most 15 digits with 2 after the point, got <value>`.
+
+A `sum` of a decimal field adds whole units of the scale, so ten values of
+`0.1` total exactly `1`. A `sum` with a `value` function adds plain numbers.
+Filters and indexes compare the value you give, so compare with a value at
+the field's scale: `where("price", "=", 0.1 + 0.2)` matches no row, because
+`0.1 + 0.2` is `0.30000000000000004`.
+
+Rows store a decimal as a float. `migrate` turns a `decimal` field into a
+`float` field without rewriting rows, and refuses a change of scale.
 
 Enums hold one of the strings listed in `:values`. The choices must be
 distinct, non-empty UTF-8 strings. Enum fields support indexes, unique
@@ -482,7 +508,7 @@ lent.schema "Post" {
 
 | modifier | fields | effect |
 |---|---|---|
-| `:min(n)`, `:max(n)` | `int`, `float`, `time` | the value is at least or at most `n` |
+| `:min(n)`, `:max(n)` | `int`, `float`, `decimal`, `time` | the value is at least or at most `n` |
 | `:minLen(n)`, `:maxLen(n)` | `string`, `enum`, `bytes` | the value's length in bytes is at least or at most `n` |
 | `:notEmpty()` | `string`, `enum`, `bytes` | the same as `:minLen(1)` |
 | `:match(pattern)` | `string`, `enum` | the value contains a match for the Luau string pattern; anchor it with `^` and `$` to match the whole value |
@@ -771,8 +797,9 @@ changes or a unique-index conflict:
 
 - a table missing from the schema;
 - a new field that is neither `:optional()` nor has a value `:default()`;
-- a kind change other than `int` to `float`, `int` to or from `time`, or
-  `enum` to `string`;
+- a kind change other than `int` to `float`, `decimal` to `float`, `int`
+  to or from `time`, or `enum` to `string`;
+- a change to a `decimal` field's scale;
 - removing a value from an enum's choices;
 - a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
@@ -1209,7 +1236,7 @@ queries reuse.
 | function | `field` or `value` | answers | for no values |
 |---|---|---|---|
 | `count` | optional | the rows, or the rows with a value | `0` |
-| `sum` | required; an `int` or `float` field, or a function answering numbers | the total | `0` |
+| `sum` | required; an `int`, `float` or `decimal` field, or a function answering numbers | the total, exact for a `decimal` field | `0` |
 | `min`, `max` | required; any field kind except `json`, or a function answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
 
 A spec with both `field` and `value` raises an error. For `min` and `max`, a

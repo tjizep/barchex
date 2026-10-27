@@ -199,9 +199,71 @@ function enum_values(list: any, where: string): { string }
     return out
 end
 
+-- A decimal holds at most this many digits, which a double keeps exactly.
+DECIMAL_DIGITS = 15
+DECIMAL_SCALE = 15
+
+-- `v` rounded to `scale` digits after the point, half away from zero, as
+-- the number nearest that decimal; or nil and why `v` is no such decimal.
+-- Rounding reads the shortest text that gives back `v`, so 2.675 rounds to
+-- 2.68 although its double is a little less.
+function decimal(v: any, scale: number): (number?, string?)
+    if type(v) == "integer" then v = integer.tonumber(v) end
+    local why = "wants a decimal of at most " .. DECIMAL_DIGITS .. " digits with " .. scale
+        .. " after the point, got " .. tostring(v)
+    if type(v) ~= "number" or v ~= v or math.abs(v) == math.huge then
+        return nil, why
+    end
+    local sign, whole, frac, exp = string.match(tostring(v), "^(%-?)(%d*)%.?(%d*)e?([-+]?%d*)$")
+    if sign == nil then
+        return nil, why
+    end
+    -- v * 10^scale = digits * 10^shift
+    local digits = whole .. frac
+    local shift = (tonumber(exp) or 0) - #frac + scale
+    local keep, next = digits, 0
+    if shift >= 0 then
+        keep = digits .. string.rep("0", math.min(shift, DECIMAL_DIGITS + 1))
+    else
+        local cut = #digits + shift
+        keep = cut > 0 and string.sub(digits, 1, cut) or ""
+        next = cut >= 0 and tonumber(string.sub(digits, cut + 1, cut + 1)) or 0
+    end
+    keep = string.gsub(keep, "^0+", "")
+    if #keep > DECIMAL_DIGITS then
+        return nil, why
+    end
+    local n = (tonumber(keep) or 0) + (next >= 5 and 1 or 0)
+    if n >= 10 ^ DECIMAL_DIGITS then
+        return nil, why
+    end
+    if n == 0 then
+        return 0
+    end
+    return (sign == "-" and -n or n) / 10 ^ scale
+end
+
+-- The whole number of 10^-scale units in decimal `v`, which decimal()
+-- answered; sums of these are exact.
+function decimal_units(v: number, scale: number): number
+    return math.round(v * 10 ^ scale)
+end
+
 function call()
     local value = parse_json('{"z":[],"a":[{},null,1099511627776]}')
     if json(value) ~= '{"a":[{},null,1099511627776],"z":[]}'
         or hex(unhex("00ff01")) ~= "00ff01" then return "failed: values" end
+    for _, case in { { 2.675, 2, 2.68 }, { 1.005, 2, 1.01 }, { -1.005, 2, -1.01 },
+                     { 0.004, 2, 0 }, { 0.005, 2, 0.01 }, { 1.5e-7, 8, 1.5e-7 },
+                     { 1.5e-7, 7, 2e-7 }, { 1e14, 0, 1e14 }, { 0.1 + 0.2, 2, 0.3 },
+                     { 12, 3, 12 } } do
+        if decimal(case[1], case[2]) ~= case[3] then
+            return "failed: decimal " .. tostring(case[1])
+        end
+    end
+    if decimal(1e15, 0) ~= nil or decimal(1e13, 2) ~= nil or decimal(0 / 0, 2) ~= nil
+        or decimal("1", 2) ~= nil or decimal_units(decimal(12.34, 2) :: number, 2) ~= 1234 then
+        return "failed: decimal limits"
+    end
     return "ok"
 end

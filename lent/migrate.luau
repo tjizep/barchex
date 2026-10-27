@@ -39,7 +39,9 @@
 --   - dropping a table;
 --   - changing a table's id kind, which its stored keys are written in;
 --   - a new field that is neither optional nor has a default;
---   - changing a field's kind, except int to float and int to or from time;
+--   - changing a field's kind, except int to float, int to or from time,
+--     enum to string and decimal to float;
+--   - changing a decimal field's scale;
 --   - renaming a field of a table that has ever stored json rows, since
 --     those rows name their fields;
 --   - two tables that store under one key.
@@ -68,7 +70,7 @@ local RULES = { "min", "max", "minLen", "maxLen" }
 
 -- kind changes that read stored values as they are
 local SAME_STORE = { ["int>float"] = true, ["int>time"] = true, ["time>int"] = true,
-                     ["enum>string"] = true }
+                     ["enum>string"] = true, ["decimal>float"] = true }
 
 local function num(v: any): any
     return type(v) == "integer" and integer.tonumber(v) or v
@@ -115,6 +117,7 @@ end
 
 local function key_kind(kind: string): string
     if kind == "enum" or kind == "bytes" then return "string" end
+    if kind == "decimal" then return "float" end
     return kind == "time" and "int" or kind
 end
 
@@ -186,6 +189,7 @@ local function load_fields(t: any)
     for _, f in t.fields or {} do
         f.id = num(f.id)
         f.computed = num(f.computed)
+        f.scale = num(f.scale)
         f.default = num(f.default)
         if f.defaultEncoding == "json" then
             f.default = VALUES.parse_json(f.default)
@@ -247,6 +251,10 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
             fail(where .. " field " .. f.name .. " changes kind from " .. was.kind
                 .. " to " .. f.kind)
         end
+        if was and was.kind == "decimal" and f.kind == "decimal" and was.scale ~= f.scale then
+            fail(where .. " field " .. f.name .. " changes scale from " .. was.scale .. " to "
+                .. f.scale)
+        end
         if was and was.kind == "enum" and f.kind == "enum" then
             local allowed = {}
             for _, value in f.values do allowed[value] = true end
@@ -267,7 +275,7 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
         fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
                       unique = f.unique, default = f.default, immutable = f.immutable,
                       match = f.match, values = f.values and table.clone(f.values),
-                      computed = f.computed }
+                      scale = f.scale, computed = f.computed }
         for _, k in RULES do
             fields[i][k] = f[k]
         end

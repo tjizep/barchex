@@ -28,6 +28,7 @@
 --   "uuid"    "u" + its 32 hex digits                      the uuid, 36 lowercase
 --                                                          characters with dashes
 --   "time"    as "int", for Unix milliseconds              integer
+--   "decimal" as "float", for a value rounded to its scale   number
 --   "enum"    as "string", for enum labels                 string
 --   "bytes"   as "string", for arbitrary bytes             string
 --
@@ -120,6 +121,7 @@ local ENCODERS = {
     bool = enc_bool,
     uuid = enc_uuid,
     time = enc_int,
+    decimal = enc_float,
     enum = enc_string,
     bytes = enc_string,
 }
@@ -129,7 +131,7 @@ local ENCODERS = {
 WIDTH = { int = 17, uuid = 33 }
 
 -- The key text for one value of `kind`: int, float, string, bool, uuid,
--- time, enum or bytes. Enum membership is checked by the schema and row codec.
+-- time, decimal, enum or bytes. Enum membership is checked by the schema and row codec.
 -- nil encodes as null whatever the kind.
 function encode(kind: string, value: any): string
     local enc = ENCODERS[kind]
