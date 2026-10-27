@@ -501,9 +501,92 @@ local function as_cond(n: any): any
     return nil
 end
 
+-- At most this many value ranges per field; an `and` of `or`s multiplies
+-- them.
+local MAX_RANGES = 64
+
+-- The value range of a comparison { field, op, value }, or nil when op is
+-- ~= or the value is nil or NaN. lo and hi are nil when open-ended; loOpen and
+-- hiOpen leave the bound itself out.
+local function as_range(c: any): any
+    local v = c.value
+    if v == nil or v ~= v or c.op == "~=" then
+        return nil
+    elseif c.op == "=" then
+        return { lo = v, hi = v }
+    elseif c.op == ">" or c.op == ">=" then
+        return { lo = v, loOpen = c.op == ">" }
+    end
+    return { hi = v, hiOpen = c.op == "<" }
+end
+
+-- The values range a and b share, or nil when they share none.
+local function overlap(a: any, b: any): any
+    local r = { lo = a.lo, loOpen = a.loOpen, hi = a.hi, hiOpen = a.hiOpen }
+    if b.lo ~= nil and (r.lo == nil or b.lo > r.lo) then
+        r.lo, r.loOpen = b.lo, b.loOpen
+    elseif b.lo ~= nil and b.lo == r.lo then
+        r.loOpen = r.loOpen or b.loOpen
+    end
+    if b.hi ~= nil and (r.hi == nil or b.hi < r.hi) then
+        r.hi, r.hiOpen = b.hi, b.hiOpen
+    elseif b.hi ~= nil and b.hi == r.hi then
+        r.hiOpen = r.hiOpen or b.hiOpen
+    end
+    if r.lo ~= nil and r.hi ~= nil
+        and (r.lo > r.hi or (r.lo == r.hi and (r.loOpen or r.hiOpen))) then
+        return nil
+    end
+    return r
+end
+
+-- For each field that n holds only within some value ranges, the list of
+-- those ranges: a row whose field lies outside every range fails n. Only
+-- comparisons of number and string fields with values count.
+local function ranges_of(n: any): { [string]: { any } }
+    if n.k == "bin" and n.op == "or" then
+        local a, b = ranges_of(n.a), ranges_of(n.b)
+        local out = {}
+        for f, list in a do
+            if b[f] and #list + #b[f] <= MAX_RANGES then
+                out[f] = table.move(b[f], 1, #b[f], #list + 1, table.clone(list))
+            end
+        end
+        return out
+    elseif n.k == "bin" and n.op == "and" then
+        local a, b = ranges_of(n.a), ranges_of(n.b)
+        for f, list in b do
+            if a[f] == nil then
+                a[f] = list
+            elseif #a[f] * #list <= MAX_RANGES then
+                local both = {}
+                for _, x in a[f] do
+                    for _, y in list do
+                        both[#both + 1] = overlap(x, y)
+                    end
+                end
+                a[f] = both
+            end
+        end
+        return a
+    end
+    local c = n.k == "bin" and as_cond(n)
+    local t = c and type(c.value)
+    if c and (t == "number" or t == "string") and (n.a.t == t and n.b.t == t) then
+        local r = as_range(c)
+        if r then
+            return { [c.field] = { r } }
+        end
+    end
+    return {}
+end
+
 -- The expression src split at its top-level `and`s, in order: each part is
 -- { field, op, value } with op one of = ~= < <= > >=, or { fn } with fn a
--- function of the row. A row matches when every part holds.
+-- function of the row. A { fn } part that holds only when some field lies
+-- within value ranges also has ranges = { [field] = list }, each range a
+-- table { lo, loOpen, hi, hiOpen } whose nil bound is open-ended. A row
+-- matches when every part holds.
 function compile(src: string, kindOf: (string) -> string?, params: any, where: string): { any }
     local bad = failer(where, src)
     if params ~= nil and type(params) ~= "table" then
@@ -520,7 +603,15 @@ function compile(src: string, kindOf: (string) -> string?, params: any, where: s
                 parts[#parts + 1] = { fn = function() return false end }
             end
         else
-            parts[#parts + 1] = as_cond(n) or { fn = build(n, bad) }
+            local part = as_cond(n)
+            if part == nil then
+                part = { fn = build(n, bad) }
+                local ranges = ranges_of(n)
+                if next(ranges) ~= nil then
+                    part.ranges = ranges
+                end
+            end
+            parts[#parts + 1] = part
         end
     end
     split(tree)
@@ -555,6 +646,33 @@ function call()
     if #parts ~= 5 or parts[2].op ~= "<=" or parts[3].value ~= 1000 or parts[4].value ~= true
         or parts[5].fn == nil then
         return "failed: split"
+    end
+    local function ranges(src)
+        local out = {}
+        for _, p in compile(src, function(name) return kinds[name] end, nil, "EXPR") do
+            for f, list in p.ranges or {} do
+                for _, r in list do
+                    out[#out + 1] = f .. (r.loOpen and "(" or "[") .. tostring(r.lo) .. ","
+                        .. tostring(r.hi) .. (r.hiOpen and ")" or "]")
+                end
+            end
+        end
+        return table.concat(out, " ")
+    end
+    local spans = {
+        { "age < 20 or age > 100", "age[nil,20) age(100,nil]" },
+        { "(age > 1 and age < 5 and salary < 3) or 7 == age", "age(1,5) age[7,7]" },
+        { "(age > 1 or name == 'x') and (age < 5 or age >= 9) or age == 2",
+          "age[nil,5) age[9,nil] age[2,2]" },
+        { "(age < 5 or age > 9) and (age < 3 or age > 4) or age == 1",
+          "age[nil,3) age(4,5) age(9,nil] age[1,1]" },
+        { "name == 'ann' or age > 3", "" },
+        { "age ~= 3 or age == nil", "" },
+    }
+    for i, c in spans do
+        if ranges(c[1]) ~= c[2] then
+            return "failed: ranges " .. i .. ": " .. ranges(c[1])
+        end
     end
     local r = { age = 30, salary = 500, name = "ann", active = true, tags = { "a" } }
     local cases = {

@@ -77,9 +77,31 @@ function steps.reads(c)
         names(c.Emp:query():where("salary < 1000"):where("age", ">", 10)),
         tostring(q("id >= 3"):count()),
         names(q("age + 1 > lo + 1", { lo = 40 })),
-        -- an `or` reads every row, then filters them
+        -- each side of the `or` reads its own span of the age index
         q("age < 20 or age > 100"):explain(),
+        names(q("age < 20 or age > 100")),
+        -- the span below 20 lies outside age > 50
+        q("age > 50 and (age < 20 or age > 100)"):explain(),
+        names(q("age > 50 and (age < 20 or age > 100)")),
+        q("name == 'ann' or name == 'eve'"):explain(),
+        names(q("name == 'ann' or name == 'eve'")),
+        q("id == 2 or id == 4"):explain(),
+        names(q("id == 2 or id == 4")),
+        -- a comparison on another field leaves the `or` to the row filter
+        q("age < 20 or name == 'bob'"):explain(),
     }
+end
+
+-- Pages through the rows outside ages 20 to 100, two at a time, in age
+-- order: the read starts at the cursor and skips the gap between spans.
+function steps.pages(c, dir)
+    local function q() return c.Emp:query():where("age < 20 or age > 40"):order("age", dir):limit(2) end
+    local first = q():all()
+    local rest = q():after(q():cursor(first[#first]))
+    local out = {}
+    for _, r in first do out[#out + 1] = r.name end
+    for _, r in rest:all() do out[#out + 1] = r.name end
+    return { q():explain(), rest:explain(), table.concat(out, ",") }
 end
 
 function steps.edges(c)
@@ -116,11 +138,11 @@ function steps.errors(c)
     }
 end
 
-function call(step, mode)
+function call(step, mode, arg)
     if step == "migrate" then
         return m.migrate(app).done and "done" or "more"
     end
-    return db.tx(function(c) return steps[step](c) end, mode == "pessimistic")
+    return db.tx(function(c) return steps[step](c, arg) end, mode == "pessimistic")
 end
 """
 
@@ -131,7 +153,7 @@ def run(client, request):
     client.execute_command("USE", re.sub(r"\W", "_", "where_expr_" + request.node.name))
     client.execute_command("SETF", "WHEREEXPR", APP)
     mode = request.param
-    run = lambda step: client.execute_command("CALLF", "WHEREEXPR", step, mode)
+    run = lambda step, *args: client.execute_command("CALLF", "WHEREEXPR", step, mode, *args)
     assert run("migrate") == "done"
     assert run("seed") == "ok"
     return run
@@ -161,8 +183,22 @@ def test_expressions_filter_rows(run):
         "ann,dee,eve",
         "3",
         "bob,eve",
+        "by_age 2 ranges age",
+        "dee,eve",
+        "by_age range age",
+        "eve",
+        "by_name 2 ranges name",
+        "ann,eve",
+        "id 2 ranges id",
+        "bob,dee",
         "id",
     ]
+
+
+@pytest.mark.parametrize("dir", ["asc", "desc"])
+def test_or_pages_read_index_spans(run, dir):
+    order = "dee,bob,eve" if dir == "asc" else "eve,bob,dee"
+    assert run("pages", dir) == ["by_age 2 ranges age", "by_age 2 ranges age from cursor", order]
 
 
 def test_expressions_filter_links(run):

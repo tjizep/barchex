@@ -113,9 +113,10 @@ beside a development server.
 - `test_where_expr.py` runs the expression self-check, then filters rows and
   links with expression strings and parameters in optimistic and
   pessimistic transactions. It checks missing values, arithmetic, JSON and
-  computed fields, the index an expression's `and` parts pick, `whereEdge`,
-  `has` and query writes, and the errors for syntax, unknown names, kinds
-  and values checked per row.
+  computed fields, the index an expression's `and` parts pick, the key
+  spans an `or` reads, cursor pages across those spans in both directions,
+  `whereEdge`, `has` and query writes, and the errors for syntax, unknown
+  names, kinds and values checked per row.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id
   kinds, all row formats, optimistic and pessimistic transactions, indexes,
   cursors, upsert and query writes. It checks structural JSON equality,

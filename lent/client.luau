@@ -1062,8 +1062,8 @@ local function fits(kind: string, v: any): boolean
 end
 
 local function new_query(tbl: any): any
-    return setmetatable({ tbl = tbl, conds = {}, preds = {}, checks = {}, loads = {}, skip = 0 },
-        Query)
+    return setmetatable({ tbl = tbl, conds = {}, ors = {}, preds = {}, checks = {}, loads = {},
+                          skip = 0 }, Query)
 end
 
 -- Starts a query over this table's rows that the policy's query rules let
@@ -1089,7 +1089,9 @@ end
 -- range comparisons. where(fn) keeps rows for which fn(row) answers true.
 -- where(expr, params) keeps the rows for which the Luau expression string
 -- expr answers true; see EXPR. Its top-level `and` parts that compare a
--- field with a value become conditions an index can serve.
+-- field with a value become conditions an index can serve, and an index can
+-- read just the value ranges of a part that holds only within them, such as
+-- `age < 20 or age > 100`.
 function Query:where(field: any, op: any, value: any): any
     if type(field) == "function" then
         self.preds[#self.preds + 1] = field
@@ -1102,6 +1104,9 @@ function Query:where(field: any, op: any, value: any): any
         for _, p in parts do
             if p.fn then
                 self.preds[#self.preds + 1] = p.fn
+                for f, list in p.ranges or {} do
+                    self.ors[#self.ors + 1] = { field = f, ranges = list }
+                end
             else
                 self:where(p.field, p.op, p.value)
             end
@@ -1319,8 +1324,56 @@ function matches(q: any, r: any): boolean
     return true
 end
 
+-- The key that starts (or, when `upper`, ends) the index keys after
+-- `prefix` whose next value is v, open-ended when v is nil. `open` leaves out
+-- the keys of v itself. Answers false when no key qualifies, and the
+-- open-ended key when v has no key text.
+local function bound(kind: string, prefix: string, v: any, open: boolean?, upper: boolean?): any
+    if kind == "int" and v ~= nil and v ~= math.floor(v) and math.abs(v) ~= math.huge then
+        v, open = if upper then math.floor(v) else math.ceil(v), false
+    end
+    if v == (if upper then -math.huge else math.huge) then
+        return false
+    end
+    local ok, enc = pcall(kc.encode, kind, v)
+    if v == nil or v == -math.huge or v == math.huge or not ok then
+        return if upper then kc.after(prefix) else prefix
+    end
+    local key = prefix .. enc
+    return if (open == true) == (upper == true) then key else kc.after(key)
+end
+
+-- The key spans of `list`, value ranges of the next value after `prefix`,
+-- within lo..hi, in key order with overlapping spans merged.
+local function spans_of(kind: string, prefix: string, list: { any }, lo: string,
+                        hi: string): { any }
+    local spans = {}
+    for _, r in list do
+        local a = bound(kind, prefix, r.lo, r.loOpen)
+        local b = bound(kind, prefix, r.hi, r.hiOpen, true)
+        if a and b then
+            a, b = if a > lo then a else lo, if b < hi then b else hi
+            if a < b then
+                spans[#spans + 1] = { lo = a, hi = b }
+            end
+        end
+    end
+    table.sort(spans, function(x, y) return x.lo < y.lo end)
+    local out = {}
+    for _, sp in spans do
+        local last = out[#out]
+        if last and sp.lo <= last.hi then
+            last.hi = if sp.hi > last.hi then sp.hi else last.hi
+        else
+            out[#out + 1] = sp
+        end
+    end
+    return out
+end
+
 -- How to read q: which index, the key span, and whether the keys come in
--- the order q asks for.
+-- the order q asks for. A plan with spans reads only those key spans of
+-- lo..hi, in order.
 local function index_plan(q: any, keys: boolean?): any
     local tbl, t = q.tbl, q.tbl.t
     if q.idset and not keys then
@@ -1345,6 +1398,10 @@ local function index_plan(q: any, keys: boolean?): any
             table.insert(ranges[c.field], c)
         end
     end
+    local within = {}
+    for _, o in q.ors do
+        within[o.field] = within[o.field] or o.ranges
+    end
     local best, bestScore = nil, -1
     local sources = { PRIMARY }
     for _, ix in t.indexes do
@@ -1366,15 +1423,18 @@ local function index_plan(q: any, keys: boolean?): any
             local next = ix.on[n + 1]
             local ordered = point or q.sortField == nil
                 or (n == #ix.on and q.sortField == "id")
-                or (not ix.unique and n + 1 == #ix.on and q.sortField == next)
+                or (n + 1 == #ix.on and q.sortField == next)
                 or (ix.primary and q.sortField == "id")
-            -- a unique index leaves out rows with a nil in its fields
-            local usable = ix.primary or point or not ix.unique
-            local score = point and 1000 or n * 4 + (ranges[next] and 2 or 0) + (ordered and 1 or 0)
+            -- a unique index leaves out rows with a nil in its fields, which
+            -- fail the comparisons on its last field
+            local bounded = ranges[next] or within[next]
+            local usable = ix.primary or point or not ix.unique or (n + 1 == #ix.on and bounded)
+            local score = point and 1000 or n * 4 + (bounded and 2 or 0) + (ordered and 1 or 0)
             if not usable then
                 if q.use then
                     fail(tbl.where .. " index " .. ix.name .. " is unique, so a query using it"
-                        .. " needs = on each of its fields")
+                        .. " needs = on each of its fields, or on each before the last and a"
+                        .. " range on the last")
                 end
             elseif score > bestScore then
                 best, bestScore = { ix = ix, values = values, next = next, ordered = ordered }, score
@@ -1421,7 +1481,16 @@ local function index_plan(q: any, keys: boolean?): any
             best.hi = kc.after(prefix .. kc.encode(kind, hi))
             best.full = false
         end
-        parts[#parts + 1] = "range " .. best.next
+    end
+    local list = best.next and within[best.next]
+    if list then
+        -- only rows whose value lies in one of the ranges can match
+        best.spans = spans_of(kind_of(tbl, best.next), prefix, list, best.lo, best.hi)
+        best.full = false
+    end
+    if span or list then
+        local n = best.spans and #best.spans or 1
+        parts[#parts + 1] = (n == 1 and "range " or n .. " ranges ") .. best.next
     end
     if not best.ordered then
         parts[#parts + 1] = "then sort"
@@ -1670,7 +1739,8 @@ local function rows(q: any, loading: boolean?): { any }
         ordered, early, back = o, o and want ~= nil, o and q.desc
     end
     -- Reads the rows of index plan ix's keys, only those in `only` when
-    -- given. Answers false when it gave up after `budget` keys. A scan of
+    -- given, span by span when the plan has spans. Answers false when it
+    -- gave up after `budget` keys. A scan of
     -- the rows themselves reads each row with its key, and one of a unique
     -- index reads each pk with its key; one that stops at a limit starts
     -- with a page of that many keys.
@@ -1690,13 +1760,23 @@ local function rows(q: any, loading: boolean?): { any }
             end
             return consider(pk, if rowValues then v else nil)
         end
+        local scan, first
         if rowValues or (unique and not primary) then
-            local first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
-            local scan = back and lay.scan_back_values or lay.scan_values
-            scan(ix.lo, ix.hi, each, first)
+            first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
+            scan = back and lay.scan_back_values or lay.scan_values
         else
-            local scan = back and lay.scan_back or lay.scan
-            scan(ix.lo, ix.hi, each)
+            scan = back and lay.scan_back or lay.scan
+        end
+        local spans = ix.spans or { ix }
+        local n = #spans
+        for i = 1, n do
+            -- a cursor may have moved the plan's ends into its spans
+            local s = spans[if back then n + 1 - i else i]
+            local lo = if s.lo > ix.lo then s.lo else ix.lo
+            local hi = if s.hi < ix.hi then s.hi else ix.hi
+            if lo < hi and scan(lo, hi, each, first) then
+                break
+            end
         end
         return not over
     end

@@ -204,7 +204,7 @@ def test_index_build_pages_are_bounded_resumable_and_hidden_until_ready(client, 
     assert s["entries"]["work"] == (6 if unique == "unique" else 7)
     q = run("query")
     assert q["names"] == ["b", "c", "d", "e", "f"]
-    assert q["plan"] == ("id then sort" if unique == "unique" else "work range value")
+    assert q["plan"] == "work range value"
     if unique == "unique":
         assert run("by") == run("upsert") == "a"
     assert run("migrate") == {"version": 2, "changed": False, "done": True, "processed": 0, "steps": {}}

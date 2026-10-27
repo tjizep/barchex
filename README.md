@@ -1043,7 +1043,17 @@ Each part of an expression's top-level `and` that compares a field with a
 value works like a `where(field, op, value)` filter, so an index can serve
 it; a `bool` field on its own counts as `field = true`. With an index on
 `age`, `explain()` shows `by_age range age` for the first example above.
-The other parts, and every `or`, run on each row the index reads.
+
+An `or` whose sides each compare the same field with values, such as
+`age < 20 or age > 100` or `name == 'ann' or name == 'eve'`, gives that
+field a list of value ranges. A side may join several comparisons with
+`and`, as in `(age > 1 and age < 5) or age > 100`. An index on the field
+reads only the keys in those ranges, merging ranges that overlap, in index
+order, so `order("age")` with a `limit` still stops early; `explain()`
+shows `by_age 2 ranges age`. When a side has no comparison of that field
+with a value, as in `age ~= 3` or `age == nil`, the query checks the `or`
+on each row it reads. Every part of the expression is checked on each row
+the index reads.
 
 Write every row selected by a query with `update` or `delete`:
 
@@ -1077,14 +1087,14 @@ Use an `id` cursor and `limit` to divide large updates across transactions;
 a limited delete can run in separate transactions until it returns `0`.
 
 The query picks the index whose leading fields match the most `=` filters,
-then one range filter on the next field. When that index already returns
-rows in the requested order, the query stops reading at the limit.
-A `desc` order reads the index from the end and stops the same way.
-Otherwise `explain` ends with `then sort`, and the query reads every
-matching row before sorting. A
-unique index is used only when every one of its fields has an `=` filter,
-because it leaves out rows with a missing value. Filters on other fields
-are checked on each row read.
+then one range filter, or the ranges of an expression's `or`, on the next
+field. When that index already returns rows in the requested order, the
+query stops reading at the limit. A `desc` order reads the index from the
+end and stops the same way. Otherwise `explain` ends with `then sort`, and
+the query reads every matching row before sorting. A unique index leaves
+out rows with a missing value, so it is used when every one of its fields
+has an `=` filter, or when each field before the last has one and the last
+has a range. Filters on other fields are checked on each row read.
 
 A query from `follow` or `query<Edge>()`, or the query `with` runs for each
 row, starts from the linked ids. When its filters narrow an index, or its
