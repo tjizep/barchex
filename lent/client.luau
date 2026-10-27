@@ -23,6 +23,7 @@
 --       c.User:link("posts", u.id, p.id)     -- or unlink
 --       c.User:link("likes", u.id, p.id, { weight = 3 })  -- an edge with fields
 --       c.User:edge("likes", u.id, p.id)     -- the link's values, or nil
+--       c.User:query():where("age >= lo and name ~= 'bo'", { lo = 18 }):all()
 --       c.User:query():where("name", "=", "ann")
 --           :queryPosts():order("title", "desc"):limit(10):all()
 --       c.User:query():hasPostsWith(function(q) q:where("title", "=", "hi") end)
@@ -53,6 +54,7 @@ local kc = require("lent.KEYCODEC")
 local mig = require("lent.MIGRATE")
 local SCHEMA = require("lent.SCHEMA")
 local VALUES = require("lent.VALUES")
+local EXPR = require("lent.EXPR")
 
 local function fail(msg: string)
     error("LENT " .. msg, 0)
@@ -1031,15 +1033,21 @@ local OPS = { ["="] = true, ["~="] = true, ["<"] = true, ["<="] = true, [">"] = 
               [">="] = true }
 local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
 
-local function kind_of(tbl: any, field: string): string
+-- The kind of tbl's field, or nil when tbl has no such field.
+local function field_kind(tbl: any, field: any): string?
     if field == "id" and tbl.linksOf == nil then
         return lay.id_kind(tbl.t)
     end
     local f = tbl.byName[field] or tbl.computedByName[field]
-    if f == nil then
+    return f and f.kind
+end
+
+local function kind_of(tbl: any, field: string): string
+    local kind = field_kind(tbl, field)
+    if kind == nil then
         fail(tbl.where .. " has no field " .. tostring(field))
     end
-    return f.kind
+    return kind :: string
 end
 
 local function fits(kind: string, v: any): boolean
@@ -1079,9 +1087,25 @@ end
 -- Keeps the rows where `field op value` holds, op being one of = ~= < <= >
 -- >=. A missing value equals nil, differs from non-nil values and fails
 -- range comparisons. where(fn) keeps rows for which fn(row) answers true.
-function Query:where(field: any, op: string?, value: any): any
+-- where(expr, params) keeps the rows for which the Luau expression string
+-- expr answers true; see EXPR. Its top-level `and` parts that compare a
+-- field with a value become conditions an index can serve.
+function Query:where(field: any, op: any, value: any): any
     if type(field) == "function" then
         self.preds[#self.preds + 1] = field
+        return self
+    end
+    if type(field) == "string" and value == nil and (op == nil or type(op) == "table") then
+        local tbl = self.tbl
+        local parts = EXPR.compile(field, function(name) return field_kind(tbl, name) end, op,
+                                   "LENT " .. tbl.where .. " query where")
+        for _, p in parts do
+            if p.fn then
+                self.preds[#self.preds + 1] = p.fn
+            else
+                self:where(p.field, p.op, p.value)
+            end
+        end
         return self
     end
     local tbl = self.tbl

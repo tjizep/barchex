@@ -30,6 +30,7 @@ remains.
 | aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | edge fields: values stored on a link | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 | path edges: `edge.through`, stored or not, and multi-hop `follow` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| expression filters: `where("age > 10 and salary < max", params)` | `lent.EXPR`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
 
 ## What barch provides
 
@@ -260,7 +261,9 @@ end)
 Luau metatables build the clients at run time, so lent needs no code
 generation step; `queryPosts` is looked up when it is called. A query uses
 the index with the longest prefix matched by its equality filters plus one
-range filter. Without a matching index it scans the table and filters each
+range filter. The comparisons in an expression filter's top-level `and`
+count as filters here. barch's Luau has no `loadstring`, so lent parses an
+expression into a tree and builds a closure from it. Without a matching index it scans the table and filters each
 row. `:using(index)` names the index to use, and `:explain()` answers the
 plan. Index bounds may let in extra keys, so every filter is checked again
 on the row. A table scan reads each row's value with its key, and a unique

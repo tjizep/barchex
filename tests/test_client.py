@@ -109,7 +109,8 @@ def setup(client):
     for name, path in [("VALUES", "lent/values.luau"),
                        ("KEYCODEC", "lent/keycodec.luau"), ("ROWCODEC", "lent/rowcodec.luau"),
                        ("SCHEMA", "lent/schema.luau"), ("LAYOUT", "lent/layout.luau"),
-                       ("MIGRATE", "lent/migrate.luau"), ("CLIENT", "lent/client.luau")]:
+                       ("MIGRATE", "lent/migrate.luau"), ("EXPR", "lent/expr.luau"),
+                       ("CLIENT", "lent/client.luau")]:
         install(client, "lent", name, path)
 
 

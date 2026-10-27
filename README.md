@@ -50,6 +50,7 @@ lent/
   schema.luau      →  function SCHEMA     (lent tables, fields, indexes and edges)
   layout.luau      →  function LAYOUT     (the store keys of lent rows, indexes and edges)
   migrate.luau     →  function MIGRATE    (the lent catalog and index builds)
+  expr.luau        →  function EXPR       (expression filters for lent queries)
   client.luau      →  function CLIENT     (lent rows, edges and queries)
 docs/
   lent-design.md   →  the plan for lent, an ORM over barch transactions
@@ -318,7 +319,9 @@ Enum values use string storage, so they also read as strings. Use MIGRATE
 to check a schema change's storage compatibility. `lent.ROWCODEC` runs the
 module's self-check and answers `ok`. The codecs and schema use
 `lent.VALUES` for structured value handling; install it with the other lent
-modules. `lent.VALUES` also answers `ok` for its self-check.
+modules. `lent.VALUES` also answers `ok` for its self-check. CLIENT requires
+`lent.EXPR` for its expression filters, so install it with CLIENT;
+`lent.EXPR` answers `ok` for its self-check.
 
 SCHEMA declares lent tables in Luau. `lent.schema` checks one table and
 `lent.graph` checks the tables together; each raises an error that starts with
@@ -976,6 +979,7 @@ c.User:query()
     :where("name", "=", "ann")            -- = ~= < <= > >=
     :where("age", ">", 30)
     :where(function(r) return r.age % 2 == 0 end)
+    :where("age <= max or name == 'bo'", { max = 60 })  -- an expression
     :order("age", "desc"):offset(10):limit(10)
     :all()                                -- or first, ids, count
 c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
@@ -986,6 +990,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 |---|---|
 | `where(field, op, value)` | keeps rows where the comparison holds; a missing field equals `nil`, differs from non-`nil` values and fails range comparisons |
 | `where(fn)` | keeps rows for which `fn(row)` is true |
+| `where(expr, params)` | keeps rows for which the expression string `expr` is true; `params` is an optional table of named values |
 | `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
 | `limit(n)`, `offset(n)` | applied after the order |
 | `cursor(row)` | a string that marks `row`'s place in the query's order |
@@ -995,7 +1000,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
-| `whereEdge(field, op, value)`, `whereEdge(fn)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
+| `whereEdge(field, op, value)`, `whereEdge(fn)`, `whereEdge(expr, params)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
 | `links(edge)` | a query over the links of the matches through an `edge.to` or `edge.from`, one row per link holding `from`, `to` and the link's values |
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
@@ -1003,6 +1008,42 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
 | `delete()` | deletes the selected rows and answers the number it removed |
 | `explain()` | the plan, such as `by_name_age = name range age` or `edge customer_likes in (by_color = color)` |
+
+An expression filter is a Luau expression over the row's fields, with `id`,
+and the names in `params`:
+
+```lua
+c.Emp:query():where("age > 10 and age <= 100 and salary < max", { max = 1000 })
+c.Emp:query():where("(age or 0) * 2 > salary / 10 or name .. '!' == shout",
+                    { shout = "eve!" })
+```
+
+It takes numbers, strings, `true`, `false` and `nil`, the names of fields,
+computed fields and parameters, `and`, `or`, `not`, `==`, `~=`, `<`, `<=`,
+`>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#` and parentheses.
+Anything else is a syntax error, so an expression reads only the row and its
+parameters. A parameter is a number, string, boolean or JSON table; a name
+that is both a field and a parameter is an error, and so is a name that is
+neither. Pass values through `params` to keep them out of the expression
+text. A parameter set to `nil` is missing from its table, so compare with
+the literal `nil` instead.
+
+A missing field value is `nil`. A range comparison with `nil` is false, as
+in `where(field, op, value)`, so `not (age > 20)` keeps rows without an age.
+Arithmetic, `..` and `#` with `nil` give `nil`. `==` and `~=` compare JSON
+fields structurally. `where` checks the expression against the field kinds
+when it is called: it raises an error for a range comparison on a `bool` or
+`json` field, for a comparison of different kinds such as `age > 'ten'`, and
+for arithmetic on a string. A value whose kind is known only per row, such
+as `age or 'none'`, is checked as each row is read. Errors start with
+`LENT table <name> query where "<expr>"` and give the column for a syntax
+error.
+
+Each part of an expression's top-level `and` that compares a field with a
+value works like a `where(field, op, value)` filter, so an index can serve
+it; a `bool` field on its own counts as `field = true`. With an index on
+`age`, `explain()` shows `by_age range age` for the first example above.
+The other parts, and every `or`, run on each row the index reads.
 
 Write every row selected by a query with `update` or `delete`:
 

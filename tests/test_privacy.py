@@ -199,7 +199,7 @@ end
 MODULES = [("VALUES", "lent/values.luau"), ("KEYCODEC", "lent/keycodec.luau"),
            ("ROWCODEC", "lent/rowcodec.luau"), ("SCHEMA", "lent/schema.luau"),
            ("LAYOUT", "lent/layout.luau"), ("MIGRATE", "lent/migrate.luau"),
-           ("CLIENT", "lent/client.luau")]
+           ("EXPR", "lent/expr.luau"), ("CLIENT", "lent/client.luau")]
 
 
 @pytest.fixture(params=["optimistic", "pessimistic"])

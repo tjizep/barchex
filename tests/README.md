@@ -110,6 +110,12 @@ beside a development server.
   links without the far table's rules, each write a rule allows or refuses,
   that a refused call takes back its hooks' writes, the error for a rule's
   invalid answer, and that a client without the graph runs no policy.
+- `test_where_expr.py` runs the expression self-check, then filters rows and
+  links with expression strings and parameters in optimistic and
+  pessimistic transactions. It checks missing values, arithmetic, JSON and
+  computed fields, the index an expression's `and` parts pick, `whereEdge`,
+  `has` and query writes, and the errors for syntax, unknown names, kinds
+  and values checked per row.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id
   kinds, all row formats, optimistic and pessimistic transactions, indexes,
   cursors, upsert and query writes. It checks structural JSON equality,
