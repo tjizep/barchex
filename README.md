@@ -350,6 +350,9 @@ local app = lent.graph { User, Post }
 local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 ```
 
+`lent.graph` also takes views made with `lent.view`, which name a query
+that the client reads like a table; see views under CLIENT.
+
 | builder | modifiers |
 |---|---|
 | `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
@@ -1435,6 +1438,62 @@ each link's values, so its cost grows with the number of links. Without
 limit. With `order`, it reads every link, sorts them, and puts links with
 equal values in `from` then `to` order. `explain` shows the plan of the
 query the links come from, as in `links user_likes from (id)`.
+
+A view gives a query a name, and you read its rows as you read a table's.
+Declare it with `lent.view "Name" { fields, rows }`: `fields` lists the
+fields each row holds, and `rows(c, params)` answers the rows as a list.
+Put the view in `lent.graph` with the tables and open the client with that
+graph, which makes the view `c.Name`:
+
+```lua
+local AuthorStats = lent.view "AuthorStats" {
+    fields = {
+        lent.field.string "name":optional(),   -- nil for posts without an author
+        lent.field.int "posts",
+        lent.field.int "stars",
+    },
+    -- c is the client the view is read from; params come from query(params)
+    rows = function(c, params)
+        local out = {}
+        for _, g in c.Post:query():where("at >= since", params)
+            :groupBy("author.name")
+            :aggregate { posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } } do
+            out[#out + 1] = { name = g["author.name"], posts = g.posts, stars = g.stars }
+        end
+        return out
+    end,
+}
+local db = lent.open(lent.graph { User, Post, AuthorStats })
+
+db.tx(function(c)
+    -- the ten authors with the most stars this year, among those with 3 posts
+    return c.AuthorStats:query({ since = lent.date(2026, 1, 1) })
+        :where("posts >= 3"):order("stars", "desc"):limit(10):all()
+end)
+```
+
+A view field takes a kind and a name, plus `:optional()`, `:values(...)`
+for an `enum` and `:scale(n)` for a `decimal`; any other modifier raises an
+error. A view's name must differ from every table's. No key stores a view's
+rows, so MIGRATE leaves views alone, and a client opened without the graph
+has no `c.Name` for them.
+
+Each `all`, `first`, `count`, `groupBy` or aggregate call runs the
+function again, in the caller's transaction. The function reads through
+`c`, so the viewer's query rules apply to what it reads. Each answered row
+keeps only the declared fields, so the function may answer table rows with
+more keys. A field without a value that is not `:optional()`, or a value of
+the wrong kind, raises an error that names the row's position, such as
+`view AuthorStats row 3 field posts is int, got x`. A `decimal` value is
+rounded to the field's scale.
+
+A view query takes the same methods as a links query: `where`, `order`,
+`limit`, `offset`, `groupBy`, the aggregates, `all`, `first`, `count` and
+`explain`; other query methods raise an error. They run in memory over every
+row the function answers, so a view costs what its function costs plus a
+pass over its rows. Rows come in the order the function answers them, and
+`order` keeps that order among rows with equal values. `explain` answers
+`view AuthorStats rows, then filter in memory`.
 
 Errors start with `LENT`, or with `ROWCODEC` for a value of the wrong kind or
 a missing required field. `lent.CLIENT` runs a self-check inside a

@@ -10,7 +10,7 @@ the answers:
 
 | file | workload | queries checked |
 |---|---|---|
-| `tests/test_tpch.py` | TPC-H, 8 tables, 220 line items | Q1, Q3, Q4, Q6, Q10, Q11, Q12, Q13, Q14, Q18 |
+| `tests/test_tpch.py` | TPC-H, 8 tables, 220 line items | Q1, Q3, Q4, Q6, Q10, Q11, Q12, Q13, Q14, Q15, Q18 |
 | `tests/test_nyc_taxi.py` | yellow taxi trips and zones, 300 trips | the four benchmark queries and a group by pickup borough |
 
 Run them with the rest of the suite, or alone:
@@ -34,8 +34,8 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
-2. **Missing query forms.** Anti-joins (`NOT EXISTS`), correlated
-   subqueries and views all take Luau code.
+2. **Missing query forms.** Anti-joins (`NOT EXISTS`) and correlated
+   subqueries take Luau code.
 
 [Gaps](#gaps) lists each missing feature with the queries that need it.
 
@@ -82,7 +82,7 @@ from the query text.
 | Q12 shipping modes | verified | `IN` as an `or` of `==`; each `CASE` sum is a separate `hasOrderWith` query |
 | Q13 customer distribution | verified | `withOrders` keeps customers without orders, as `LEFT OUTER JOIN` does; `NOT LIKE` as a `where` function |
 | Q14 promotion effect | verified | `LIKE 'PROMO%'` as the range `type >= 'PROMO' and type < 'PROMP'`, read through `by_type` |
-| Q15 top supplier | Luau | uses a view; `groupBy("supplier")` with `order("revenue", "desc")` finds the maximum |
+| Q15 top supplier | verified | the `Revenue` view groups lines by supplier; `max("revenue")` on the view, then `where("revenue == top")` |
 | Q16 parts/supplier relationship | Luau | `NOT IN` a subquery; `count` with `distinct = true` counts the suppliers |
 | Q17 small-quantity-order revenue | Luau | a correlated `avg` per part: one `groupBy("part")` pass, then a second pass |
 | Q18 large volume customer | verified | `groupBy` the order, its date and total price, and `order.customer.name`, with `having("qty > q", { q = 300 })` and an order by total price and date |
@@ -146,7 +146,7 @@ section is based on the schema text and has no test.
 | `film_text` with a `FULLTEXT` index | lent has no text search |
 | triggers that fill `create_date` and copy films to `film_text` | `:default` and `create`, `update` and `delete` hooks |
 | foreign keys `ON DELETE RESTRICT ON UPDATE CASCADE` | `delete` removes the row's links; a `delete` hook can refuse or cascade |
-| seven views, such as `customer_list` and `sales_by_store` | a Luau function that builds the query |
+| seven views, such as `customer_list` and `sales_by_store` | `lent.view` with the view's columns and a function that answers its rows |
 | stored functions such as `inventory_in_stock` | Luau functions |
 
 ## Gaps
@@ -184,10 +184,11 @@ item it belongs to.
    `customer.nation.name` or the taxi `origin.borough`, and Q3, Q10 and
    Q18 group by the order and customer columns they report. Q5, Q7 and Q8
    still need a condition across two paths before they group by nation.
-8. **Views.** TPC-H Q15 and seven Sakila views are named queries. A view
-   could be a named query declared in the graph and read like a table, and
-   a stored view could keep its rows current on each write, as stored path
-   edges do.
+8. **Views.** Done: `lent.view` declares a named query in the graph, with
+   its fields and a function that answers its rows, and queries read it
+   like a table, as Q15 does. A view's rows are worked out on each read; a
+   stored view that keeps its rows current on each write, as stored path
+   edges do, would serve large views.
 9. **Anti-joins and subqueries.** `NOT EXISTS` (Q21, Q22) needs a negated
    `has`. Correlated subqueries (Q2, Q17, Q20) run as two passes in Luau.
 10. **Composite keys that include an edge.** A unique index takes fields

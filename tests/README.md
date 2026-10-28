@@ -66,6 +66,11 @@ beside a development server.
   filtered, ordered and limited queries and empty selections, aggregates of
   `value` functions, `groupBy` on fields, several fields and an edge, and the
   aggregate errors.
+- `test_views.py` reads a view's rows through `where`, `order`, `limit`,
+  `offset`, `first`, `count`, `groupBy`, `having` and the aggregates, passes
+  parameters to its function, keeps only the declared fields of each row,
+  and checks the errors for a bad declaration, a row that breaks a field's
+  kind, and query methods a view query refuses.
 - `test_computed.py` reads computed fields from rows, hooks, edge follows,
   filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
   ignores them and that a client without the graph lacks them, and checks

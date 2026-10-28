@@ -1126,7 +1126,7 @@ local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
 
 -- The kind of tbl's field, or nil when tbl has no such field.
 local function field_kind(tbl: any, field: any): string?
-    if field == "id" and tbl.linksOf == nil then
+    if field == "id" and tbl.memory == nil then
         return lay.id_kind(tbl.t)
     end
     local f = tbl.byName[field] or tbl.computedByName[field]
@@ -1167,11 +1167,12 @@ function Table:query(): any
     return q
 end
 
--- Raises an error when q is a links query, whose rows are links.
+-- Raises an error when q is a links or view query, whose rows no table
+-- stores.
 local function rows_only(q: any, what: string)
-    if q.tbl.linksOf then
-        fail(q.tbl.where .. " query " .. what .. " reads table rows; a links query takes where,"
-            .. " order, limit, offset, groupBy and aggregates")
+    if q.tbl.memory then
+        fail(q.tbl.where .. " query " .. what .. " reads table rows; " .. q.tbl.memory
+            .. " takes where, order, limit, offset, groupBy and aggregates")
     end
 end
 
@@ -1780,11 +1781,73 @@ local function link_rows(q: any): { any }
     return out
 end
 
+-- The rows of view query q: the rows the view's function answers, each
+-- holding just the view's fields, that match q, in q's order, after offset
+-- and limit. Rows with the same sort value keep the function's order.
+local function view_rows(q: any): { any }
+    local v = q.tbl.viewOf
+    local where = q.tbl.where
+    local list = v.view.rows(v.c, v.params)
+    if type(list) ~= "table" then
+        fail(where .. " rows function answered " .. tostring(list) .. "; it answers a list of rows")
+    end
+    local out = {}
+    for i = 1, #list do
+        local r = list[i]
+        if type(r) ~= "table" then
+            fail(where .. " row " .. i .. " is " .. tostring(r) .. "; a row is a table")
+        end
+        local row = {}
+        for _, f in v.view.fields do
+            local value = num(r[f.name])
+            if value == nil then
+                if not f.optional then
+                    fail(where .. " row " .. i .. " has no " .. f.name
+                        .. ", and the field is not optional")
+                end
+            elseif not fits_kind(f, value) then
+                local why = SCHEMA.broken(f, value)
+                fail(where .. " row " .. i .. " field " .. f.name .. " "
+                    .. (why or "is " .. f.kind .. ", got " .. tostring(value)))
+            else
+                row[f.name] = rounded(f, value)
+            end
+        end
+        if matches(q, row) then
+            out[#out + 1] = row
+        end
+    end
+    local f = q.sortField
+    if f then
+        local at = {}
+        for i, r in out do
+            at[r] = i
+        end
+        table.sort(out, function(a, b)
+            if a[f] ~= b[f] then
+                if q.desc then
+                    return less(b[f], a[f])
+                end
+                return less(a[f], b[f])
+            end
+            return at[a] < at[b]
+        end)
+    end
+    local want = q.lim and q.skip + q.lim
+    if q.skip ~= 0 or (want ~= nil and #out > want) then
+        out = table.move(out, q.skip + 1, math.min(#out, want or #out), 1, {})
+    end
+    return out
+end
+
 -- The matching rows, in order, after offset and limit, with their eager
 -- loaded edges when `loading`.
 local function rows(q: any, loading: boolean?): { any }
     if q.tbl.linksOf then
         return link_rows(q)
+    end
+    if q.tbl.viewOf then
+        return view_rows(q)
     end
     local tbl = q.tbl
     local p = plan(q)
@@ -2132,7 +2195,7 @@ local function group_key(tbl: any, name: any): any
         if part == "" then
             fail(tbl.where .. " query groupBy " .. name .. " has an empty name")
         end
-        if last and ((part == "id" and at.linksOf == nil) or at.byName[part]
+        if last and ((part == "id" and at.memory == nil) or at.byName[part]
                 or at.computedByName[part]) then
             local kind = kind_of(at, part)
             if kind == "json" then
@@ -2488,6 +2551,9 @@ function Query:explain(): string
     if l then
         return "links " .. l.e.store .. " from (" .. l.q:explain() .. ")"
     end
+    if self.tbl.viewOf then
+        return self.tbl.where .. " rows, then filter in memory"
+    end
     return plan(self).name
 end
 
@@ -2553,7 +2619,30 @@ function Query:links(name: string): any
     end
     return new_query({ where = tbl.where .. " links " .. name, byName = byName,
                          computedByName = {}, edgeByName = {}, t = tbl.t,
-                         linksOf = { tbl = tbl, e = e, q = self } })
+                         memory = "a links query", linksOf = { tbl = tbl, e = e, q = self } })
+end
+
+-- views ------------------------------------------------------------------------
+
+local View = {}
+View.__index = View
+
+-- View `v` from lent.view, read through client c. A view query reads its
+-- fields by name as a table query does.
+local function new_view(v: any, c: any): any
+    local byName = {}
+    for _, f in v.fields do
+        byName[f.name] = f
+    end
+    return setmetatable({ view = v, c = c, where = "view " .. v.name, byName = byName }, View)
+end
+
+-- Starts a query over the rows the view's function answers for `params`.
+-- where, order, limit, offset, groupBy and the aggregates work on them.
+function View:query(params: any?): any
+    return new_query({ where = self.where, byName = self.byName, computedByName = {},
+                       edgeByName = {}, memory = "a view query",
+                       viewOf = { view = self.view, c = self.c, params = params } })
 end
 
 -- Keeps the rows that link to at least one row through edge `name`. With
@@ -2686,9 +2775,14 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
         b.rulesClient = rulesClient
         b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH
     end
+    local what = "table "
+    for name, v in app and app.views or {} do
+        c[name] = new_view(v, c)
+        what = "table or view "
+    end
     return setmetatable(c, {
         __index = function(_, name)
-            fail("this space's schema has no table " .. tostring(name))
+            fail("this space's schema has no " .. what .. tostring(name))
         end,
     })
 end

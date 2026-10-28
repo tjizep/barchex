@@ -39,6 +39,14 @@
 --
 --   lent.edge.through "products" "Product":via "orders.lines.product"
 --
+-- A view names a query that lent.CLIENT reads like a table; graph() takes
+-- views with the tables:
+--
+--   lent.view "AuthorStats" {
+--       fields = { lent.field.string "name", lent.field.int "posts" },
+--       rows = function(c, params) return { ... } end,
+--   }
+--
 -- schema() checks one table and graph() checks the tables together: every
 -- edge names a declared table, every edge.from names the edge.to it is the
 -- inverse of, and every edge.through's hops reach its target. Both raise an
@@ -996,6 +1004,65 @@ function schema(name: string)
     end
 end
 
+-- views -----------------------------------------------------------------------
+
+local VIEW_OPTIONS = { fields = true, rows = true }
+local VIEW_KEEPS = { kind = true, name = true, optional_ = true, values_ = true,
+                     scale_ = true }
+
+-- One view: `lent.view "Name" { fields, rows }`, a named query that
+-- lent.CLIENT reads like a table. rows(c, params) answers a list of rows,
+-- reading through the client c the view is queried from. No key stores a
+-- view's rows, so MIGRATE leaves views alone. The answer is plain data:
+-- { name, view = true, fields = { { name, kind, optional, values?,
+-- scale? } }, rows }.
+function view(name: string)
+    ident(name, "view")
+    return function(spec: any)
+        local where = "view " .. name
+        if type(spec) ~= "table" then
+            fail(where .. " needs a table of options")
+        end
+        for k in spec do
+            if not VIEW_OPTIONS[k] then
+                fail(where .. " has no option " .. tostring(k) .. "; it takes fields and rows")
+            end
+        end
+        if type(spec.rows) ~= "function" then
+            fail(where .. " rows takes a function, got " .. type(spec.rows))
+        end
+        local v = { name = name, view = true, fields = {}, rows = spec.rows }
+        local seen = {}
+        for _, f in spec.fields or {} do
+            f = plain_field(where, f)
+            local at = where .. " field " .. f.name
+            if seen[f.name] then
+                fail(at .. " is declared twice")
+            end
+            seen[f.name] = true
+            for k in f do
+                if not VIEW_KEEPS[k] then
+                    local option = string.gsub(k, "_$", "")
+                    if option == "hasDefault" then option = "default" end
+                    fail(at .. " is a view field, which takes no " .. option)
+                end
+            end
+            local out = { name = f.name, kind = f.kind, optional = f.optional_ == true }
+            if f.kind == "enum" then
+                out.values = VALUES.enum_values(f.values_, "SCHEMA " .. at)
+            elseif f.values_ ~= nil then
+                fail(at .. " is a " .. f.kind .. " field, which takes no values")
+            end
+            scale(at, f, out)
+            v.fields[#v.fields + 1] = out
+        end
+        if #v.fields == 0 then
+            fail(where .. " needs at least one field")
+        end
+        return v
+    end
+end
+
 -- the whole schema ------------------------------------------------------------
 
 -- Checks tables together and answers { tables = { [name] = table },
@@ -1006,12 +1073,20 @@ end
 -- that an edge.through's hops lead to its target and sets its unique when
 -- every hop is unique. A stored one gets a store named as an edge.to's,
 -- whose record adds edge, its name, and path = { { store, forward } }, the
--- stored edges it follows with their direction.
+-- stored edges it follows with their direction. Views made with lent.view
+-- go in `views = { [name] = view }`.
 function graph(list: { any })
-    local tables, order, keys = {}, {}, {}
+    local tables, order, keys, views = {}, {}, {}, {}
     for _, t in list do
         if type(t) ~= "table" or type(t.fields) ~= "table" then
-            fail("graph takes tables made with lent.schema")
+            fail("graph takes tables made with lent.schema and views made with lent.view")
+        end
+        if t.view then
+            if views[t.name] then
+                fail("view " .. t.name .. " is declared twice")
+            end
+            views[t.name] = t
+            continue
         end
         if tables[t.name] then
             fail("table " .. t.name .. " is declared twice")
@@ -1116,7 +1191,12 @@ function graph(list: { any })
             end
         end
     end
-    return { tables = tables, order = order, edges = stored }
+    for name in views do
+        if tables[name] then
+            fail("view " .. name .. " has the name of a table")
+        end
+    end
+    return { tables = tables, order = order, edges = stored, views = views }
 end
 
 -- field ids -------------------------------------------------------------------

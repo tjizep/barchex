@@ -19,6 +19,9 @@ local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
 local f = lent.field
 
+-- l_extendedprice * (1 - l_discount), in cents times 100
+local function revenue(l) return l.extendedprice * (100 - l.discount) end
+
 local app = lent.graph {
     lent.schema "Region" {
         id = "int",
@@ -108,11 +111,17 @@ local app = lent.graph {
             lent.edge.through "customer" "Customer":via "order.customer",
         },
     },
+    -- Q15's revenue0 view: each supplier's revenue from the lines shipped
+    -- from a to b
+    lent.view "Revenue" {
+        fields = { f.int "supplier", f.int "revenue" },
+        rows = function(c, p)
+            return c.Lineitem:query():where("shipdate >= a and shipdate < b", p)
+                :groupBy("supplier"):aggregate { revenue = { fn = "sum", value = revenue } }
+        end,
+    },
 }
 local db = client.open(app)
-
--- l_extendedprice * (1 - l_discount), in cents times 100
-local function revenue(l) return l.extendedprice * (100 - l.discount) end
 
 -- sorts `list` by the keys `by` names, each "name" or "-name" for descending
 local function sort(list, by)
@@ -293,6 +302,17 @@ function q.q14(c, p)
     end)
     local spec = { revenue = { fn = "sum", value = revenue } }
     return { promo:aggregate(spec).revenue, lines():aggregate(spec).revenue, promo:explain() }
+end
+
+-- Q15, top supplier: the suppliers with the most revenue in the view
+function q.q15(c, p)
+    local top = c.Revenue:query(p):max("revenue")
+    local out = {}
+    for _, r in c.Revenue:query(p):where("revenue == top", { top = top }):order("supplier"):all() do
+        local s = c.Supplier:get(r.supplier)
+        out[#out + 1] = { s.id, s.name, s.address, s.phone, r.revenue }
+    end
+    return out
 end
 
 -- Q18, large volume customer
@@ -616,6 +636,23 @@ def test_q14_promotion_effect(tpch):
     got = run("q14", {"a": ms(day("1995-01-01")), "b": ms(day("1996-01-01"))})
     assert got == [promo, total,
                    "by_shipdate range shipdate, has part from (by_type range type)"]
+
+
+def test_q15_top_supplier(tpch):
+    run, sql = tpch
+    want = sql("""
+        with revenue0 as (
+            select l_suppkey as supplier_no,
+                   sum(l_extendedprice * (100 - l_discount)) as total_revenue
+            from lineitem where l_shipdate >= :a and l_shipdate < :b
+            group by l_suppkey)
+        select s_suppkey, s_name, s_address, s_phone, total_revenue
+        from supplier, revenue0
+        where s_suppkey = supplier_no
+          and total_revenue = (select max(total_revenue) from revenue0)
+        order by s_suppkey""", a="1996-01-01", b="1996-04-01")
+    assert want
+    assert run("q15", {"a": ms(day("1996-01-01")), "b": ms(day("1996-04-01"))}) == want
 
 
 def test_q18_large_volume_customer(tpch):
