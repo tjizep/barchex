@@ -502,6 +502,15 @@ raise an error. `lent.parseJson` preserves signed 64-bit integer tokens
 exactly; values outside the exact Luau-number range (`±2^53`) use barch's
 native `integer` type. Other JSON numbers use Luau numbers.
 
+lent takes a Luau `integer`, which `simdjson.parse` answers for whole
+numbers beyond 32 bits, wherever it takes a number: field and link values,
+ids, filter values and expression parameters, `limit`, `offset`, schema
+bounds and defaults, and the results of default, update and computed
+functions. lent turns an integer from -2^53 to 2^53 into a Luau number, so
+rows and query results hold numbers. A larger integer raises the field's
+usual error, such as `ROWCODEC field n wants int, got 9007199254740993`,
+because a number would round it.
+
 `where("metadata", "=", value)` and `~=` compare JSON structurally: object
 key order is ignored, array order matters, and an empty array differs from
 an empty object. Use `where(fn)` to filter nested properties. JSON fields

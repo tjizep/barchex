@@ -192,10 +192,9 @@ item it belongs to.
 11. **String patterns.** A `LIKE` prefix works as a range on an index. A
     pattern elsewhere in the string needs a `where` function, because
     expressions call only the date functions.
-12. **Luau integers.** `simdjson.parse` answers whole numbers beyond 32
-    bits, such as millisecond times, as the Luau `integer` type. lent
-    fields accept only `number`, and the error reads `wants a time in Unix
-    milliseconds, got 805075200000`. The tests convert values with
-    `integer.tonumber`; lent could accept the `integer` type.
+12. **Luau integers.** Done: lent takes the Luau `integer` values that
+    `simdjson.parse` answers for whole numbers beyond 32 bits, such as
+    millisecond times, wherever it takes a number, and the tests pass
+    parsed arguments straight to lent.
 13. **Sakila types.** `SET`, spatial values and full-text search have no
     lent form. A `SET` fits a `json` list today.

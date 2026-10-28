@@ -309,21 +309,11 @@ function q.q18(c, p)
     return pick(out, { "name", "custkey", "key", "orderdate", "totalprice", "qty" }, 100)
 end
 
--- simdjson answers whole numbers beyond 32 bits as the Luau integer type,
--- and lent fields take numbers
-local function numbers(v)
-    if type(v) == "integer" then return integer.tonumber(v) end
-    if type(v) == "table" then
-        for k, x in v do v[k] = numbers(x) end
-    end
-    return v
-end
-
 function call(step, arg)
     if step == "migrate" then
         return m.migrate(app).done and "done" or "more"
     end
-    return db.tx(function(c) return q[step](c, numbers(simdjson.parse(arg))) end)
+    return db.tx(function(c) return q[step](c, simdjson.parse(arg)) end)
 end
 """
 

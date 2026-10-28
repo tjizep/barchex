@@ -54,6 +54,8 @@ local kc = require("lent.KEYCODEC")
 local mig = require("lent.MIGRATE")
 local SCHEMA = require("lent.SCHEMA")
 local VALUES = require("lent.VALUES")
+-- a Luau integer within 2^53 as a number; see VALUES.number
+local num = VALUES.number
 local EXPR = require("lent.EXPR")
 
 local function fail(msg: string)
@@ -177,7 +179,7 @@ local function compute_stored(self: any, f: any, r: any)
         fail(self.where .. " field " .. f.name .. " is computed and stored, so writing"
             .. " rows needs its function; open the client with lent.open(app)")
     end
-    local v = code.computed(table.clone(r))
+    local v = num(code.computed(table.clone(r)))
     local why = SCHEMA.computed_broken(f, v)
     if why then
         fail(self.where .. " field " .. f.name .. " " .. why)
@@ -198,7 +200,7 @@ local function compute(self: any, r: any): any
         end
     end
     for _, f in self.computed do
-        local v = f.fn(r)
+        local v = num(f.fn(r))
         if v ~= nil and not fits_kind(f, v) then
             fail(self.where .. " field " .. f.name .. " is a computed " .. f.kind
                 .. ", and its function answered " .. tostring(v))
@@ -254,7 +256,7 @@ local function set_fields(self: any, r: any, values: any)
             fail(self.where .. " edge " .. k .. " changes with link and unlink")
         end
         no_field(self, k)
-        r[k] = v
+        r[k] = num(v)
     end
 end
 
@@ -291,7 +293,9 @@ local function check_row(self: any, r: any, old: any)
         end
     end
     for _, f in self.t.fields do
-        local v = r[f.name]
+        -- a hook may have set a Luau integer
+        local v = num(r[f.name])
+        r[f.name] = v
         -- a decimal is stored rounded to its scale; one that does not fit
         -- stays as it is for broken() to refuse
         if f.kind == "decimal" and v ~= nil and (old == nil or v ~= old[f.name]) then
@@ -492,6 +496,7 @@ end
 
 -- The ids in an edge's value: an id, a row, or a list of either.
 local function ids_in(self: any, e: any, v: any): { any }
+    v = num(v)
     if type(v) == "number" or type(v) == "string" or (type(v) == "table" and v.id ~= nil) then
         v = { v }
     end
@@ -500,7 +505,7 @@ local function ids_in(self: any, e: any, v: any): { any }
     end
     local list = {}
     for i, x in v do
-        list[i] = type(x) == "table" and x.id or x
+        list[i] = num(type(x) == "table" and x.id or x)
     end
     return list
 end
@@ -666,9 +671,9 @@ local function link_value(self: any, e: any, values: any, old: any): (string, an
     set_fields(es, r, values)
     for name, code in es.code do
         if old == nil and r[name] == nil and code.default then
-            r[name] = code.default()
+            r[name] = num(code.default())
         elseif old and code.update and values[name] == nil then
-            r[name] = code.update()
+            r[name] = num(code.update())
         end
     end
     lay.fill(es.t, r)
@@ -742,6 +747,7 @@ end
 -- defaults, and an existing link keeps the rest. Linking again without
 -- values leaves the link as it is.
 function Table:link(name: string, pk: any, other: any, values: { [string]: any }?): any
+    pk, other = num(pk), num(other)
     local e = linkable(self, find_edge(self, name))
     if not exists(self, pk) then
         fail(self.where .. " has no row " .. pk)
@@ -765,6 +771,7 @@ end
 -- The values on the link from row pk to row `other` through edge `name`,
 -- or nil when the rows are not linked.
 function Table:edge(name: string, pk: any, other: any): any
+    pk, other = num(pk), num(other)
     local e = linkable(self, find_edge(self, name))
     local target = self.peers[e.target]
     check_pk(self, pk)
@@ -778,6 +785,7 @@ end
 
 -- Removes the link from row pk to row `other`. Answers whether there was one.
 function Table:unlink(name: string, pk: any, other: any): boolean
+    pk, other = num(pk), num(other)
     local e = linkable(self, find_edge(self, name))
     local s = self.allEdges[e.store]
     check_pk(self, pk)
@@ -829,7 +837,7 @@ end
 function Table:create(values: { [string]: any }): any
     writable(self)
     local r, plain, links = {}, {}, {}
-    local given = values.id
+    local given = num(values.id)
     for k, v in values do
         local e = self.edgeByName[k]
         if e then
@@ -847,7 +855,7 @@ function Table:create(values: { [string]: any }): any
     set_fields(self, r, plain)
     for name, code in self.code do
         if r[name] == nil and code.default then
-            r[name] = code.default()
+            r[name] = num(code.default())
         end
     end
     lay.fill(self.t, r)
@@ -925,6 +933,7 @@ end
 
 -- The row with this id, or nil.
 function Table:get(pk: any): any
+    pk = num(pk)
     check_pk(self, pk)
     if self.queryRules then
         return self:query():where("id", "=", pk):first()
@@ -951,6 +960,9 @@ end
 function Table:by(name: string, ...: any): any
     local ix = unique_index(self, name)
     local values = { ... }
+    for i, v in values do
+        values[i] = num(v)
+    end
     if select("#", ...) ~= #ix.on then
         fail(self.where .. " index " .. ix.name .. " takes " .. #ix.on .. " values, got "
             .. select("#", ...))
@@ -962,6 +974,7 @@ end
 -- Sets the fields in `values` and clears the fields named in `clear`, then
 -- answers the stored row. Raises an error if there is no row with this id.
 function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): any
+    pk = num(pk)
     writable(self)
     check_pk(self, pk)
     local old = read(self, pk, true)
@@ -983,7 +996,7 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
     end
     for name, code in self.code do
         if code.update and values[name] == nil and not cleared[name] then
-            r[name] = code.update()
+            r[name] = num(code.update())
         end
     end
     r = clone_row(self, r)
@@ -1008,7 +1021,7 @@ function Table:upsert(name: string, values: { [string]: any }): (any, boolean)
         fail(self.where .. " upsert takes a table of values")
     end
     if name == "id" then
-        local pk = values.id
+        local pk = num(values.id)
         if pk == nil then
             fail(self.where .. " upsert by id needs a value for id")
         end
@@ -1026,7 +1039,7 @@ function Table:upsert(name: string, values: { [string]: any }): (any, boolean)
         if values[fname] == nil then
             fail(self.where .. " upsert index " .. ix.name .. " needs a value for " .. fname)
         end
-        on[i] = values[fname]
+        on[i] = num(values[fname])
     end
     local pk = get(self, lay.index(self.t, ix, on), true)
     if pk == nil then
@@ -1038,6 +1051,7 @@ end
 -- Removes the row, its index entries and its edges. Answers false if there
 -- was no row.
 function Table:delete(pk: any): boolean
+    pk = num(pk)
     writable(self)
     check_pk(self, pk)
     local old = read(self, pk, true)
@@ -1192,6 +1206,7 @@ function Query:where(field: any, op: any, value: any): any
     end
     local tbl = self.tbl
     local kind = kind_of(tbl, field)
+    value = num(value)
     if not OPS[op] then
         fail(tbl.where .. " query has no operator " .. tostring(op))
     end
@@ -1223,6 +1238,7 @@ function Query:order(field: string, dir: string?): any
 end
 
 local function count_arg(self: any, what: string, n: any): number
+    n = num(n)
     if type(n) ~= "number" or n < 0 or n ~= math.floor(n) then
         fail(self.tbl.where .. " query " .. what .. " takes a whole number, got " .. tostring(n))
     end

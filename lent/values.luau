@@ -5,6 +5,19 @@
 
 local ARRAY = { __lent_json_array = true }
 local MAX_INT = 2 ^ 53
+local INT_MAX = integer.create(MAX_INT)
+local INT_MIN = integer.neg(INT_MAX)
+
+-- `v` as a Luau number when it is a Luau integer from -2^53 to 2^53, which a
+-- number holds exactly, and any other value as it is. simdjson.parse answers
+-- whole numbers beyond 32 bits as integers, which do not compare or add with
+-- numbers.
+function number(v: any): any
+    if type(v) == "integer" and integer.le(v, INT_MAX) and integer.ge(v, INT_MIN) then
+        return integer.tonumber(v)
+    end
+    return v
+end
 
 function is_array(v: any): boolean
     local mt = type(v) == "table" and getmetatable(v)
@@ -138,11 +151,7 @@ function parse_json(text: string, maxDepth: number?): any
         else
             at = string.find(text, "[,}%]%s]", at) or #text + 1
         end
-        if type(v) == "integer" then
-            local n = integer.tonumber(v)
-            if math.abs(n) <= MAX_INT then return n end
-        end
-        return v
+        return number(v)
     end
     return walk(root, 0)
 end
@@ -208,7 +217,7 @@ DECIMAL_SCALE = 15
 -- Rounding reads the shortest text that gives back `v`, so 2.675 rounds to
 -- 2.68 although its double is a little less.
 function decimal(v: any, scale: number): (number?, string?)
-    if type(v) == "integer" then v = integer.tonumber(v) end
+    v = number(v)
     local why = "wants a decimal of at most " .. DECIMAL_DIGITS .. " digits with " .. scale
         .. " after the point, got " .. tostring(v)
     if type(v) ~= "number" or v ~= v or math.abs(v) == math.huge then
@@ -290,7 +299,7 @@ end
 function date(y: any, mo: any, d: any, h: any?, mi: any?, s: any?, ms: any?): (number?, string?)
     local parts = { y, mo, d, h or 0, mi or 0, s or 0, ms or 0 }
     for i = 1, 7 do
-        if type(parts[i]) == "integer" then parts[i] = integer.tonumber(parts[i]) end
+        parts[i] = number(parts[i])
     end
     y, mo, d, h, mi, s, ms = table.unpack(parts, 1, 7)
     if not (whole(y, 1, 9999) and whole(mo, 1, 12) and whole(h, 0, 23) and whole(mi, 0, 59)
@@ -340,7 +349,7 @@ end
 
 -- t as a Luau number, or nil and why t is no time in Unix milliseconds.
 local function time_value(t: any): (number?, string?)
-    if type(t) == "integer" then t = integer.tonumber(t) end
+    t = number(t)
     if type(t) ~= "number" or t ~= math.floor(t) or math.abs(t) > 2 ^ 53 then
         return nil, "takes a time in Unix milliseconds, got " .. tostring(t)
     end
@@ -368,7 +377,7 @@ end
 function add_months(t: any, n: any): (number?, string?)
     local p, why = date_parts(t)
     if p == nil then return nil, why end
-    if type(n) == "integer" then n = integer.tonumber(n) end
+    n = number(n)
     if not whole(n, -120000, 120000) then
         return nil, "takes a whole number of months, got " .. tostring(n)
     end

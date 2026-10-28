@@ -321,10 +321,11 @@ local function describe(n: any): string
 end
 
 local function param(params: any, name: string, bad: any): any
-    local v = params[name]
+    local v = VALUES.number(params[name])
     local t = type(v)
     if t == "integer" then
-        return integer.tonumber(v)
+        bad(nil, "parameter " .. name .. " wants a whole number from -2^53 to 2^53, got "
+            .. tostring(v))
     elseif t == "number" or t == "string" or t == "boolean" then
         return v
     elseif t == "table" then

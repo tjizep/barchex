@@ -72,9 +72,7 @@ local RULES = { "min", "max", "minLen", "maxLen" }
 local SAME_STORE = { ["int>float"] = true, ["int>time"] = true, ["time>int"] = true,
                      ["enum>string"] = true, ["decimal>float"] = true }
 
-local function num(v: any): any
-    return type(v) == "integer" and integer.tonumber(v) or v
-end
+local num = VALUES.number
 
 -- Preserve byte defaults and JSON array/object distinctions in the catalog.
 local function field_data(f: any): any

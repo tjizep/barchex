@@ -233,7 +233,7 @@ end
 -- is called for each create, as in :default(lent.now); a value is also what
 -- older rows read for a field added later.
 function Field:default(v: any)
-    self.default_ = v
+    self.default_ = VALUES.number(v)
     self.hasDefault = true
     return self
 end
@@ -254,29 +254,29 @@ end
 -- The digits a decimal field keeps after the point, from 0 to 15. A
 -- decimal field needs it.
 function Field:scale(n: number)
-    self.scale_ = n
+    self.scale_ = VALUES.number(n)
     return self
 end
 
 -- Bounds for an int, float, decimal or time field's value, inclusive.
 function Field:min(n: number)
-    self.min_ = n
+    self.min_ = VALUES.number(n)
     return self
 end
 
 function Field:max(n: number)
-    self.max_ = n
+    self.max_ = VALUES.number(n)
     return self
 end
 
 -- Bounds for a string, enum or bytes field's length in bytes, inclusive.
 function Field:minLen(n: number)
-    self.minLen_ = n
+    self.minLen_ = VALUES.number(n)
     return self
 end
 
 function Field:maxLen(n: number)
-    self.maxLen_ = n
+    self.maxLen_ = VALUES.number(n)
     return self
 end
 
@@ -503,6 +503,7 @@ local function plain(where: string, what: string, t: any, keys: { [string]: stri
             .. ", got " .. tostring(t))
     end
     for k, v in t do
+        v = VALUES.number(v)
         local want = keys[k]
         if want == nil then
             fail(where .. " " .. what .. " " .. tostring(t.name) .. " has no option " .. tostring(k))
