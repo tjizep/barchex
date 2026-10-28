@@ -25,8 +25,9 @@ lent stores all three schemas. Tables map to `lent.schema`, foreign keys to
 an `edge.from` with its `edge.to`, and a join table with extra columns to an
 edge with `:fields`. Single-table filters and group-by queries translate
 directly. Queries that join several tables translate to `has` filters and
-`groupBy` over a unique edge or path edge, followed by a little Luau for
-sorting, `HAVING` and loading the joined rows.
+`groupBy` over a unique edge or path edge, with `having`, `order` and
+`limit` on the groups, followed by a little Luau for loading the joined
+rows.
 
 The main limits, in order of impact:
 
@@ -34,9 +35,9 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
-2. **Missing query forms.** `avg`, `count(distinct)`, `HAVING`, ordering
-   by an aggregate, grouping by a field of a linked row, anti-joins
-   (`NOT EXISTS`), correlated subqueries and views all take Luau code.
+2. **Missing query forms.** Grouping by a field of a linked row,
+   anti-joins (`NOT EXISTS`), correlated subqueries and views all take
+   Luau code.
 
 [Gaps](#gaps) lists each missing feature with the queries that need it.
 
@@ -69,24 +70,24 @@ from the query text.
 
 | query | status | how lent answers it, or what it lacks |
 |---|---|---|
-| Q1 pricing summary | verified | `where` on `shipdate`, `groupBy("returnflag", "linestatus")`, sums with `value` functions; `avg` is sum over count |
+| Q1 pricing summary | verified | `where` on `shipdate`, `groupBy("returnflag", "linestatus")`, sums with `value` functions, and `avg` |
 | Q2 minimum cost supplier | Luau | `links("parts")` from suppliers in a region, then the minimum cost per part in Luau; `LIKE '%BRASS'` needs a `where` function |
-| Q3 shipping priority | verified | nested `hasOrderWith` and `hasCustomerWith`, `groupBy("order")`, then sort by revenue and limit in Luau |
+| Q3 shipping priority | verified | nested `hasOrderWith` and `hasCustomerWith`, `groupBy("order")`, then sort by revenue and order date and limit in Luau, since the order date is not a group key |
 | Q4 order priority checking | verified | `hasLinesWith` with the expression `commitdate < receiptdate` for `EXISTS` |
 | Q5 local supplier volume | Luau | needs the customer's nation to equal the supplier's nation, a condition across two paths; load both with `with` and compare in Luau |
 | Q6 forecasting revenue change | verified | one expression filter read through `by_shipdate` |
 | Q7 volume shipping | Luau | nation pairs as in Q5, and the year of `shipdate` |
 | Q8 national market share | Luau | eight-table join, the year of `orderdate`, and a `CASE` share |
 | Q9 product type profit | Luau | `LIKE '%green%'`, the `PARTSUPP` cost per line through `c.Part:edge("supplies", part, supplier)`, and the year |
-| Q10 returned item reporting | verified | `groupBy("customer")` over the path edge, then each customer `withNation` |
+| Q10 returned item reporting | verified | `groupBy("customer")` over the path edge with `order("revenue", "desc"):limit(20)`, then each customer `withNation` |
 | Q11 important stock | verified | `links("parts")` reads the `PARTSUPP` values; `HAVING` against a total in Luau |
 | Q12 shipping modes | verified | `IN` as an `or` of `==`; each `CASE` sum is a separate `hasOrderWith` query |
 | Q13 customer distribution | verified | `withOrders` keeps customers without orders, as `LEFT OUTER JOIN` does; `NOT LIKE` as a `where` function |
 | Q14 promotion effect | verified | `LIKE 'PROMO%'` as the range `type >= 'PROMO' and type < 'PROMP'`, read through `by_type` |
-| Q15 top supplier | Luau | uses a view; `groupBy("supplier")` and the maximum in Luau |
-| Q16 parts/supplier relationship | Luau | `NOT IN` a subquery and `count(distinct)` |
+| Q15 top supplier | Luau | uses a view; `groupBy("supplier")` with `order("revenue", "desc")` finds the maximum |
+| Q16 parts/supplier relationship | Luau | `NOT IN` a subquery; `count` with `distinct = true` counts the suppliers |
 | Q17 small-quantity-order revenue | Luau | a correlated `avg` per part: one `groupBy("part")` pass, then a second pass |
-| Q18 large volume customer | verified | `groupBy("order")` with `HAVING sum > 300` in Luau, then each order `withCustomer` |
+| Q18 large volume customer | verified | `groupBy("order")` with `having("qty > q", { q = 300 })`, then each order `withCustomer` |
 | Q19 discounted revenue | Luau | three `OR` branches over line and part fields; the branches select different brands, so three `hasPartWith` queries add up |
 | Q20 potential part promotion | Luau | nested `IN` subqueries and a correlated sum |
 | Q21 suppliers who kept orders waiting | Luau | `EXISTS` and `NOT EXISTS` over other lines of the same order |
@@ -113,9 +114,9 @@ The common taxi benchmark runs four queries over the whole table:
 | query | lent |
 |---|---|
 | count per vendor | `groupBy("vendor")` |
-| average total per passenger count | `groupBy("passengers")` with a sum and a count |
+| average total per passenger count | `groupBy("passengers")` with `avg` |
 | count per passenger count and pickup year | `groupBy("passengers", "year")`, where `year` is a computed field |
-| count per passenger count, year and rounded distance, ordered by year and count | as above with a computed `miles` field, sorted in Luau |
+| count per passenger count, year and rounded distance, ordered by year and count | as above with a computed `miles` field, and `order("year"):order("n", "desc")` |
 
 All four are verified in `tests/test_nyc_taxi.py`. The `year` computed
 field is `lent.year(r.pickup)`.
@@ -175,9 +176,12 @@ item it belongs to.
    expressions call `date`, `year`, `month` and `day`. A filter such as
    `year(shipdate) = 1995` checks each row; compare with date bounds to read
    an index.
-6. **More aggregates and group forms.** `avg` (Q1, the taxi benchmark),
-   `count(distinct)` (Q16), `HAVING` (Q11, Q18), and ordering and limiting
-   groups by an aggregate (Q3, Q10, Q15, Q18) each take Luau code today.
+6. **More aggregates and group forms.** Done: `avg`, `distinct` on
+   `count`, `sum` and `avg`, and `having`, `order`, `limit` and `offset` on
+   `groupBy` cover Q1, Q10, Q16's count, Q18 and the taxi benchmark. Q3
+   orders its groups by a column outside the group, and Q11 compares each
+   group with a total from a second query, so both still sort or filter in
+   Luau.
 7. **Grouping by a linked row's field.** `groupBy` takes an edge and
    groups by the linked row's id. TPC-H groups by nation name (Q5, Q7, Q8)
    and the taxi data by borough, which takes a second pass in Luau.

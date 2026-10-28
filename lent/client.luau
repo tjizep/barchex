@@ -1955,23 +1955,33 @@ end
 
 -- aggregates -------------------------------------------------------------------
 
-local AGGREGATES = { count = true, sum = true, min = true, max = true }
+local AGGREGATES = { count = true, sum = true, avg = true, min = true, max = true }
+local DISTINCT = { count = true, sum = true, avg = true }
 
--- Checks the aggregate `name` = { fn, field? } or { fn, value }.
+-- Checks the aggregate `name` = { fn, field?, distinct? } or { fn, value,
+-- distinct? }. Its kind is the lent kind of its result, or "any" when only
+-- the rows can tell.
 local function aggregate_spec(tbl: any, name: any, spec: any): any
     if type(name) ~= "string" or type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
     end
     local at = tbl.where .. " query aggregate " .. name
     for k in spec do
-        if k ~= "fn" and k ~= "field" and k ~= "value" then
+        if k ~= "fn" and k ~= "field" and k ~= "value" and k ~= "distinct" then
             fail(at .. " has no option " .. tostring(k))
         end
     end
-    local fn, field, value = spec.fn, spec.field, spec.value
+    local fn, field, value, distinct = spec.fn, spec.field, spec.value, spec.distinct
     if not AGGREGATES[fn] then
-        fail(at .. " has no function " .. tostring(fn) .. "; use count, sum, min or max")
+        fail(at .. " has no function " .. tostring(fn) .. "; use count, sum, avg, min or max")
     end
+    if distinct ~= nil and type(distinct) ~= "boolean" then
+        fail(at .. " distinct must be true or false, got " .. tostring(distinct))
+    end
+    if distinct and not DISTINCT[fn] then
+        fail(at .. " is " .. fn .. ", which takes no distinct; use it with count, sum or avg")
+    end
+    distinct = distinct or nil
     if value ~= nil then
         if field ~= nil then
             fail(at .. " has both field and value; give one")
@@ -1979,26 +1989,32 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
         if type(value) ~= "function" then
             fail(at .. " value must be a function, got " .. tostring(value))
         end
-        return { name = name, fn = fn, value = value, at = at }
+        local kind = fn == "count" and "int" or (fn == "min" or fn == "max") and "any" or "float"
+        return { name = name, fn = fn, value = value, at = at, distinct = distinct, kind = kind }
     end
     if field == nil then
         if fn ~= "count" then
             fail(at .. " needs a field or value for " .. fn)
         end
-        return { name = name, fn = fn }
+        if distinct then
+            fail(at .. " counts distinct values, so it needs a field or value")
+        end
+        return { name = name, fn = fn, kind = "int" }
     end
     local kind = kind_of(tbl, field)
-    if fn == "sum" and kind ~= "int" and kind ~= "float" and kind ~= "decimal" then
+    if (fn == "sum" or fn == "avg") and kind ~= "int" and kind ~= "float" and kind ~= "decimal" then
         fail(tbl.where .. " field " .. field .. " is " .. kind
-            .. ", so sum needs int, float or decimal")
+            .. ", so " .. fn .. " needs int, float or decimal")
     end
     if (fn == "min" or fn == "max") and kind == "json" then
         fail(tbl.where .. " field " .. field .. " is json, which has no order")
     end
     local f = tbl.byName[field] or tbl.computedByName[field]
     -- a decimal sum adds whole units of its scale, so it is exact
-    local scale = fn == "sum" and kind == "decimal" and f.scale or nil
-    return { name = name, fn = fn, field = field, scale = scale }
+    local scale = (fn == "sum" or fn == "avg") and kind == "decimal" and f.scale or nil
+    local result = fn == "count" and "int" or fn == "avg" and "float" or kind
+    return { name = name, fn = fn, field = field, scale = scale, distinct = distinct,
+             kind = result }
 end
 
 local ORDERED = { number = true, string = true, boolean = true }
@@ -2014,9 +2030,9 @@ local function fold_value(a: any, acc: any, r: any): any
         return v
     end
     local t = type(v)
-    if a.fn == "sum" then
+    if a.fn == "sum" or a.fn == "avg" then
         if t ~= "number" then
-            fail(a.at .. " value answered " .. tostring(v) .. ", so sum needs a number")
+            fail(a.at .. " value answered " .. tostring(v) .. ", so " .. a.fn .. " needs a number")
         end
     elseif not ORDERED[t] then
         fail(a.at .. " value answered a " .. t .. ", which has no order")
@@ -2026,23 +2042,52 @@ local function fold_value(a: any, acc: any, r: any): any
     return v
 end
 
+-- Whether value v is new to `seen`, the values a distinct aggregate has
+-- read so far, which it then joins. JSON values compare by their text.
+local function first_time(seen: any, v: any): boolean
+    local t = type(v)
+    local key = v
+    if t == "table" then
+        key = VALUES.json(v)
+    elseif v ~= v then
+        key = "nan"
+    end
+    local set = seen[t]
+    if set == nil then
+        set = {}
+        seen[t] = set
+    end
+    if set[key] then
+        return false
+    end
+    set[key] = true
+    return true
+end
+
 -- Adds row r to aggregate a's running value acc. Rows without a value for
--- the field, or whose value function answers nil, are skipped.
-local function fold(a: any, acc: any, r: any): any
-    if a.fn == "count" then
-        if (a.field == nil and a.value == nil) or fold_value(a, acc, r) ~= nil then
-            return (acc or 0) + 1
-        end
-        return acc
+-- the field, or whose value function answers nil, are skipped, and so are
+-- values already in `seen` for a distinct aggregate. An avg runs as
+-- { sum, n }.
+local function fold(a: any, acc: any, r: any, seen: any): any
+    if a.fn == "count" and a.field == nil and a.value == nil then
+        return (acc or 0) + 1
     end
     local v = fold_value(a, acc, r)
-    if v == nil then
+    if v == nil or (seen and not first_time(seen, v)) then
         return acc
-    elseif a.fn == "sum" then
+    elseif a.fn == "count" then
+        return (acc or 0) + 1
+    elseif a.fn == "sum" or a.fn == "avg" then
         if a.scale then
-            return (acc or 0) + VALUES.decimal_units(v, a.scale)
+            v = VALUES.decimal_units(v, a.scale)
         end
-        return (acc or 0) + v
+        if a.fn == "sum" then
+            return (acc or 0) + v
+        end
+        acc = acc or { sum = 0, n = 0 }
+        acc.sum += v
+        acc.n += 1
+        return acc
     elseif acc == nil then
         return v
     elseif a.fn == "min" then
@@ -2050,6 +2095,24 @@ local function fold(a: any, acc: any, r: any): any
         return acc
     end
     if less(acc, v) then return v end
+    return acc
+end
+
+-- Aggregate a's answer from its running value acc.
+local function result(a: any, acc: any): any
+    if a.fn == "avg" then
+        if acc == nil then
+            return nil
+        end
+        local v = acc.sum / acc.n
+        return a.scale and v / 10 ^ a.scale or v
+    end
+    if acc == nil and (a.fn == "count" or a.fn == "sum") then
+        acc = 0
+    end
+    if a.scale then
+        return acc / 10 ^ a.scale
+    end
     return acc
 end
 
@@ -2087,9 +2150,72 @@ local function linked_id(tbl: any, e: any, pk: any): any
     return out
 end
 
--- One row per group of q's rows, in the order of the group keys, with the
--- keys' values and each aggregate of spec.
-local function aggregate(q: any, keys: { any }, spec: any): { any }
+-- The test of a having(cond, params) call for the group rows of keys and
+-- aggs: a function of a group row, which an expression string compiles to.
+local function group_test(tbl: any, keys: { any }, aggs: { any }, h: any): (any) -> boolean
+    if type(h.cond) == "function" then
+        return h.cond
+    end
+    local kinds = {}
+    for _, k in keys do
+        kinds[k.name] = k.kind
+    end
+    for _, a in aggs do
+        kinds[a.name] = a.kind
+    end
+    local parts = EXPR.compile(h.cond, function(name) return kinds[name] end, h.params,
+                               "LENT " .. tbl.where .. " query groupBy having")
+    return function(row)
+        for _, p in parts do
+            if p.fn then
+                if not p.fn(row) then return false end
+            elseif not holds({ op = p.op, value = p.value, kind = kinds[p.field] }, row[p.field]) then
+                return false
+            end
+        end
+        return true
+    end
+end
+
+-- Group rows `out` in the order of the order(name, dir) calls in `orders`,
+-- with ties in the order they come.
+local function order_groups(tbl: any, keys: { any }, aggs: { any }, orders: { any },
+                            out: { any })
+    local known = {}
+    for _, k in keys do
+        known[k.name] = true
+    end
+    for _, a in aggs do
+        known[a.name] = a.kind ~= "json"
+    end
+    for _, o in orders do
+        if not known[o.name] then
+            fail(tbl.where .. " query groupBy order has no group key or aggregate "
+                .. tostring(o.name))
+        end
+    end
+    local at = {}
+    for i, row in out do
+        at[row] = i
+    end
+    table.sort(out, function(a, b)
+        for _, o in orders do
+            local x, y = a[o.name], b[o.name]
+            if x ~= y then
+                if o.desc then
+                    return less(y, x)
+                end
+                return less(x, y)
+            end
+        end
+        return at[a] < at[b]
+    end)
+end
+
+-- One row per group of q's rows, with the keys' values and each aggregate
+-- of spec. `shape` holds the having, order, offset and limit calls of a
+-- groupBy; without order calls, groups come in the order of their keys.
+local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     local tbl = q.tbl
     if type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
@@ -2105,6 +2231,10 @@ local function aggregate(q: any, keys: { any }, spec: any): { any }
         end
         kinds[i] = k.kind
     end
+    local tests = {}
+    for i, h in shape and shape.tests or {} do
+        tests[i] = group_test(tbl, keys, aggs, h)
+    end
     local groups, list = {}, {}
     for _, r in rows(q) do
         local values = {}
@@ -2119,12 +2249,17 @@ local function aggregate(q: any, keys: { any }, spec: any): { any }
         local key = kc.pack(kinds, values)
         local g = groups[key]
         if g == nil then
-            g = { key = key, values = values, acc = {} }
+            g = { key = key, values = values, acc = {}, seen = {} }
             groups[key] = g
             list[#list + 1] = g
         end
         for _, a in aggs do
-            g.acc[a.name] = fold(a, g.acc[a.name], r)
+            local seen
+            if a.distinct then
+                seen = g.seen[a.name] or {}
+                g.seen[a.name] = seen
+            end
+            g.acc[a.name] = fold(a, g.acc[a.name], r, seen)
         end
     end
     if #keys == 0 and #list == 0 then
@@ -2134,22 +2269,35 @@ local function aggregate(q: any, keys: { any }, spec: any): { any }
         return a.key < b.key
     end)
     local out = {}
-    for i, g in list do
+    for _, g in list do
         local row = {}
         for j, k in keys do
             row[k.name] = g.values[j]
         end
         for _, a in aggs do
-            local v = g.acc[a.name]
-            if v == nil and (a.fn == "count" or a.fn == "sum") then
-                v = 0
-            end
-            if a.scale then
-                v = v / 10 ^ a.scale
-            end
-            row[a.name] = v
+            row[a.name] = result(a, g.acc[a.name])
         end
-        out[i] = row
+        local keep = true
+        for _, test in tests do
+            if not test(row) then
+                keep = false
+                break
+            end
+        end
+        if keep then
+            out[#out + 1] = row
+        end
+    end
+    if shape == nil then
+        return out
+    end
+    if #shape.orders > 0 then
+        order_groups(tbl, keys, aggs, shape.orders, out)
+    end
+    if shape.skip > 0 or shape.lim ~= nil then
+        local first = shape.skip + 1
+        local last = shape.lim and math.min(#out, shape.skip + shape.lim) or #out
+        out = first <= last and table.move(out, first, last, 1, {}) or {}
     end
     return out
 end
@@ -2180,7 +2328,7 @@ Grouped.__index = Grouped
 
 -- Groups the matching rows by the values of fields, or by the row linked
 -- through an edge with one row at its far end. Call aggregate(spec) on the
--- result.
+-- result, after any having, order, offset and limit calls.
 function Query:groupBy(...: string): any
     local names = { ... }
     if #names == 0 then
@@ -2190,13 +2338,51 @@ function Query:groupBy(...: string): any
     for i, name in names do
         keys[i] = group_key(self.tbl, name)
     end
-    return setmetatable({ q = self, keys = keys }, Grouped)
+    return setmetatable({ q = self, keys = keys, tests = {}, orders = {}, skip = 0 }, Grouped)
 end
 
--- One row per group, in the order of the group keys, with the keys and
--- each aggregate of spec.
+-- Keeps the groups for which fn(group) answers true, or for which the
+-- expression string answers true; it reads the group's keys and aggregates
+-- by name, and `params` by name, as where does. Each call adds a test.
+function Grouped:having(cond: any, params: any?): any
+    if type(cond) ~= "function" and type(cond) ~= "string" then
+        fail(self.q.tbl.where .. " query groupBy having takes a function or an expression"
+            .. " string, got " .. tostring(cond))
+    end
+    if type(cond) == "function" and params ~= nil then
+        fail(self.q.tbl.where .. " query groupBy having takes parameters with an expression"
+            .. " string only")
+    end
+    self.tests[#self.tests + 1] = { cond = cond, params = params }
+    return self
+end
+
+-- Orders the groups by a group key or aggregate, "asc" (the default) or
+-- "desc". Each call adds a sort key after the earlier ones; groups that tie
+-- on every one come in key order.
+function Grouped:order(name: string, dir: string?): any
+    if dir ~= nil and dir ~= "asc" and dir ~= "desc" then
+        fail(self.q.tbl.where .. " query groupBy order direction must be asc or desc, got "
+            .. tostring(dir))
+    end
+    self.orders[#self.orders + 1] = { name = name, desc = dir == "desc" }
+    return self
+end
+
+function Grouped:limit(n: number): any
+    self.lim = count_arg(self.q, "groupBy limit", n)
+    return self
+end
+
+function Grouped:offset(n: number): any
+    self.skip = count_arg(self.q, "groupBy offset", n)
+    return self
+end
+
+-- One row per group with the keys and each aggregate of spec, after the
+-- having, order, offset and limit calls.
 function Grouped:aggregate(spec: { [string]: any }?): { any }
-    return aggregate(self.q, self.keys, spec or {})
+    return aggregate(self.q, self.keys, spec or {}, self)
 end
 
 -- Updates the selected rows in query order, with the same values and clear

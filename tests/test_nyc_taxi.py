@@ -78,12 +78,13 @@ function q.q1(c)
                 { "vendor", "n" })
 end
 
--- SELECT passengers, avg(total) GROUP BY passengers, with avg as sum and count
+-- SELECT passengers, avg(total) GROUP BY passengers
 function q.q2(c)
     local groups = c.Trip:query():groupBy("passengers"):aggregate {
-        total = { fn = "sum", field = "total" }, n = { fn = "count" },
+        avg = { fn = "avg", field = "total" },
     }
-    for _, g in groups do g.avg = string.format("%.17g", g.total / g.n) end
+    -- a reply turns a float into an integer, so the average goes back as text
+    for _, g in groups do g.avg = string.format("%.17g", g.avg) end
     return pick(groups, { "passengers", "avg" })
 end
 
@@ -97,17 +98,9 @@ end
 -- SELECT passengers, year, round(distance), count(*) GROUP BY 1, 2, 3
 -- ORDER BY year, count(*) DESC
 function q.q4(c)
-    local groups = c.Trip:query():groupBy("passengers", "year", "miles"):aggregate {
-        n = { fn = "count" },
-    }
-    table.sort(groups, function(a, b)
-        if a.year ~= b.year then return a.year < b.year end
-        if a.n ~= b.n then return a.n > b.n end
-        if a.passengers ~= b.passengers then
-            return (a.passengers or -1) < (b.passengers or -1)
-        end
-        return a.miles < b.miles
-    end)
+    -- ties keep key order: passengers with nil first, then miles
+    local groups = c.Trip:query():groupBy("passengers", "year", "miles")
+        :order("year"):order("n", "desc"):aggregate { n = { fn = "count" } }
     return pick(groups, { "passengers", "year", "miles", "n" })
 end
 

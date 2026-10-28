@@ -140,11 +140,66 @@ function steps.groups(c)
     return out
 end
 
+function steps.more(c)
+    local q = c.Post:query()
+    local t = q:aggregate {
+        stars = { fn = "avg", field = "stars" }, score = { fn = "avg", field = "score" },
+        double = { fn = "avg", value = function(p) return p.stars * 2 end },
+        kinds = { fn = "count", field = "kind", distinct = true },
+        scores = { fn = "count", field = "score", distinct = true },
+        -- 1, 2, 1, 2 hold two distinct values
+        ones = { fn = "sum", value = function(p) return p.stars > 2 and 1 or 2 end, distinct = true },
+        len = { fn = "avg", value = function(p) return #p.kind end, distinct = true },
+        tables = { fn = "count", value = function(p) return { k = p.kind } end, distinct = true },
+    }
+    local out = { rows({ t }, { "stars", "score", "double", "kinds", "scores", "ones", "len",
+                                "tables" })[1] }
+    local none = c.Post:query():where("stars", ">", 9):aggregate { a = { fn = "avg", field = "stars" } }
+    out[#out + 1] = show(none.a)
+    local spec = { n = { fn = "count" }, stars = { fn = "sum", field = "stars" },
+                   score = { fn = "avg", field = "score" } }
+    local names = { "author", "n", "stars", "score" }
+    local function add(label, groups)
+        out[#out + 1] = label .. ": " .. table.concat(rows(groups, names), ", ")
+    end
+    local function by() return c.Post:query():groupBy("author") end
+    add("n > 1", by():having("n > 1"):aggregate(spec))
+    add("stars >= s", by():having("stars >= s", { s = 3 }):aggregate(spec))
+    add("fn", by():having(function(g) return g.author ~= nil end):aggregate(spec))
+    add("two", by():having("stars > 2"):having("n == 1"):aggregate(spec))
+    -- a group whose avg has no values fails a range test
+    add("score > 1", by():having("score > 1"):aggregate(spec))
+    add("stars desc", by():order("stars", "desc"):aggregate(spec))
+    add("n desc, stars", by():order("n", "desc"):order("stars"):aggregate(spec))
+    add("score desc", by():order("score", "desc"):aggregate(spec))
+    add("page", by():order("stars", "desc"):offset(1):limit(1):aggregate(spec))
+    add("past", by():offset(5):aggregate(spec))
+    add("key", by():order("author", "desc"):limit(2):aggregate(spec))
+    return out
+end
+
 local bad = {
     spec = function(c) c.Post:query():aggregate(5) end,
     entry = function(c) c.Post:query():aggregate { n = "count" } end,
     option = function(c) c.Post:query():aggregate { n = { fn = "count", as = 1 } } end,
-    fn = function(c) c.Post:query():aggregate { n = { fn = "avg", field = "stars" } } end,
+    fn = function(c) c.Post:query():aggregate { n = { fn = "median", field = "stars" } } end,
+    avgkind = function(c) c.Post:query():aggregate { n = { fn = "avg", field = "title" } } end,
+    avgvalue = function(c)
+        c.Post:query():aggregate { n = { fn = "avg", value = function(p) return p.title end } }
+    end,
+    distinctmax = function(c)
+        c.Post:query():aggregate { n = { fn = "max", field = "stars", distinct = true } }
+    end,
+    distinctflag = function(c)
+        c.Post:query():aggregate { n = { fn = "count", field = "stars", distinct = 1 } }
+    end,
+    distinctrows = function(c) c.Post:query():aggregate { n = { fn = "count", distinct = true } } end,
+    having = function(c) c.Post:query():groupBy("kind"):having(5) end,
+    havingparams = function(c) c.Post:query():groupBy("kind"):having(function() end, {}) end,
+    havingname = function(c) c.Post:query():groupBy("kind"):having("stars > 1"):aggregate {} end,
+    ordername = function(c) c.Post:query():groupBy("kind"):order("n"):aggregate {} end,
+    orderdir = function(c) c.Post:query():groupBy("kind"):order("kind", "up") end,
+    grouplimit = function(c) c.Post:query():groupBy("kind"):limit(-1) end,
     nofield = function(c) c.Post:query():aggregate { n = { fn = "sum" } } end,
     field = function(c) c.Post:query():sum("missing") end,
     sumkind = function(c) c.Post:query():sum("title") end,
@@ -237,11 +292,51 @@ def test_group_by(run):
     ]
 
 
+def test_avg_distinct_having_and_group_order(run):
+    a1 = "author=1 n=2 stars=6 score=1.5"
+    a2 = "author=2 n=1 stars=3 score=2.25"
+    none = "author=nil n=1 stars=2 score=nil"
+    assert run("more") == [
+        "stars=2.75 score=1.875 double=5.5 kinds=2 scores=2 ones=3 len=4 tables=2",
+        "nil",
+        "n > 1: " + a1,
+        "stars >= s: " + a1 + ", " + a2,
+        "fn: " + a1 + ", " + a2,
+        "two: " + a2,
+        "score > 1: " + a1 + ", " + a2,
+        "stars desc: " + a1 + ", " + a2 + ", " + none,
+        # ties on n keep the order of the next sort key
+        "n desc, stars: " + a1 + ", " + none + ", " + a2,
+        # a missing value sorts first, so last in descending order
+        "score desc: " + a2 + ", " + a1 + ", " + none,
+        "page: " + a2,
+        "past: ",
+        "key: " + a2 + ", " + a1,
+    ]
+
+
 ERRORS = {
     "spec": "LENT table Post query aggregate takes a table of name = { fn = ..., field = ... }",
     "entry": "LENT table Post query aggregate takes a table of name = { fn = ..., field = ... }",
     "option": "LENT table Post query aggregate n has no option as",
-    "fn": "LENT table Post query aggregate n has no function avg; use count, sum, min or max",
+    "fn": "LENT table Post query aggregate n has no function median; use count, sum, avg, min"
+          " or max",
+    "avgkind": "LENT table Post field title is string, so avg needs int, float or decimal",
+    "avgvalue": "LENT table Post query aggregate n value answered a, so avg needs a number",
+    "distinctmax": "LENT table Post query aggregate n is max, which takes no distinct; use it"
+                   " with count, sum or avg",
+    "distinctflag": "LENT table Post query aggregate n distinct must be true or false, got 1",
+    "distinctrows": "LENT table Post query aggregate n counts distinct values, so it needs a"
+                    " field or value",
+    "having": "LENT table Post query groupBy having takes a function or an expression string,"
+              " got 5",
+    "havingparams": "LENT table Post query groupBy having takes parameters with an expression"
+                    " string only",
+    "havingname": 'LENT table Post query groupBy having "stars > 1" at column 1: has no field or'
+                  " parameter stars",
+    "ordername": "LENT table Post query groupBy order has no group key or aggregate n",
+    "orderdir": "LENT table Post query groupBy order direction must be asc or desc, got up",
+    "grouplimit": "LENT table Post query groupBy limit takes a whole number, got -1",
     "nofield": "LENT table Post query aggregate n needs a field or value for sum",
     "field": "LENT table Post has no field missing",
     "sumkind": "LENT table Post field title is string, so sum needs int, float or decimal",

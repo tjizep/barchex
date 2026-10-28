@@ -173,9 +173,17 @@ function q.q1(c, p)
             base = { fn = "sum", field = "extendedprice" },
             disc = { fn = "sum", value = revenue },
             charge = { fn = "sum", value = function(l) return revenue(l) * (100 + l.tax) end },
+            avgqty = { fn = "avg", field = "quantity" },
+            avgprice = { fn = "avg", field = "extendedprice" },
+            avgdisc = { fn = "avg", field = "discount" },
             n = { fn = "count" },
         }
-    return pick(groups, { "returnflag", "linestatus", "qty", "base", "disc", "charge", "n" })
+    -- a reply turns a float into an integer, so floats go back as text
+    for _, g in groups do
+        for _, k in { "avgqty", "avgprice", "avgdisc" } do g[k] = string.format("%.17g", g[k]) end
+    end
+    return pick(groups, { "returnflag", "linestatus", "qty", "base", "disc", "charge",
+                          "avgqty", "avgprice", "avgdisc", "n" })
 end
 
 -- Q3, shipping priority
@@ -217,13 +225,13 @@ end
 function q.q10(c, p)
     local groups = c.Lineitem:query():where("returnflag", "=", "R")
         :hasOrderWith(function(o) o:where("orderdate >= a and orderdate < b", p) end)
-        :groupBy("customer"):aggregate { revenue = { fn = "sum", value = revenue } }
+        :groupBy("customer"):order("revenue", "desc"):limit(20)
+        :aggregate { revenue = { fn = "sum", value = revenue } }
     for _, g in groups do
         local cu = c.Customer:query():where("id", "=", g.customer):withNation():first()
         g.key, g.name, g.acctbal, g.nation = cu.id, cu.name, cu.acctbal, cu.nation.name
     end
-    sort(groups, { "-revenue", "key" })
-    return pick(groups, { "key", "name", "revenue", "acctbal", "nation" }, 20)
+    return pick(groups, { "key", "name", "revenue", "acctbal", "nation" })
 end
 
 -- Q11, important stock identification
@@ -294,16 +302,13 @@ end
 
 -- Q18, large volume customer
 function q.q18(c, p)
-    local groups = c.Lineitem:query():groupBy("order"):aggregate {
-        qty = { fn = "sum", field = "quantity" },
-    }
+    local groups = c.Lineitem:query():groupBy("order"):having("qty > q", { q = p.qty })
+        :aggregate { qty = { fn = "sum", field = "quantity" } }
     local out = {}
     for _, g in groups do
-        if g.qty > p.qty then
-            local o = c.Order:query():where("id", "=", g.order):withCustomer():first()
-            out[#out + 1] = { name = o.customer.name, custkey = o.customer.id, key = o.id,
-                              orderdate = o.orderdate, totalprice = o.totalprice, qty = g.qty }
-        end
+        local o = c.Order:query():where("id", "=", g.order):withCustomer():first()
+        out[#out + 1] = { name = o.customer.name, custkey = o.customer.id, key = o.id,
+                          orderdate = o.orderdate, totalprice = o.totalprice, qty = g.qty }
     end
     sort(out, { "-totalprice", "orderdate", "key" })
     return pick(out, { "name", "custkey", "key", "orderdate", "totalprice", "qty" }, 100)
@@ -493,10 +498,12 @@ def test_q1_pricing_summary(tpch):
     want = sql("""
         select l_returnflag, l_linestatus, sum(l_quantity), sum(l_extendedprice),
                sum(l_extendedprice * (100 - l_discount)),
-               sum(l_extendedprice * (100 - l_discount) * (100 + l_tax)), count(*)
+               sum(l_extendedprice * (100 - l_discount) * (100 + l_tax)),
+               avg(l_quantity), avg(l_extendedprice), avg(l_discount), count(*)
         from lineitem where l_shipdate <= :d
         group by l_returnflag, l_linestatus order by l_returnflag, l_linestatus""",
                d="1996-06-01")
+    want = [r[:6] + ["%.17g" % v for v in r[6:9]] + r[9:] for r in want]
     assert len(want) == 4
     assert run("q1", {"d": ms(day("1996-06-01"))}) == want
 

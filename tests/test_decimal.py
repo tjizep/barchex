@@ -74,6 +74,7 @@ function steps.sum(c)
     return {
         tostring(q:sum("price")), tostring(q:sum("rate")), tostring(q:sum("gross")),
         tostring(q:max("price")),
+        tostring(q:aggregate({ a = { fn = "avg", field = "price" } }).a),
         groups[1].name, tostring(groups[1].total), groups[2].name, tostring(groups[2].total),
     }
 end
@@ -182,7 +183,7 @@ def test_values_round_to_the_scale(run):
 
 
 def test_sums_are_exact(run):
-    assert run("sum") == ["1", "0.001", "1.1", "0.1", "even", "0.5", "odd", "0.5"]
+    assert run("sum") == ["1", "0.001", "1.1", "0.1", "0.1", "even", "0.5", "odd", "0.5"]
 
 
 def test_filters_and_indexes_read_decimals(run):

@@ -1104,6 +1104,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `all()`, `first()`, `ids()`, `count()` | runs the query |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
+| `groupBy(...):having(cond, params)`, `:order(name, dir)`, `:limit(n)`, `:offset(n)` | filters, orders and pages the groups before `aggregate(spec)` answers them |
 | `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
 | `delete()` | deletes the selected rows and answers the number it removed |
 | `explain()` | the plan, such as `by_name_age = name range age` or `edge customer_likes in (by_color = color)` |
@@ -1284,11 +1285,26 @@ queries reuse.
 |---|---|---|---|
 | `count` | optional | the rows, or the rows with a value | `0` |
 | `sum` | required; an `int`, `float` or `decimal` field, or a function answering numbers | the total, exact for a `decimal` field | `0` |
+| `avg` | required; as for `sum` | the mean as a float | `nil` |
 | `min`, `max` | required; any field kind except `json`, or a function answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
 
 A spec with both `field` and `value` raises an error. For `min` and `max`, a
 function must answer one type for every row; a number after a string raises
 an error. Rows without a value are skipped.
+
+An `avg` is a float even over an `int` or `decimal` field. Over a `decimal`
+field it adds the values exactly and then divides, so the answer is the
+nearest float to the mean and keeps no fixed scale.
+
+Set `distinct = true` on a `count`, `sum` or `avg` to read each value once,
+as SQL's `count(distinct ...)` does. It needs a `field` or `value`.
+
+```lua
+c.Post:query():aggregate {
+    authors = { fn = "count", field = "author", distinct = true },
+    kinds   = { fn = "count", value = function(p) return p.kind end, distinct = true },
+}
+```
 
 `groupBy` answers one row per group, holding the group's key values under
 their names and each aggregate under its name. Groups come in key order,
@@ -1297,6 +1313,32 @@ value, or without a link through the edge, joins the group whose key is
 `nil`. Call `aggregate()` with no spec to list the distinct key values. An
 aggregate with the name of a group key raises an error, and so does a
 `groupBy` on a `json` field or on an edge that can link a row to many rows.
+
+Call `having`, `order`, `limit` and `offset` between `groupBy` and
+`aggregate` to filter, order and page the groups, as SQL's `HAVING`,
+`ORDER BY` and `LIMIT` do after `GROUP BY`:
+
+```lua
+-- the ten authors with the most stars, among those with at least 3 posts
+c.Post:query():groupBy("author")
+    :having("posts >= n", { n = 3 })
+    :order("stars", "desc"):limit(10)
+    :aggregate { posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }
+```
+
+- `having(cond, params)` keeps the groups that match. `cond` is an
+  expression string, as for `where`, over the group's keys and aggregates by
+  name and the names in `params`, or a function that receives the group row
+  and answers whether to keep it. Each call adds a test, and a group must
+  pass them all.
+- `order(name, dir)` orders the groups by a group key or aggregate, with
+  `dir` `"asc"` (the default) or `"desc"`. Each call adds a sort key after
+  the earlier ones, and groups that tie on all of them stay in key order.
+  Missing values come first in ascending order and last in descending order.
+- `limit(n)` and `offset(n)` page the groups after `having` and `order`.
+
+An `order` name that is neither a group key nor an aggregate raises an error
+when `aggregate` runs.
 
 Aggregates run over the rows the query selects after its filters, order,
 offset, limit and cursor, so `order("stars", "desc"):limit(10):sum("stars")`
