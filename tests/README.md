@@ -88,6 +88,11 @@ beside a development server.
   reads them from both ends, filters with `whereEdge` in `has` and `with`,
   migrates an edge from no fields to fields and refuses a new required
   field, and checks the errors for bad edge values.
+- `test_edge_index.py` keeps index entries that hold a linked row's id
+  current through `create`, `link`, `unlink`, `update` and `delete`, refuses
+  duplicates in a unique index with an edge, reads it with `by` and
+  `upsert`, builds it in a migration and refuses stored duplicates, and
+  checks the errors for invalid index edges.
 - `test_edge_links.py` reads links with `links` from both ends of an edge,
   filters, orders, pages and aggregates them, filters a `follow` with
   `whereEdge`, and checks the errors for methods a links query refuses.

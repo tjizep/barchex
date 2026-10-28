@@ -22,6 +22,7 @@
 --   local Post = lent.schema "Post" {
 --       fields = { lent.field.string "title" },
 --       edges = { lent.edge.from "author" "User":ref "posts":unique() },
+--       indexes = { lent.index("title"):edges("author"):unique() },
 --   }
 --   local app = lent.graph { User, Post }
 --
@@ -369,7 +370,8 @@ function Index:unique()
     return self
 end
 
--- The index's name; "by_" and the field names joined by "_" by default.
+-- The index's name; "by_" and the field and edge names joined by "_" by
+-- default.
 function Index:name(name: string)
     ident(name, "index")
     self.name_ = name
@@ -383,6 +385,21 @@ function index(...: string)
         fail("index needs at least one field")
     end
     return setmetatable({ on = on }, Index)
+end
+
+-- Adds the ids of the rows linked through the named edges after the
+-- fields, in order. Each edge is an edge.to or edge.from with :unique(), so
+-- a row links to at most one row through it.
+function Index:edges(...: string)
+    local names = { ... }
+    if #names == 0 then
+        fail("index edges takes at least one edge name")
+    end
+    for _, name in names do
+        ident(name, "index edge")
+    end
+    self.edges_ = names
+    return self
 end
 
 -- edges -----------------------------------------------------------------------
@@ -571,11 +588,13 @@ local function plain_index(where: string, t: any): any
     if getmetatable(t) == Index then
         return t
     end
-    plain(where, "index", t, { on = "table", unique = "boolean", name = "string" })
+    plain(where, "index", t, { on = "table", edges = "table", unique = "boolean",
+                               name = "string" })
     if t.on == nil then
         fail(where .. " index needs on, the list of its fields")
     end
     local ix = index(table.unpack(t.on))
+    if t.edges then ix:edges(table.unpack(t.edges)) end
     if t.unique then ix:unique() end
     if t.name then ix:name(t.name) end
     return ix
@@ -841,7 +860,7 @@ end
 -- The answer is plain data:
 --   { name, key, format, id, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
---     indexes = { { name, on, unique } },
+--     indexes = { { name, on, edges?, unique } },
 --     edges = { { name, dir, target, unique, ref?, fields?, via?, stored? } } }
 -- plus the parts that stay in code, which lent.CLIENT reads from the graph
 -- given to lent.open: each field's `code` = { default?, update?, validate,
@@ -956,8 +975,11 @@ function schema(name: string)
                 end
                 seen[fname] = true
             end
-            add_index({ name = ix.name_ or ("by_" .. table.concat(ix.on, "_")),
-                        on = table.clone(ix.on), unique = ix.unique_ == true })
+            local parts = table.clone(ix.on)
+            table.move(ix.edges_ or {}, 1, #(ix.edges_ or {}), #parts + 1, parts)
+            add_index({ name = ix.name_ or ("by_" .. table.concat(parts, "_")),
+                        on = table.clone(ix.on), edges = ix.edges_ and table.clone(ix.edges_),
+                        unique = ix.unique_ == true })
         end
 
         local edges = {}
@@ -996,6 +1018,26 @@ function schema(name: string)
             end
             edges[e.name] = out
             t.edges[#t.edges + 1] = out
+        end
+        for _, ix in t.indexes do
+            local seen = {}
+            for _, ename in ix.edges or {} do
+                local e = edges[ename]
+                local at = where .. " index " .. ix.name .. " edge " .. ename
+                if e == nil then
+                    fail(at .. " is not an edge of the table")
+                end
+                if e.dir == "through" then
+                    fail(at .. " is an edge.through; an index takes an edge.to or edge.from")
+                end
+                if not e.unique then
+                    fail(at .. " links many rows; an index takes an edge with :unique()")
+                end
+                if seen[ename] then
+                    fail(where .. " index " .. ix.name .. " names edge " .. ename .. " twice")
+                end
+                seen[ename] = true
+            end
         end
 
         t.hooks = plain_hooks(where, spec.hooks)
@@ -1074,7 +1116,9 @@ end
 -- every hop is unique. A stored one gets a store named as an edge.to's,
 -- whose record adds edge, its name, and path = { { store, forward } }, the
 -- stored edges it follows with their direction. Views made with lent.view
--- go in `views = { [name] = view }`.
+-- go in `views = { [name] = view }`. An index with edges gets links = {
+-- { name, store, forward, id } }, one per edge: its store, whether this
+-- table is the store's from end, and the id kind of the linked table.
 function graph(list: { any })
     local tables, order, keys, views = {}, {}, {}, {}
     for _, t in list do
@@ -1131,6 +1175,22 @@ function graph(list: { any })
                 end
                 e.store = back.store
                 stored[e.store].inverseUnique = e.unique
+            end
+        end
+    end
+    for _, name in order do
+        local t = tables[name]
+        for _, ix in t.indexes do
+            if ix.edges then
+                ix.links = {}
+                for i, ename in ix.edges do
+                    for _, e in t.edges do
+                        if e.name == ename then
+                            ix.links[i] = { name = e.name, store = e.store, forward = e.dir == "to",
+                                            id = tables[e.target].id }
+                        end
+                    end
+                end
             end
         end
     end
@@ -1376,7 +1436,8 @@ function selftest(): (boolean, string?)
             { kind = "string", name = "title", notEmpty = true, maxLen = 5 },
             { kind = "int", name = "rank", min = 1, default = 2, was = "score" },
         },
-        indexes = { { on = { "rank", "title" }, unique = true, name = "by_both" } },
+        indexes = { { on = { "rank", "title" }, unique = true, name = "by_both" },
+                    { on = { "rank" }, edges = { "author" } } },
         edges = { { dir = "from", name = "author", target = "User", ref = "posts", unique = true } },
         hooks = hooks,
     }
@@ -1384,7 +1445,8 @@ function selftest(): (boolean, string?)
         id = "int",
         fields = { field.string "title":notEmpty():maxLen(5),
                    field.int "rank":min(1):default(2):was("score") },
-        indexes = { index("rank", "title"):unique():name("by_both") },
+        indexes = { index("rank", "title"):unique():name("by_both"),
+                    index("rank"):edges("author") },
         edges = { edge.from "author" "User":ref "posts":unique() },
         hooks = { hook.create(first), hook.create(second), hook.update(second) },
     }
@@ -1395,7 +1457,8 @@ function selftest(): (boolean, string?)
                 tostring(f.minLen), tostring(f.maxLen), tostring(f.default), tostring(f.was))
         end
         for _, ix in t.indexes do
-            out[#out + 1] = ix.name .. " " .. table.concat(ix.on, ",") .. " " .. tostring(ix.unique)
+            out[#out + 1] = ix.name .. " " .. table.concat(ix.on, ",") .. " "
+                .. table.concat(ix.edges or {}, ",") .. " " .. tostring(ix.unique)
         end
         for _, e in t.edges do
             out[#out + 1] = e.name .. " " .. e.dir .. " " .. e.target .. " " .. e.ref .. " "

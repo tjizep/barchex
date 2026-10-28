@@ -103,7 +103,8 @@ local app = lent.graph {
             f.enum "shipmode":values("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK"),
             f.string "comment",
         },
-        indexes = { lent.index("shipdate") },
+        -- (l_orderkey, l_linenumber), the primary key
+        indexes = { lent.index("shipdate"), lent.index("linenumber"):edges("order"):unique() },
         edges = {
             lent.edge.from "order" "Order":ref "lines":unique(),
             lent.edge.from "part" "Part":ref "lines":unique(),
@@ -172,6 +173,16 @@ function q.load(c, data)
     add("Order", data.orders)
     c.Lineitem:createMany(data.lineitem)
     return "ok"
+end
+
+-- A line by its order and number, and the error a second line with that
+-- number in the order raises
+function q.key(c, p)
+    local line = c.Lineitem:by("by_linenumber_order", p.n, p.order)
+    local copy = table.clone(line)
+    copy.id, copy.order = nil, p.order
+    local ok, err = pcall(function() c.Lineitem:create(copy) end)
+    return { line.quantity, ok and "no error" or tostring(err) }
 end
 
 -- Q1, pricing summary report
@@ -587,6 +598,17 @@ def dates(rows, *cols):
         for c in cols:
             r[c] = ms(day(r[c]))
     return rows
+
+
+def test_line_key(tpch):
+    run, sql = tpch
+    order, n, qty = sql("""
+        select l_orderkey, l_linenumber, l_quantity from lineitem
+        order by l_orderkey desc, l_linenumber desc limit 1""")[0]
+    got = run("key", {"order": order, "n": n})
+    assert got[0] == qty
+    assert got[1].startswith("LENT table Lineitem index by_linenumber_order is unique, and row ")
+    assert got[1].endswith(" already has linenumber=%d order=%d" % (n, order))
 
 
 def test_q1_pricing_summary(tpch):

@@ -53,7 +53,7 @@ their line items, with 22 queries.
 | primary keys such as `O_ORDERKEY` | the row's `id`, given to `create` |
 | foreign keys such as `O_CUSTKEY` | `edge.from "customer" "Customer":ref "orders":unique()` |
 | `PARTSUPP`, keyed by part and supplier | `edge.to "supplies" "Supplier"` on `Part`, with `:fields` for `PS_AVAILQTY`, `PS_SUPPLYCOST` and `PS_COMMENT` |
-| `LINEITEM` key `(L_ORDERKEY, L_LINENUMBER)` | a `linenumber` field and the `order` edge; lent does not enforce the pair as unique |
+| `LINEITEM` key `(L_ORDERKEY, L_LINENUMBER)` | a `linenumber` field and the `order` edge, with `lent.index("linenumber"):edges("order"):unique()` keeping the pair unique |
 | `DECIMAL(15,2)` | `decimal` with `:scale(2)`; the test keeps `int` cents and percent so revenue products stay exact |
 | `DATE` | `time` at midnight UTC; `lent.date("1995-03-15")` and `date('1995-03-15')` in an expression |
 | `CHAR(1)` flags and fixed lists | `enum` |
@@ -196,8 +196,11 @@ item it belongs to.
    value per linked row, and rows loaded `with` that edge compare with it.
    Q21 correlates lines of the same order, so it loads each order's lines
    and compares them in Luau. Q2 and Q20 take the same two passes.
-10. **Composite keys that include an edge.** A unique index takes fields
-    only, so `(L_ORDERKEY, L_LINENUMBER)` cannot be unique.
+10. **Composite keys that include an edge.** Done: `lent.index(...)`
+    takes `:edges(...)`, which adds the id each unique edge links to after
+    the fields, so `(L_ORDERKEY, L_LINENUMBER)` is a unique index that `by`
+    and `upsert` read. Links and unlinks keep the entries current and
+    refuse a duplicate.
 11. **String patterns.** A `LIKE` prefix works as a range on an index. A
     pattern elsewhere in the string needs a `where` function, because
     expressions call only the date functions.

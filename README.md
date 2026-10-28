@@ -361,7 +361,7 @@ that the client reads like a table; see views under CLIENT.
 | `lent.field.bytes` | the same modifiers and byte-length rules |
 | `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
 | any field builder | `:computed(fn)`, and `:stored(revision)` to store it; see computed fields below |
-| `lent.index(field, ...)` | `:unique()`, `:name("by_x")` |
+| `lent.index(field, ...)` | `:unique()`, `:name("by_x")`, `:edges("edge", ...)`; see indexes with edges below |
 | `lent.edge.to "name" "Table"` | `:unique()`, `:fields { ... }` |
 | `lent.edge.from "name" "Table"` | `:ref "to_edge"` (required), `:unique()` |
 | `lent.edge.through "name" "Table"` | `:via "edge.edge"` (required), `:stored()`; see path edges below |
@@ -383,12 +383,39 @@ local Post = lent.schema "Post" {
 | plain table | keys |
 |---|---|
 | field | `kind` and `name` (required), `values` (required for `enum`), `scale` (required for `decimal`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
-| index | `on`, a list of field names (required), `unique`, `name` |
+| index | `on`, a list of field names (required), `edges`, a list of edge names, `unique`, `name` |
 | edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names), `stored` |
 
 A plain table goes through the same checks as the builder, and a key it
 does not recognise raises an error, so a misspelt option fails when the
 schema loads. The two forms can be mixed in one table.
+
+An index can also hold the rows that a row links to. `:edges("order")` adds
+the id of the row that the `order` edge links to after the index's fields,
+so a unique index can cover a key such as a line's number within its order:
+
+```lua
+local Line = lent.schema "Line" {
+    id = "int",
+    fields = { lent.field.int "n" },
+    edges = { lent.edge.from "order" "Order":ref "lines":unique() },
+    indexes = { lent.index("n"):edges("order"):unique() },   -- index by_n_order
+}
+```
+
+Each index edge must be an `edge.to` or `edge.from` with `:unique()`, so it
+links a row to at most one row. The default name joins the field names and
+then the edge names. `create`, `link` and `unlink` move the row's index
+entries as they change its links, and a unique index raises the same error
+as for a duplicate field value when a link gives two rows the same values.
+A unique index leaves out a row whose edge links no row, as it does for a
+missing field value. A plain index keeps that row, and the missing link
+sorts first.
+
+`by` and `upsert` take a linked row, or its id, for each edge after the
+field values; see CLIENT. Queries filter on fields, so a query can use a
+plain index with edges through its fields, and cannot use a unique index
+with edges.
 
 Every table has a primary key named `id`, so a field cannot use that name.
 By default each new row's id is a `barch.uuid()` string, such as
@@ -879,13 +906,16 @@ end)
 | `create(values)` | the row with its `id`, given or new | a given `id` does not fit the table's id kind or is taken, a unique index already holds its values, a field is unknown, a value has the wrong kind or breaks a value rule, or a required field is missing |
 | `createMany(rows)` | the created rows in input order; `{}` for an empty list | the list is malformed, or any row fails `create` |
 | `get(id)` | the row, or `nil` | `id` does not fit the table's id kind: a lowercase uuid, or a positive integer for `id = "int"` |
-| `by(index, values...)` | the row, or `nil` | there is no such ready unique index, or the number of values differs from its fields |
+| `by(index, values...)` | the row, or `nil` | there is no such ready unique index, or the number of values differs from its fields and edges |
 | `update(id, values, clear)` | the stored row | there is no row `id`, it changes an immutable field, or as for `create` |
-| `upsert(index, values)` | the row and a `created` boolean | `index` is `"id"` and `values.id` is missing or does not fit the table's id kind, the index is missing, building or non-unique, an indexed field is missing from `values`, or the selected `create` or `update` fails |
+| `upsert(index, values)` | the row and a `created` boolean | `index` is `"id"` and `values.id` is missing or does not fit the table's id kind, the index is missing, building or non-unique, an indexed field is missing from `values`, an index edge in `values` names no row or several rows, or the selected `create` or `update` fails |
 | `delete(id)` | `true`, or `false` if there was no row | `id` does not fit the table's id kind |
 
 `by` takes an index name, such as `by_email`, or a field name with a unique
-`by_<field>` index. Rows are tables of field values plus `id`. A field the
+`by_<field>` index. For an index with edges, pass a linked row or its id
+for each edge after the field values, as in
+`c.Line:by("by_n_order", 1, order)`. Rows are tables of field values plus
+`id`. A field the
 stored row lacks reads as its `:default()`.
 
 To run a schema's function defaults, `:validate` functions, hooks and
@@ -958,13 +988,15 @@ calls.
 
 `upsert` accepts the same index names and field-name shorthand as `by`.
 Supply a non-`nil` value for every field of the unique index, including all
-fields of a composite index. The lookup uses these values before defaults
+fields of a composite index, and one row or id for each of its edges. The lookup uses these values before defaults
 and hooks run. A match keeps its `id` and updates the supplied fields;
 omitted fields keep their stored values, subject to `updateDefault`. A
 missing match runs `create`. The returned `created` flag is `true` for a new
 row and `false` for an update. Each branch runs its usual defaults, rules
 and hooks, and maintains every affected index. Edge values work on the
 create branch; use `link` and `unlink` to change an existing row's edges.
+A match already links to the index's edges' rows, so its update leaves those
+edges as they are.
 
 `upsert("id", values)` selects the row by `values.id`. It updates that row
 with the other values, or creates a row with that id.

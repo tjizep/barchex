@@ -395,28 +395,33 @@ local function decide_link(self: any, op: string, e: any, pk: any, other: any, v
     end
 end
 
-local function duplicate(self: any, ix: any, other: any, r: any)
+local function duplicate(self: any, ix: any, other: any, r: any, ids: any)
     local parts = {}
     for i, f in ix.on do
         local value = self.byName[f].kind == "bytes" and describe(self.byName[f], r[f]) or tostring(r[f])
         parts[i] = f .. "=" .. value
+    end
+    for _, l in ix.links or {} do
+        parts[#parts + 1] = l.name .. "=" .. tostring(ids[l.name])
     end
     fail(self.where .. " index " .. ix.name .. " is unique, and row " .. other
         .. " already has " .. table.concat(parts, " "))
 end
 
 -- A building unique index also checks rows its build has not reached yet.
-local function check_free(self: any, ix: any, key: string, pk: any, r: any)
+-- `ids` are the ids row pk links to through the index's edges.
+local function check_free(self: any, ix: any, key: string, pk: any, r: any, ids: any)
     local other = get(self, key, true)
     if other ~= nil and lay.unique_pk(self.t, other) ~= pk then
-        duplicate(self, ix, other, r)
+        duplicate(self, ix, other, r, ids)
     end
     if ix.state == "building" then
         local rows = lay.row(self.t)
         lay.scan_values(rows, kc.after(rows), function(k, v)
             local otherPk = lay.row_pk(self.t, k)
-            if otherPk ~= pk and lay.entry(self.t, ix, row_of(self, otherPk, v), otherPk) == key then
-                duplicate(self, ix, tostring(otherPk), r)
+            if otherPk ~= pk and lay.entry(self.t, ix, row_of(self, otherPk, v), otherPk,
+                                           lay.linked(self.allEdges, ix, otherPk)) == key then
+                duplicate(self, ix, tostring(otherPk), r, ids)
             end
             return false
         end)
@@ -428,26 +433,9 @@ local function owns_entry(self: any, ix: any, key: string, pk: any): boolean
     return not ix.unique or ix.state ~= "building" or get(self, key, true) == tostring(pk)
 end
 
--- Stores row `r` at pk, given the row it replaces (nil for a new row), and
--- moves each index entry whose values changed. Everything is checked
--- before the first write, so an error leaves the store as it was.
-local function store(self: any, pk: any, old: any, r: any, counter: string?): any
-    local value = rc.encode(self.fields, self.t.format, self.version, r)
-    local moves = {}
-    for _, ix in self.t.indexes do
-        local was = old and (lay.entry(self.t, ix, old, pk))
-        local key, v = lay.entry(self.t, ix, r, pk)
-        if was ~= key then
-            if key and ix.unique then
-                check_free(self, ix, key, pk, r)
-            end
-            if was and not owns_entry(self, ix, was, pk) then was = nil end
-            moves[#moves + 1] = { was, key, v }
-        end
-    end
-    if counter then
-        barch.store.set(counter, tostring(pk))
-    end
+-- Moves index entries given as { was, key, value } triples: removes each
+-- was, then writes each key.
+local function move_entries(moves: { any })
     for _, m in moves do
         if m[1] then
             barch.store.remove(m[1])
@@ -458,6 +446,31 @@ local function store(self: any, pk: any, old: any, r: any, counter: string?): an
             barch.store.set(m[2], m[3])
         end
     end
+end
+
+-- Stores row `r` at pk, given the row it replaces (nil for a new row), and
+-- moves each index entry whose values changed. Everything is checked
+-- before the first write, so an error leaves the store as it was. A new
+-- row has no links yet; linking it moves the entries of indexes with edges.
+local function store(self: any, pk: any, old: any, r: any, counter: string?): any
+    local value = rc.encode(self.fields, self.t.format, self.version, r)
+    local moves = {}
+    for _, ix in self.t.indexes do
+        local ids = old and lay.linked(self.allEdges, ix, pk)
+        local was = old and (lay.entry(self.t, ix, old, pk, ids))
+        local key, v = lay.entry(self.t, ix, r, pk, ids)
+        if was ~= key then
+            if key and ix.unique then
+                check_free(self, ix, key, pk, r, ids)
+            end
+            if was and not owns_entry(self, ix, was, pk) then was = nil end
+            moves[#moves + 1] = { was, key, v }
+        end
+    end
+    if counter then
+        barch.store.set(counter, tostring(pk))
+    end
+    move_entries(moves)
     barch.store.set(lay.row(self.t, pk), value)
     r.id = pk
     return r
@@ -682,6 +695,38 @@ local function link_value(self: any, e: any, values: any, old: any): (string, an
     return rc.encode(es.fields, "binary", es.version, r), r
 end
 
+-- The index entries that adding (sign 1) or removing (sign -1) the link
+-- from row `from` to row `to` in edge store `s` moves, as { was, key,
+-- value } triples, for the indexes whose edges read `s`. Checks that each
+-- unique key it adds is free. A row that is not stored keeps no entries.
+local function relink(self: any, s: any, from: any, to: any, sign: number): { any }
+    local moves = {}
+    for _, u in self.indexUses[s.name] or {} do
+        local tbl, ix, l = u.tbl, u.ix, u.l
+        local pk, other = from, to
+        if not l.forward then
+            pk, other = to, from
+        end
+        local v = get(tbl, lay.row(tbl.t, pk), true)
+        if v ~= nil then
+            writable(tbl)
+            local r = lay.fill(tbl.t, (rc.decode(tbl.fields, v)))
+            local ids = lay.linked(self.allEdges, ix, pk) :: any
+            local was = lay.entry(tbl.t, ix, r, pk, ids)
+            ids[l.name] = if sign > 0 then other else nil
+            local key, value = lay.entry(tbl.t, ix, r, pk, ids)
+            if was ~= key then
+                if key and ix.unique then
+                    check_free(tbl, ix, key, pk, r, ids)
+                end
+                if was and not owns_entry(tbl, ix, was, pk) then was = nil end
+                moves[#moves + 1] = { was, key, value }
+            end
+        end
+    end
+    return moves
+end
+
 -- Adds `d` to the number of paths from row `from` to row `to` in the store
 -- of stored edge.through `p`. Its forward key holds the number, and both
 -- keys go when it reaches 0. A pessimistic transaction locks the number.
@@ -709,9 +754,11 @@ end
 -- when a path follows `s` more than once.
 local function change_link(self: any, s: any, from: any, to: any, sign: number,
                            apply: () -> ())
+    local moves = relink(self, s, from, to, sign)
     local uses = self.pathUses[s.name]
     if uses == nil then
         apply()
+        move_entries(moves)
         return
     end
     local right = {}
@@ -731,6 +778,7 @@ local function change_link(self: any, s: any, from: any, to: any, sign: number,
             end
         end
     end
+    move_entries(moves)
 end
 
 local function write_link(self: any, e: any, pk: any, other: any, value: string?)
@@ -955,16 +1003,23 @@ local function unique_index(self: any, name: string): any
     return ix
 end
 
+-- The number of values a key of index `ix` holds: its fields, then its
+-- edges.
+local function width(ix: any): number
+    return #ix.on + (ix.links and #ix.links or 0)
+end
+
 -- The row whose values match a unique index, or nil. `name` is the index's
--- name, or a field name whose `by_<field>` index is unique.
+-- name, or a field name whose `by_<field>` index is unique. An index with
+-- edges takes the linked row, or its id, for each edge after the fields.
 function Table:by(name: string, ...: any): any
     local ix = unique_index(self, name)
     local values = { ... }
     for i, v in values do
-        values[i] = num(v)
+        values[i] = num(if i > #ix.on and type(v) == "table" then v.id else v)
     end
-    if select("#", ...) ~= #ix.on then
-        fail(self.where .. " index " .. ix.name .. " takes " .. #ix.on .. " values, got "
+    if select("#", ...) ~= width(ix) then
+        fail(self.where .. " index " .. ix.name .. " takes " .. width(ix) .. " values, got "
             .. select("#", ...))
     end
     local pk = barch.store.get(lay.index(self.t, ix, values))
@@ -1034,18 +1089,32 @@ function Table:upsert(name: string, values: { [string]: any }): (any, boolean)
         return self:update(pk, rest), false
     end
     local ix = unique_index(self, name)
-    local on = table.create(#ix.on)
+    local on = table.create(width(ix))
     for i, fname in ix.on do
         if values[fname] == nil then
             fail(self.where .. " upsert index " .. ix.name .. " needs a value for " .. fname)
         end
         on[i] = num(values[fname])
     end
+    -- the found row already links to the index's edges' rows, so its
+    -- update leaves them out
+    local rest = values
+    for _, l in ix.links or {} do
+        local v = values[l.name]
+        local ids = v ~= nil and ids_in(self, find_edge(self, l.name), v) or {}
+        if #ids ~= 1 then
+            fail(self.where .. " upsert index " .. ix.name .. " needs one row or id for edge "
+                .. l.name)
+        end
+        on[#on + 1] = ids[1]
+        rest = if rest == values then table.clone(values) else rest
+        rest[l.name] = nil
+    end
     local pk = get(self, lay.index(self.t, ix, on), true)
     if pk == nil then
         return self:create(values), true
     end
-    return self:update(lay.unique_pk(self.t, pk), values), false
+    return self:update(lay.unique_pk(self.t, pk), rest), false
 end
 
 -- Removes the row, its index entries and its edges. Answers false if there
@@ -1063,13 +1132,15 @@ function Table:delete(pk: any): boolean
             { op = "delete", id = pk, old = clone_row(self, old) })
     end
     run_hooks(self, "delete", pk, clone_row(self, old))
+    -- unlinking moves the entries of indexes with edges to their unlinked
+    -- keys, which go with the rest
+    unlink_all(self, pk)
     for _, ix in self.t.indexes do
-        local key = lay.entry(self.t, ix, old, pk)
+        local key = lay.entry(self.t, ix, old, pk, lay.linked(self.allEdges, ix, pk))
         if key and owns_entry(self, ix, key, pk) then
             barch.store.remove(key)
         end
     end
-    unlink_all(self, pk)
     barch.store.remove(lay.row(self.t, pk))
     return true
 end
@@ -1526,17 +1597,17 @@ local function index_plan(q: any, keys: boolean?): any
                 end
                 values[i] = eq[f]
             end
-            local n = #values
-            local point = ix.unique and n == #ix.on
+            local n, w = #values, width(ix)
+            local point = ix.unique and n == w
             local next = ix.on[n + 1]
             local ordered = point or q.sortField == nil
-                or (n == #ix.on and q.sortField == "id")
+                or (n == w and q.sortField == "id")
                 or (n + 1 == #ix.on and q.sortField == next)
                 or (ix.primary and q.sortField == "id")
             -- a unique index leaves out rows with a nil in its fields, which
             -- fail the comparisons on its last field
             local bounded = ranges[next] or within[next]
-            local usable = ix.primary or point or not ix.unique or (n + 1 == #ix.on and bounded)
+            local usable = ix.primary or point or not ix.unique or (n + 1 == w and bounded)
             local score = point and 1000 or n * 4 + (bounded and 2 or 0) + (ordered and 1 or 0)
             if not usable then
                 if q.use then
@@ -1631,7 +1702,7 @@ local function from_cursor(q: any, p: any, parts: { string })
     if p.ordered and p.ix and not p.via then
         if p.ix.primary then
             key = lay.row(tbl.t, c.id)
-        elseif not p.ix.unique then
+        elseif not p.ix.unique and p.ix.links == nil then
             local r = { [c.field] = c.value }
             for i, v in p.values do
                 r[p.ix.on[i]] = v
@@ -2783,6 +2854,17 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
             table.insert(pathUses[h.store], { p = s, i = i })
         end
     end
+    -- for each edge store, the indexes whose edges read it, as { tbl, ix,
+    -- l = the index's link to the store }
+    local indexUses = {}
+    for _, b in c do
+        for _, ix in b.t.indexes do
+            for _, l in ix.links or {} do
+                indexUses[l.store] = indexUses[l.store] or {}
+                table.insert(indexUses[l.store], { tbl = b, ix = ix, l = l })
+            end
+        end
+    end
     -- policy rules read and write through a client that has no rules, and
     -- whose hooks count toward the same depth
     local rules
@@ -2801,6 +2883,7 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
         b.allEdges = compiled.edges
         b.links = links
         b.pathUses = pathUses
+        b.indexUses = indexUses
         b.viewer = viewer
         b.rulesClient = rulesClient
         b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH

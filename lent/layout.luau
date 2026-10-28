@@ -21,9 +21,12 @@
 -- from its end. A unique entry's value is the pk as text: the uuid, or the
 -- integer's digits.
 --
--- A unique index has no entry for a row with a nil in any of its fields, so
--- any number of rows can leave a unique field nil. A plain index keeps those
--- rows, and nil sorts first.
+-- An index with edges adds, after the field values, the id of the row each
+-- edge links to, encoded with that table's id kind.
+--
+-- A unique index has no entry for a row with a nil in any of its fields or
+-- edges, so any number of rows can leave a unique field nil or an edge
+-- unlinked. A plain index keeps those rows, and nil sorts first.
 
 local kc = require("lent.KEYCODEC")
 local VALUES = require("lent.VALUES")
@@ -59,7 +62,8 @@ function row_pk(t: any, key: string): any
     return tail(id_kind(t), key)
 end
 
--- The prefix of index `ix`'s keys in table `t`, and the value kinds.
+-- The prefix of index `ix`'s keys in table `t`, and the value kinds: the
+-- fields', then the id kinds of the edges' tables.
 local function index_prefix(t: any, ix: any): (string, { string })
     local kinds = table.create(#ix.on)
     for i, fname in ix.on do
@@ -69,11 +73,14 @@ local function index_prefix(t: any, ix: any): (string, { string })
             end
         end
     end
+    for _, l in ix.links or {} do
+        kinds[#kinds + 1] = l.id
+    end
     return (ix.unique and "lent.u" or "lent.i") .. name(t.key) .. name(ix.name), kinds
 end
 
 -- The prefix of every key of index `ix`, or of the keys that start with
--- `values` (the first #values of the index's fields).
+-- `values` (the first #values of the index's fields, then its edges' ids).
 function index(t: any, ix: any, values: { any }?): string
     local prefix, kinds = index_prefix(t, ix)
     if values == nil then
@@ -96,13 +103,21 @@ function fill(t: any, r: { [string]: any }): { [string]: any }
     return r
 end
 
--- The index entry for `row` at `pk`: the key and its value. nil for a
--- unique index when one of the row's indexed fields is nil.
-function entry(t: any, ix: any, r: { [string]: any }, pk: any): (string?, string?)
+-- The index entry for `row` at `pk`: the key and its value. `ids` holds
+-- the id each of the index's edges links the row to, by edge name, as
+-- linked() answers. nil for a unique index when one of the row's indexed
+-- fields is nil or one of its edges links no row.
+function entry(t: any, ix: any, r: { [string]: any }, pk: any,
+               ids: { [string]: any }?): (string?, string?)
     local prefix, kinds = index_prefix(t, ix)
-    local values = table.create(#ix.on)
-    for i, fname in ix.on do
-        values[i] = r[fname]
+    local values = table.create(#kinds)
+    local n = #ix.on
+    for i = 1, #kinds do
+        if i <= n then
+            values[i] = r[ix.on[i]]
+        else
+            values[i] = ids and ids[ix.links[i - n].name]
+        end
         if ix.unique and values[i] == nil then
             return nil, nil
         end
@@ -241,6 +256,25 @@ function scan_back(lo: string, hi: string, each: (string) -> boolean?, limit: nu
     return false
 end
 
+-- The ids that row pk links to through the edges of index `ix`, by edge
+-- name, read from `edges`, the edge stores by name. nil for an index
+-- without edges.
+function linked(edges: any, ix: any, pk: any): { [string]: any }?
+    if ix.links == nil then
+        return nil
+    end
+    local out = {}
+    for _, l in ix.links do
+        local s = edges[l.store]
+        local prefix = l.forward and edge(s, pk) or edge_back(s, pk)
+        local k = barch.store.range(prefix, kc.after(prefix), 1)[1]
+        if k then
+            out[l.name] = l.forward and edge_to(s, k) or edge_from(s, k)
+        end
+    end
+    return out
+end
+
 -- The page size after `page`: twice as many keys, up to 1000.
 local function grow(page: number): number
     return math.min(page * 2, 1000)
@@ -332,6 +366,14 @@ function selftest(): (boolean, string?)
     if string.sub(edge(s, 1, u), 1, #edge(s, 1)) ~= edge(s, 1)
         or edge_to(s, edge(s, 1, u)) ~= u or edge_from(s, edge_back(s, u, 1)) ~= 1 then
         return false, "edge keys"
+    end
+    -- an edge's id follows the fields, and a unique entry needs it
+    local linkedIx = { name = "by_age_owner", on = { "age" }, unique = true,
+                       links = { { name = "owner", store = "x", forward = false, id = "int" } } }
+    k, v = entry(t, linkedIx, r, 7, { owner = 3 })
+    if k ~= index(t, linkedIx, { 41, 3 }) or v ~= "7"
+        or entry(t, linkedIx, r, 7, {}) ~= nil or entry(t, linkedIx, r, 7) ~= nil then
+        return false, "edge entry"
     end
     local ut = { key = "doc", id = "uuid", fields = t.fields }
     k, v = entry(ut, uniq, r, u)

@@ -27,7 +27,9 @@
 --                                          ; a stored computed field adds its
 --                                          revision in computed, and state =
 --                                          "filling" until its rows are filled
---   /lent/tables/<table>/indexes/<ix>/spec  unique, state = "building" until ready
+--   /lent/tables/<table>/indexes/<ix>/spec  unique, state = "building" until
+--                                          ready, and edges, the names of the
+--                                          index's edges
 --   /lent/tables/<table>/indexes/<ix>/on/1  a link to the first field's node
 --   /lent/edges/<edge>/from, /to            links to the two tables' nodes
 --   /lent/edges/<edge>/fields/<field>       an edge field, as a table's field
@@ -143,7 +145,8 @@ local function canon(v: any): string
 end
 
 local function same_index(a: any, b: any, before: any, after: any): boolean
-    if (a.unique == true) ~= (b.unique == true) or #a.on ~= #b.on then
+    if (a.unique == true) ~= (b.unique == true) or #a.on ~= #b.on
+        or canon(a.links) ~= canon(b.links) then
         return false
     end
     for i, f in a.on do
@@ -161,7 +164,18 @@ local function same_index(a: any, b: any, before: any, after: any): boolean
 end
 
 local function index_spec(ix: any): any
-    return { name = ix.name, on = table.clone(ix.on), unique = ix.unique }
+    local links
+    for i, l in ix.links or {} do
+        links = links or {}
+        links[i] = table.clone(l)
+    end
+    return { name = ix.name, on = table.clone(ix.on), edges = ix.edges and table.clone(ix.edges),
+             links = links, unique = ix.unique }
+end
+
+-- The JSON of an index's spec node in the catalog.
+local function spec_data(ix: any): string
+    return simdjson.encode({ unique = ix.unique, state = ix.state, edges = ix.edges })
 end
 
 -- Progress and readiness do not change a schema's logical shape.
@@ -433,10 +447,11 @@ local function drop(t: any, ix: any)
 end
 
 -- Stores index ix's entry for the row at key k, whose value is `stored`.
-local function build_row(t: any, ix: any, fields: any, k: string, stored: string)
+-- `edges` are the catalog's edge stores, which the index's edges read.
+local function build_row(t: any, ix: any, edges: any, fields: any, k: string, stored: string)
     local pk = lay.row_pk(t, k)
     local r = lay.fill(t, rc.decode(fields, stored))
-    local key, value = lay.entry(t, ix, r, pk)
+    local key, value = lay.entry(t, ix, r, pk, lay.linked(edges, ix, pk))
     if key == nil then return end
     if ix.unique then
         local other = barch.store.get(key, true)
@@ -506,10 +521,10 @@ local function fill_paths(t: any, p: any, edges: any, k: string)
     end
 end
 
-local function build(t: any, ix: any)
+local function build(t: any, ix: any, edges: any)
     local fields, rows = row_fields(t), lay.row(t)
     lay.scan_values(rows, kc.after(rows), function(k, v)
-        build_row(t, ix, fields, k, v)
+        build_row(t, ix, edges, fields, k, v)
         return false
     end)
 end
@@ -547,7 +562,7 @@ local function write_catalog(c: any)
         for _, ix in t.indexes do
             local dir = base .. "/indexes/" .. ix.name
             g.mkdir(dir)
-            g.put(dir .. "/spec", simdjson.encode({ unique = ix.unique, state = ix.state }), "json")
+            g.put(dir .. "/spec", spec_data(ix), "json")
             g.mkdir(dir .. "/on")
             for i, fname in ix.on do
                 g.link(fieldNode[fname], dir .. "/on/" .. i)
@@ -596,7 +611,7 @@ function apply(p: any)
                 return false
             end)
         else
-            build(s.table, s.index)
+            build(s.table, s.index, p.compiled.edges)
         end
     end
     write_catalog(p.compiled)
@@ -661,7 +676,7 @@ local function advance(c: any, budget: number, app: any): number
             elseif step.op == "fill" then
                 fill_row(t, step.fields, fns, fields, c.version, k, values[i])
             else
-                build_row(t, ix, fields, k, values[i])
+                build_row(t, ix, c.edges, fields, k, values[i])
             end
         end
         processed += #keys
@@ -692,7 +707,7 @@ local function write_progress(c: any)
         end
         for _, ix in t.indexes do
             barch.graph.put("/lent/tables/" .. key .. "/indexes/" .. ix.name .. "/spec",
-                simdjson.encode({ unique = ix.unique, state = ix.state }), "json")
+                spec_data(ix), "json")
         end
     end
     barch.graph.put("/lent/compiled", simdjson.encode(catalog_data(c)), "json")
