@@ -180,9 +180,15 @@ local function tokenize(src: string, bad: any): { any }
             if constant ~= nil then
                 toks[#toks + 1] = { k = "const", v = if constant == "nil" then nil else constant,
                                     text = word, at = i }
+            elseif KEYWORDS[word] then
+                toks[#toks + 1] = { k = word, v = word, text = word, at = i }
             else
-                toks[#toks + 1] = { k = KEYWORDS[word] and word or "name", v = word, text = word,
-                                    at = i }
+                -- a dotted name such as origin.borough names a groupBy key
+                while string.find(src, "^%.[%a_]", e + 1) do
+                    _, e = string.find(src, "^%.[%a_][%w_]*", e + 1)
+                end
+                word = string.sub(src, i, e)
+                toks[#toks + 1] = { k = "name", v = word, text = word, at = i }
             end
             i = e + 1
         elseif string.find(c, "%d") or string.find(src, "^%.%d", i) then

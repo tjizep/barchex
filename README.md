@@ -1267,6 +1267,24 @@ for _, g in c.Post:query():groupBy("author"):aggregate {
 end
 ```
 
+To group by a field of a linked row, name it with a dotted path such as
+`author.name` or `customer.nation.name`. Each step before the last is an
+edge with one row at its far end, and the last step names a field of the
+row the path reaches, or another such edge to group by its id. The group row
+holds the value under the path's full text:
+
+```lua
+for _, g in c.Post:query():groupBy("author.team.name"):aggregate {
+    posts = { fn = "count" },
+} do
+    print(g["author.team.name"], g.posts)
+end
+```
+
+Each linked row is read once per call. A row without a link joins the
+group whose key is `nil`, and so does a row whose path passes through or
+reads a row that the viewer's query rules hide.
+
 To aggregate a value worked out from each row, give a function in `value`
 in place of `field`. It receives the row with its computed fields and
 answers the value, or `nil` to skip the row:
@@ -1329,8 +1347,9 @@ c.Post:query():groupBy("author")
 - `having(cond, params)` keeps the groups that match. `cond` is an
   expression string, as for `where`, over the group's keys and aggregates by
   name and the names in `params`, or a function that receives the group row
-  and answers whether to keep it. Each call adds a test, and a group must
-  pass them all.
+  and answers whether to keep it. A dotted key such as `author.name` is one
+  name in the expression. Each call adds a test, and a group must pass them
+  all.
 - `order(name, dir)` orders the groups by a group key or aggregate, with
   `dir` `"asc"` (the default) or `"desc"`. Each call adds a sort key after
   the earlier ones, and groups that tie on all of them stay in key order.

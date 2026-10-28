@@ -4,8 +4,8 @@ from .test_client import setup
 
 redis = pytest.importorskip("redis")
 
-# Users write posts with stars, a kind and an optional score; aggregates run
-# over posts, with and without groups.
+# Users on teams write posts with stars, a kind and an optional score;
+# aggregates run over posts, with and without groups.
 APP = """
 local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
@@ -13,10 +13,18 @@ local client = require("lent.CLIENT")
 
 local function app()
     return lent.graph {
+        lent.schema "Team" {
+            id = "int",
+            fields = { lent.field.string "name", lent.field.string "city":optional() },
+            edges = { lent.edge.to "members" "User" },
+        },
         lent.schema "User" {
             id = "int",
             fields = { lent.field.string "name":unique() },
-            edges = { lent.edge.to "posts" "Post", lent.edge.to "likes" "Post" },
+            edges = {
+                lent.edge.to "posts" "Post", lent.edge.to "likes" "Post",
+                lent.edge.from "team" "Team":ref "members":unique(),
+            },
         },
         lent.schema "Post" {
             id = "int",
@@ -54,9 +62,11 @@ end
 local steps = {}
 
 function steps.seed(c)
-    local ann = c.User:create { name = "ann" }
-    local bob = c.User:create { name = "bob" }
-    c.User:create { name = "cy" }
+    local red = c.Team:create { name = "red" }
+    local blue = c.Team:create { name = "blue", city = "oslo" }
+    local ann = c.User:create { name = "ann", team = red }
+    local bob = c.User:create { name = "bob", team = blue }
+    c.User:create { name = "cy", team = blue }
     c.Post:create { title = "a", stars = 5, score = 1.5, kind = "news", author = ann, at = 30 }
     c.Post:create { title = "b", stars = 1, author = ann, at = 10 }
     c.Post:create { title = "c", stars = 3, score = 2.25, kind = "news", author = bob, at = 20 }
@@ -178,6 +188,27 @@ function steps.more(c)
     return out
 end
 
+-- groups keyed by a field of a linked row, through one or two edges
+function steps.paths(c)
+    local out = {}
+    local function add(key, groups)
+        out[#out + 1] = key .. ": " .. table.concat(rows(groups, { key, "n", "stars" }), ", ")
+    end
+    local spec = { n = { fn = "count" }, stars = { fn = "sum", field = "stars" } }
+    local function by(key) return c.Post:query():groupBy(key) end
+    for _, key in { "author.name", "author.team.name", "author.team.city", "author.team",
+                    "author.id" } do
+        add(key, by(key):aggregate(spec))
+    end
+    add("author.team.name", by("author.team.name"):having("author.team.name == 'red'")
+        :aggregate(spec))
+    add("author.team.name", by("author.team.name"):order("author.team.name", "desc")
+        :aggregate(spec))
+    local two = c.Post:query():groupBy("author.team.name", "kind"):aggregate(spec)
+    out[#out + 1] = table.concat(rows(two, { "author.team.name", "kind", "n" }), ", ")
+    return out
+end
+
 local bad = {
     spec = function(c) c.Post:query():aggregate(5) end,
     entry = function(c) c.Post:query():aggregate { n = "count" } end,
@@ -209,6 +240,11 @@ local bad = {
     groupname = function(c) c.Post:query():groupBy("nothing") end,
     groupjson = function(c) c.Post:query():groupBy("meta") end,
     groupmany = function(c) c.User:query():groupBy("posts") end,
+    pathname = function(c) c.Post:query():groupBy("author.nothing") end,
+    pathfield = function(c) c.Post:query():groupBy("title.name") end,
+    pathempty = function(c) c.Post:query():groupBy("author.") end,
+    pathmany = function(c) c.Post:query():groupBy("author.posts.title") end,
+    pathwhere = function(c) c.Post:query():where("author.name == 'ann'") end,
     both = function(c)
         c.Post:query():aggregate { n = { fn = "sum", field = "stars", value = function() return 1 end } }
     end,
@@ -346,6 +382,12 @@ ERRORS = {
     "groupname": "LENT table Post has no field or edge nothing",
     "groupjson": "LENT table Post field meta is json, so groupBy cannot use it",
     "groupmany": "LENT table User edge posts can link a row to many rows, so groupBy cannot use it",
+    "pathname": "LENT table User has no field or edge nothing",
+    "pathfield": "LENT table Post has no edge title",
+    "pathempty": "LENT table Post query groupBy author. has an empty name",
+    "pathmany": "LENT table User edge posts can link a row to many rows, so groupBy cannot use it",
+    "pathwhere": """LENT table Post query where "author.name == 'ann'" at column 1: has no field or"""
+                 " parameter author.name",
     "both": "LENT table Post query aggregate n has both field and value; give one",
     "valuefn": "LENT table Post query aggregate n value must be a function, got 1",
     "sumvalue": "LENT table Post query aggregate n value answered a, so sum needs a number",
@@ -353,6 +395,26 @@ ERRORS = {
     "mixed": "LENT table Post query aggregate n value answered a string after a number",
     "clash": "LENT table Post query aggregate kind has the name of a groupBy key",
 }
+
+
+def test_group_by_a_linked_rows_field(run):
+    none, ann, bob = "n=1 stars=2", "n=2 stars=6", "n=1 stars=3"
+    assert run("paths") == [
+        "author.name: author.name=nil " + none + ", author.name=ann " + ann
+        + ", author.name=bob " + bob,
+        "author.team.name: author.team.name=nil " + none + ", author.team.name=blue " + bob
+        + ", author.team.name=red " + ann,
+        # red has no city, so ann's posts join the post without an author
+        "author.team.city: author.team.city=nil n=3 stars=8, author.team.city=oslo " + bob,
+        "author.team: author.team=nil " + none + ", author.team=1 " + ann
+        + ", author.team=2 " + bob,
+        "author.id: author.id=nil " + none + ", author.id=1 " + ann + ", author.id=2 " + bob,
+        "author.team.name: author.team.name=red " + ann,
+        "author.team.name: author.team.name=red " + ann + ", author.team.name=blue " + bob
+        + ", author.team.name=nil " + none,
+        "author.team.name=nil kind=note n=1, author.team.name=blue kind=news n=1, "
+        "author.team.name=red kind=news n=1, author.team.name=red kind=note n=1",
+    ]
 
 
 def test_aggregate_errors(run):

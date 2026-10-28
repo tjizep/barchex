@@ -194,13 +194,10 @@ function q.q3(c, p)
                 cu:where("mktsegment", "=", p.segment)
             end)
         end)
-        :groupBy("order"):aggregate { revenue = { fn = "sum", value = revenue } }
-    for _, g in groups do
-        local o = c.Order:get(g.order)
-        g.key, g.orderdate, g.shippriority = o.id, o.orderdate, o.shippriority
-    end
-    sort(groups, { "-revenue", "orderdate", "key" })
-    return pick(groups, { "key", "revenue", "orderdate", "shippriority" }, 10)
+        :groupBy("order", "order.orderdate", "order.shippriority")
+        :order("revenue", "desc"):order("order.orderdate"):limit(10)
+        :aggregate { revenue = { fn = "sum", value = revenue } }
+    return pick(groups, { "order", "revenue", "order.orderdate", "order.shippriority" })
 end
 
 -- Q4, order priority checking
@@ -225,13 +222,11 @@ end
 function q.q10(c, p)
     local groups = c.Lineitem:query():where("returnflag", "=", "R")
         :hasOrderWith(function(o) o:where("orderdate >= a and orderdate < b", p) end)
-        :groupBy("customer"):order("revenue", "desc"):limit(20)
+        :groupBy("customer", "customer.name", "customer.acctbal", "customer.nation.name")
+        :order("revenue", "desc"):limit(20)
         :aggregate { revenue = { fn = "sum", value = revenue } }
-    for _, g in groups do
-        local cu = c.Customer:query():where("id", "=", g.customer):withNation():first()
-        g.key, g.name, g.acctbal, g.nation = cu.id, cu.name, cu.acctbal, cu.nation.name
-    end
-    return pick(groups, { "key", "name", "revenue", "acctbal", "nation" })
+    return pick(groups, { "customer", "customer.name", "revenue", "customer.acctbal",
+                          "customer.nation.name" })
 end
 
 -- Q11, important stock identification
@@ -302,16 +297,14 @@ end
 
 -- Q18, large volume customer
 function q.q18(c, p)
-    local groups = c.Lineitem:query():groupBy("order"):having("qty > q", { q = p.qty })
+    local groups = c.Lineitem:query()
+        :groupBy("order", "order.orderdate", "order.totalprice", "order.customer",
+                 "order.customer.name")
+        :having("qty > q", { q = p.qty })
+        :order("order.totalprice", "desc"):order("order.orderdate"):limit(100)
         :aggregate { qty = { fn = "sum", field = "quantity" } }
-    local out = {}
-    for _, g in groups do
-        local o = c.Order:query():where("id", "=", g.order):withCustomer():first()
-        out[#out + 1] = { name = o.customer.name, custkey = o.customer.id, key = o.id,
-                          orderdate = o.orderdate, totalprice = o.totalprice, qty = g.qty }
-    end
-    sort(out, { "-totalprice", "orderdate", "key" })
-    return pick(out, { "name", "custkey", "key", "orderdate", "totalprice", "qty" }, 100)
+    return pick(groups, { "order.customer.name", "order.customer", "order", "order.orderdate",
+                          "order.totalprice", "qty" })
 end
 
 function call(step, arg)

@@ -139,6 +139,22 @@ function steps.reads(c)
     }
 end
 
+-- comments grouped by fields of their post and its author; a post the
+-- viewer cannot read groups its comments under nil
+function steps.groups(c)
+    return try(function()
+        local out = {}
+        for _, key in { "post.title", "post.author.name" } do
+            local parts = {}
+            for _, g in c.Comment:query():groupBy(key):aggregate { n = { fn = "count" } } do
+                parts[#parts + 1] = tostring(g[key]) .. "=" .. g.n
+            end
+            out[#out + 1] = table.concat(parts, " ")
+        end
+        return table.concat(out, " | ")
+    end)
+end
+
 function steps.ann(c)
     return {
         try(function() return c.Post:create { title = "Ann new", owner = 1 }.id end),
@@ -231,6 +247,15 @@ SIGN_IN = "LENT table Comment policy denies query: sign in to read comments"
 ])
 def test_query_rules_filter_what_each_viewer_reads(run, who, expected):
     assert run("reads", who) == expected
+
+
+@pytest.mark.parametrize("who, expected", [
+    ("ann", "nil=2 Ann draft=1 Ann public=1 | nil=2 ann=2"),
+    ("bob", "nil=2 Ann public=1 Bob draft=1 | nil=2 ann=1 bob=1"),
+    ("admin", "nil=1 Ann draft=1 Ann public=1 Bob draft=1 | nil=1 ann=2 bob=1"),
+])
+def test_group_by_a_linked_field_reads_the_rows_the_viewer_can(run, who, expected):
+    assert run("groups", who) == expected
 
 
 def test_mutation_rules_decide_a_members_writes(run):

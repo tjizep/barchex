@@ -2116,28 +2116,45 @@ local function result(a: any, acc: any): any
     return acc
 end
 
--- Checks a groupBy key: a field, or an edge with one row at its far end,
--- which groups by the linked row's id.
+-- Checks a groupBy key: a field; an edge with one row at its far end, which
+-- groups by the linked row's id; or a path such as "customer.nation.name"
+-- through such edges, which groups by a field of the last linked row. A key
+-- through edges keeps each hop in `hops`, and the field it reads in `field`.
 local function group_key(tbl: any, name: any): any
     if type(name) ~= "string" then
         fail(tbl.where .. " query groupBy takes field or edge names, got " .. tostring(name))
     end
-    if (name == "id" and tbl.linksOf == nil) or tbl.byName[name] or tbl.computedByName[name] then
-        local kind = kind_of(tbl, name)
-        if kind == "json" then
-            fail(tbl.where .. " field " .. name .. " is json, so groupBy cannot use it")
+    local parts = string.split(name, ".")
+    local hops = {}
+    local at = tbl
+    for i, part in parts do
+        local last = i == #parts
+        if part == "" then
+            fail(tbl.where .. " query groupBy " .. name .. " has an empty name")
         end
-        return { name = name, kind = kind }
+        if last and ((part == "id" and at.linksOf == nil) or at.byName[part]
+                or at.computedByName[part]) then
+            local kind = kind_of(at, part)
+            if kind == "json" then
+                fail(at.where .. " field " .. part .. " is json, so groupBy cannot use it")
+            end
+            if #hops == 0 then
+                return { name = name, kind = kind }
+            end
+            return { name = name, kind = kind, hops = hops, field = part }
+        end
+        local e = at.edgeByName[part]
+        if e == nil then
+            fail(at.where .. (if last then " has no field or edge " else " has no edge ") .. part)
+        end
+        if not one(at, e) then
+            fail(at.where .. " edge " .. part .. " can link a row to many rows, so groupBy"
+                .. " cannot use it")
+        end
+        hops[#hops + 1] = { tbl = at, e = e, to = at.peers[e.target] }
+        at = at.peers[e.target]
     end
-    local e = tbl.edgeByName[name]
-    if e == nil then
-        fail(tbl.where .. " has no field or edge " .. name)
-    end
-    if not one(tbl, e) then
-        fail(tbl.where .. " edge " .. name .. " can link a row to many rows, so groupBy"
-            .. " cannot use it")
-    end
-    return { name = name, kind = lay.id_kind(tbl.peers[e.target].t), e = e }
+    return { name = name, kind = lay.id_kind(at.t), hops = hops }
 end
 
 -- The id that row pk links to through edge e, or nil.
@@ -2148,6 +2165,45 @@ local function linked_id(tbl: any, e: any, pk: any): any
         return true
     end)
     return out
+end
+
+-- The value of group key k for row r. A key through edges reads each
+-- linked row once per aggregate call, keeping what it found in `memo`. A
+-- row the viewer's query rules hide ends the path, so the key is nil.
+local function key_value(k: any, r: any, memo: any): any
+    if k.hops == nil then
+        return r[k.name]
+    end
+    local id = r.id
+    for i, h in k.hops do
+        local found = if i > 1 then memo[i][id] else nil
+        if found == nil then
+            found = linked_id(h.tbl, h.e, id)
+            -- the next hop starts from the rows the viewer can read
+            if found ~= nil and i < #k.hops and h.to.queryRules and h.to:get(found) == nil then
+                found = nil
+            end
+            if i > 1 then
+                memo[i][id] = if found == nil then false else found
+            end
+        end
+        if not found then
+            return nil
+        end
+        id = found
+    end
+    if k.field == nil then
+        return id
+    end
+    local row = memo.rows[id]
+    if row == nil then
+        row = k.hops[#k.hops].to:get(id) or false
+        memo.rows[id] = row
+    end
+    if row then
+        return row[k.field]
+    end
+    return nil
 end
 
 -- The test of a having(cond, params) call for the group rows of keys and
@@ -2235,15 +2291,19 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     for i, h in shape and shape.tests or {} do
         tests[i] = group_test(tbl, keys, aggs, h)
     end
+    local memos = {}
+    for i, k in keys do
+        local memo = { rows = {} }
+        for j in k.hops or {} do
+            memo[j] = {}
+        end
+        memos[i] = memo
+    end
     local groups, list = {}, {}
     for _, r in rows(q) do
         local values = {}
         for i, k in keys do
-            if k.e then
-                values[i] = linked_id(tbl, k.e, r.id)
-            else
-                values[i] = r[k.name]
-            end
+            values[i] = key_value(k, r, memos[i])
         end
         -- key text sorts groups the way an index sorts their values
         local key = kc.pack(kinds, values)

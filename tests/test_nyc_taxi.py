@@ -104,19 +104,10 @@ function q.q4(c)
     return pick(groups, { "passengers", "year", "miles", "n" })
 end
 
--- trips by pickup borough, through the zone edge
+-- trips by pickup borough, a field of the zone the origin edge links to
 function q.boroughs(c, p)
-    local groups = c.Trip:query():where("pickup >= a and pickup < b", p)
-        :groupBy("origin"):aggregate { n = { fn = "count" } }
-    local by = {}
-    for _, g in groups do
-        local b = c.Zone:get(g.origin).borough
-        by[b] = (by[b] or 0) + g.n
-    end
-    local out = {}
-    for b, n in by do out[#out + 1] = { b, n } end
-    table.sort(out, function(x, y) return x[1] < y[1] end)
-    return out
+    return pick(c.Trip:query():where("pickup >= a and pickup < b", p)
+        :groupBy("origin.borough"):aggregate { n = { fn = "count" } }, { "origin.borough", "n" })
 end
 
 function call(step, arg)
