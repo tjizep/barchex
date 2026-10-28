@@ -315,7 +315,28 @@ function q.q15(c, p)
     return out
 end
 
--- Q18, large volume customer
+-- Q17, small-quantity-order revenue: a correlated subquery, run as two
+-- passes. The first finds each part's average quantity, and the second
+-- compares each line with its part's average.
+function q.q17(c, p)
+    local function lines()
+        return c.Lineitem:query():hasPartWith(function(pt)
+            pt:where("brand", "=", p.brand):where("container", "=", p.container)
+        end)
+    end
+    local avg = {}
+    for _, g in lines():groupBy("part"):aggregate { qty = { fn = "avg", field = "quantity" } } do
+        avg[g.part] = g.qty
+    end
+    local total = 0
+    for _, l in lines():withPart():all() do
+        if l.quantity < 0.2 * avg[l.part.id] then
+            total += l.extendedprice
+        end
+    end
+    return string.format("%.17g", total / 7)
+end
+
 function q.q18(c, p)
     local groups = c.Lineitem:query()
         :groupBy("order", "order.orderdate", "order.totalprice", "order.customer",
@@ -325,6 +346,68 @@ function q.q18(c, p)
         :aggregate { qty = { fn = "sum", field = "quantity" } }
     return pick(groups, { "order.customer.name", "order.customer", "order", "order.orderdate",
                           "order.totalprice", "qty" })
+end
+
+-- Q21, suppliers who kept orders waiting: lines of finished orders that a
+-- nation's supplier delivered late, where another supplier shipped part of
+-- the order and was on time. The lines of one order are compared in Luau.
+function q.q21(c, p)
+    local suppliers = {}
+    for _, s in c.Supplier:query()
+        :hasNationWith(function(n) n:where("name", "=", p.nation) end):all() do
+        suppliers[s.id] = s
+    end
+    local late = "receiptdate > commitdate"
+    local orders = c.Order:query():where("orderstatus", "=", "F")
+        :hasLinesWith(function(l)
+            l:where(late):hasSupplierWith(function(s)
+                s:hasNationWith(function(n) n:where("name", "=", p.nation) end)
+            end)
+        end)
+        :withLines(function(l) l:withSupplier() end):all()
+    local waits = {}
+    for _, o in orders do
+        for _, l1 in o.lines do
+            local s = suppliers[l1.supplier.id]
+            if s and l1.receiptdate > l1.commitdate then
+                local other, otherLate = false, false
+                for _, l2 in o.lines do
+                    if l2.supplier.id ~= s.id then
+                        other = true
+                        otherLate = otherLate or l2.receiptdate > l2.commitdate
+                    end
+                end
+                if other and not otherLate then
+                    waits[s.name] = (waits[s.name] or 0) + 1
+                end
+            end
+        end
+    end
+    local out = {}
+    for name, n in waits do out[#out + 1] = { name = name, numwait = n } end
+    return pick(sort(out, { "-numwait", "name" }), { "name", "numwait" }, 100)
+end
+
+-- Q22, global sales opportunity: customers with an above-average balance
+-- and no orders, by the country code in their phone number
+function q.q22(c, p)
+    local codes = {}
+    for _, code in p.codes do codes[code] = true end
+    local function inCodes(cu) return codes[string.sub(cu.phone, 1, 2)] == true end
+    local avg = c.Customer:query():where("acctbal > 0"):where(inCodes)
+        :aggregate({ a = { fn = "avg", field = "acctbal" } }).a
+    local groups = {}
+    for _, cu in c.Customer:query():where(inCodes):where("acctbal > a", { a = avg })
+        :hasNoOrders():all() do
+        local code = string.sub(cu.phone, 1, 2)
+        local g = groups[code] or { code = code, n = 0, total = 0 }
+        g.n += 1
+        g.total += cu.acctbal
+        groups[code] = g
+    end
+    local out = {}
+    for _, g in groups do out[#out + 1] = g end
+    return pick(sort(out, { "code" }), { "code", "n", "total" })
 end
 
 function call(step, arg)
@@ -655,6 +738,18 @@ def test_q15_top_supplier(tpch):
     assert run("q15", {"a": ms(day("1996-01-01")), "b": ms(day("1996-04-01"))}) == want
 
 
+def test_q17_small_quantity_revenue(tpch):
+    run, sql = tpch
+    [[want]] = sql("""
+        select sum(l_extendedprice) / 7.0 from lineitem, part
+        where p_partkey = l_partkey and p_brand = :brand and p_container = :container
+          and l_quantity < (select 0.2 * avg(l_quantity) from lineitem
+                            where l_partkey = p_partkey)""",
+                   brand="Brand#2", container="LG CASE")
+    assert want
+    assert run("q17", {"brand": "Brand#2", "container": "LG CASE"}) == "%.17g" % want
+
+
 def test_q18_large_volume_customer(tpch):
     run, sql = tpch
     want = dates(sql("""
@@ -667,3 +762,34 @@ def test_q18_large_volume_customer(tpch):
         order by o_totalprice desc, o_orderdate, o_orderkey limit 100""", qty=150), 3)
     assert want
     assert run("q18", {"qty": 150}) == want
+
+
+def test_q21_suppliers_kept_orders_waiting(tpch):
+    run, sql = tpch
+    want = sql("""
+        select s_name, count(*) as numwait from supplier, lineitem l1, orders, nation
+        where s_suppkey = l1.l_suppkey and o_orderkey = l1.l_orderkey
+          and o_orderstatus = 'F' and l1.l_receiptdate > l1.l_commitdate
+          and exists (select * from lineitem l2 where l2.l_orderkey = l1.l_orderkey
+                        and l2.l_suppkey <> l1.l_suppkey)
+          and not exists (select * from lineitem l3 where l3.l_orderkey = l1.l_orderkey
+                            and l3.l_suppkey <> l1.l_suppkey
+                            and l3.l_receiptdate > l3.l_commitdate)
+          and s_nationkey = n_nationkey and n_name = :nation
+        group by s_name order by numwait desc, s_name limit 100""", nation="FRANCE")
+    assert want
+    assert run("q21", {"nation": "FRANCE"}) == want
+
+
+def test_q22_global_sales_opportunity(tpch):
+    run, sql = tpch
+    want = sql("""
+        select cntrycode, count(*), sum(c_acctbal) from (
+            select substr(c_phone, 1, 2) as cntrycode, c_acctbal from customer
+            where substr(c_phone, 1, 2) in ('2-')
+              and c_acctbal > (select avg(c_acctbal) from customer
+                               where c_acctbal > 0 and substr(c_phone, 1, 2) in ('2-'))
+              and not exists (select * from orders where o_custkey = c_custkey))
+        group by cntrycode order by cntrycode""")
+    assert want
+    assert run("q22", {"codes": ["2-"]}) == want

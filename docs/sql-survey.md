@@ -34,8 +34,9 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
-2. **Missing query forms.** Anti-joins (`NOT EXISTS`) and correlated
-   subqueries take Luau code.
+2. **Missing query forms.** Correlated subqueries take two passes in
+   Luau: one keeps a value per row, and the other compares each row with
+   it.
 
 [Gaps](#gaps) lists each missing feature with the queries that need it.
 
@@ -84,12 +85,12 @@ from the query text.
 | Q14 promotion effect | verified | `LIKE 'PROMO%'` as the range `type >= 'PROMO' and type < 'PROMP'`, read through `by_type` |
 | Q15 top supplier | verified | the `Revenue` view groups lines by supplier; `max("revenue")` on the view, then `where("revenue == top")` |
 | Q16 parts/supplier relationship | Luau | `NOT IN` a subquery; `count` with `distinct = true` counts the suppliers |
-| Q17 small-quantity-order revenue | Luau | a correlated `avg` per part: one `groupBy("part")` pass, then a second pass |
+| Q17 small-quantity-order revenue | verified | a correlated `avg` per part: `groupBy("part")` keeps each part's average, then lines loaded `withPart()` compare with it |
 | Q18 large volume customer | verified | `groupBy` the order, its date and total price, and `order.customer.name`, with `having("qty > q", { q = 300 })` and an order by total price and date |
 | Q19 discounted revenue | Luau | three `OR` branches over line and part fields; the branches select different brands, so three `hasPartWith` queries add up |
 | Q20 potential part promotion | Luau | nested `IN` subqueries and a correlated sum |
-| Q21 suppliers who kept orders waiting | Luau | `EXISTS` and `NOT EXISTS` over other lines of the same order |
-| Q22 global sales opportunity | Luau | `SUBSTRING` of the phone number, `avg` of a subquery, and `NOT EXISTS` orders |
+| Q21 suppliers who kept orders waiting | verified | `hasLinesWith` selects finished orders with a late line from the nation's suppliers; `withLines` loads each order's lines with their suppliers, and Luau compares the lines of one order for `EXISTS` and `NOT EXISTS` |
+| Q22 global sales opportunity | verified | `hasNoOrders()` for `NOT EXISTS`; the phone prefix is a `where` function, and a first `aggregate` answers the average balance |
 
 ## New York taxi trips
 
@@ -189,8 +190,12 @@ item it belongs to.
    like a table, as Q15 does. A view's rows are worked out on each read; a
    stored view that keeps its rows current on each write, as stored path
    edges do, would serve large views.
-9. **Anti-joins and subqueries.** `NOT EXISTS` (Q21, Q22) needs a negated
-   `has`. Correlated subqueries (Q2, Q17, Q20) run as two passes in Luau.
+9. **Anti-joins and subqueries.** Done: `hasNo` and `hasNo<Edge>With`
+   keep the rows without a matching link, as `NOT EXISTS` does in Q22. A
+   correlated subquery runs as two passes, as in Q17: `groupBy` keeps a
+   value per linked row, and rows loaded `with` that edge compare with it.
+   Q21 correlates lines of the same order, so it loads each order's lines
+   and compares them in Luau. Q2 and Q20 take the same two passes.
 10. **Composite keys that include an edge.** A unique index takes fields
     only, so `(L_ORDERKEY, L_LINENUMBER)` cannot be unique.
 11. **String patterns.** A `LIKE` prefix works as a range on an index. A

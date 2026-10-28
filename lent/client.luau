@@ -1082,8 +1082,20 @@ local function edge_name(rest: string): string
     return string.lower(string.sub(rest, 1, 1)) .. string.sub(rest, 2)
 end
 
--- queryPosts(), hasPosts(), hasPostsWith(fn) and withPosts(fn) name the edge
--- posts in the method name.
+-- The has or hasNo call that a has method name such as hasNoPostsWith asks
+-- for on q's table, and the edge it names. An edge whose own name starts
+-- with "no", such as noFly, keeps hasNoFly as its has method.
+local function has_method(q: any, rest: string): (string, string)
+    local after = string.match(rest, "^No(%u.*)$")
+    if after and q.tbl.edgeByName[edge_name(rest)] == nil then
+        return "hasNo", edge_name(after)
+    end
+    return "has", edge_name(rest)
+end
+
+-- queryPosts(), hasPosts(), hasPostsWith(fn), hasNoPosts(),
+-- hasNoPostsWith(fn) and withPosts(fn) name the edge posts in the method
+-- name.
 Query.__index = function(_, k)
     local m = Query[k]
     if m ~= nil or type(k) ~= "string" then
@@ -1101,13 +1113,15 @@ Query.__index = function(_, k)
             if type(fn) ~= "function" then
                 fail(self.tbl.where .. " query " .. k .. " takes a function, got " .. tostring(fn))
             end
-            return self:has(edge_name(rest), fn)
+            local method, name = has_method(self, rest)
+            return self[method](self, name, fn)
         end
     end
     rest = string.match(k, "^has(%u.*)$")
     if rest then
         return function(self)
-            return self:has(edge_name(rest))
+            local method, name = has_method(self, rest)
+            return self[method](self, name)
         end
     end
     rest = string.match(k, "^with(%u.*)$")
@@ -1406,7 +1420,7 @@ function matches(q: any, r: any): boolean
         return false
     end
     for _, h in q.checks do
-        if not has_link(q, h, r.id) then
+        if has_link(q, h, r.id) == h.negate then
             return false
         end
     end
@@ -1596,8 +1610,10 @@ end
 -- index_plan, plus how each has() check runs. A check whose filter reads
 -- part of its table drives: it reads the matching rows first and collects
 -- the rows that link to them. Other checks probe each candidate row's
--- edges. When q itself would read its whole table, the first driving check
--- supplies its rows.
+-- edges. When q itself would read its whole table, the first driving has
+-- check supplies its rows. A driving hasNo check reads its linked rows the
+-- same way and keeps the rows outside them, so it filters and never
+-- supplies rows.
 -- Validates q's cursor and, when the read comes in cursor order, starts it
 -- at the cursor's key.
 local function from_cursor(q: any, p: any, parts: { string })
@@ -1650,8 +1666,9 @@ local function plan(q: any): any
     for _, h in q.checks do
         local sp = h.sub and plan(h.sub)
         h.drive = sp ~= nil and not sp.full
-        local part = "has " .. h.e.name .. (h.drive and " from (" .. sp.name .. ")" or "")
-        if h.drive and p.full and p.via == nil then
+        local part = (h.negate and "has no " or "has ") .. h.e.name
+            .. (h.drive and " from (" .. sp.name .. ")" or "")
+        if h.drive and not h.negate and p.full and p.via == nil then
             p.via, p.full = h, false
             p.ordered = q.sortField == nil or q.sortField == "id"
             parts[1] = part .. (p.ordered and "" or " then sort")
@@ -2645,17 +2662,16 @@ function View:query(params: any?): any
                        viewOf = { view = self.view, c = self.c, params = params } })
 end
 
--- Keeps the rows that link to at least one row through edge `name`. With
--- fn, the linked row must also match the query fn(q) builds, from where,
--- has and using calls; fn may answer q or nothing.
-function Query:has(name: string, fn: ((any) -> any)?): any
-    local tbl = self.tbl
-    rows_only(self, "has")
+-- Adds a has check through edge `name` to q, as the call `call` (has or
+-- hasNo) asks: `negate` keeps the rows the check would leave out.
+local function add_check(q: any, call: string, name: string, fn: any, negate: boolean): any
+    local tbl = q.tbl
+    rows_only(q, call)
     local e = find_edge(tbl, name)
     local sub
     if fn ~= nil then
         if type(fn) ~= "function" then
-            fail(tbl.where .. " query has takes a function, got " .. tostring(fn))
+            fail(tbl.where .. " query " .. call .. " takes a function, got " .. tostring(fn))
         end
         -- the far table's query rules leave has alone, as Go ent's edge
         -- predicates do, so rules may filter with has
@@ -2663,12 +2679,26 @@ function Query:has(name: string, fn: ((any) -> any)?): any
         sub.edgeOf = { tbl = tbl, e = e }
         sub = fn(sub) or sub
         if sub.sortField or sub.lim or sub.skip ~= 0 or #sub.loads > 0 or sub.cur then
-            fail(tbl.where .. " query has " .. name .. " filters rows with where, has and"
-                .. " using; order, limit, offset, after and with have no effect there")
+            fail(tbl.where .. " query " .. call .. " " .. name .. " filters rows with where,"
+                .. " has and using; order, limit, offset, after and with have no effect there")
         end
     end
-    self.checks[#self.checks + 1] = { e = e, sub = sub }
-    return self
+    q.checks[#q.checks + 1] = { e = e, sub = sub, negate = negate }
+    return q
+end
+
+-- Keeps the rows that link to at least one row through edge `name`. With
+-- fn, the linked row must also match the query fn(q) builds, from where,
+-- has and using calls; fn may answer q or nothing.
+function Query:has(name: string, fn: ((any) -> any)?): any
+    return add_check(self, "has", name, fn, false)
+end
+
+-- Keeps the rows that link to no row through edge `name`, as SQL's NOT
+-- EXISTS does. With fn, it keeps the rows that link to no row matching the
+-- query fn(q) builds, so rows with only other links stay.
+function Query:hasNo(name: string, fn: ((any) -> any)?): any
+    return add_check(self, "hasNo", name, fn, true)
 end
 
 -- Loads the rows each answered row links to through edge `name` into

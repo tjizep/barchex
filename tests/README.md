@@ -54,8 +54,10 @@ beside a development server.
   `desc` query reads to check that it stops at the limit, and checks the
   keys and values the paged `lay.scan_values` scans give. It also links,
   follows and unlinks edges, checks that `delete` removes a row's edges, runs
-  `has` filters both ways and nested, loads edges with `with`, pages with
-  `cursor` and `after` in each order, and checks the query and edge errors.
+  `has` filters both ways and nested, runs `hasNo` filters, including one
+  beside a driving `has` and an edge named `noFly`, loads edges with `with`,
+  pages with `cursor` and `after` in each order, and checks the query and
+  edge errors.
 - `test_query_writes.py` checks query-wide `update` and `delete`, their
   affected-row counts, filters, edge follows, order and pagination. It
   checks hooks, rules, index and edge upkeep, rollback and caught errors,

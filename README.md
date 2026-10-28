@@ -1101,6 +1101,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `follow(edge, ...)`, `query<Edge>()` | a query over the rows the matches reach through the edges, hop by hop; `follow("a.b")` equals `follow("a", "b")` |
 | `has(edge)`, `has<Edge>()` | keeps rows with at least one link through `edge` |
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
+| `hasNo(edge)`, `hasNo<Edge>()`, `hasNo(edge, fn)`, `hasNo<Edge>With(fn)` | keeps the rows that `has` with the same arguments leaves out, as SQL's `NOT EXISTS` does |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
 | `whereEdge(field, op, value)`, `whereEdge(fn)`, `whereEdge(expr, params)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
 | `links(edge)` | a query over the links of the matches through an `edge.to` or `edge.from`, one row per link holding `from`, `to` and the link's values |
@@ -1376,6 +1377,8 @@ c.User:query():hasPostsWith(function(p) p:where("stars", ">=", 5) end):all()
 c.User:query():withPosts(function(p) p:order("stars", "desc"):limit(3) end):all()
 -- each post with its author in p.author, a row or nil
 c.Post:query():withAuthor():all()
+-- users without a post of 5 stars or more, as SQL's NOT EXISTS
+c.User:query():hasNoPostsWith(function(p) p:where("stars", ">=", 5) end):all()
 ```
 
 A `has` filter that reads part of its table through an index runs first,
@@ -1385,6 +1388,34 @@ edges of each candidate row, which `explain` shows as `has posts`. For a
 path edge, the first way walks the hops backwards from the matches, and the
 second stops at the first matching row each candidate reaches. A `has`
 filter with `order`, `limit`, `offset` or `with` raises an error.
+
+`hasNo` keeps a row when no link through the edge reaches a matching row,
+so rows without links stay. Its filter takes the same calls as a `has`
+filter. A `hasNo` filter that reads part of its table through an index
+also runs first, and its matches mark the rows to leave out; the candidates
+still come from the rest of the query. `explain` shows `has no posts` or
+`has no posts from (by_stars range stars)`. For an edge whose own name
+starts with `no`, such as `noFly`, `hasNoFly()` keeps its `has` meaning;
+call `hasNo("noFly")` or `hasNoNoFly()` for the negation.
+
+A correlated subquery, which SQL runs once per outer row, runs as two
+passes: the first computes the per-row values with `groupBy` and keeps them
+by id, and the second compares each row with its value. Load the linked
+row with `with` so the second pass can read its id:
+
+```lua
+-- posts with more stars than their author's average
+local avg = {}
+for _, g in c.Post:query():groupBy("author"):aggregate {
+    stars = { fn = "avg", field = "stars" },
+} do
+    if g.author then avg[g.author] = g.stars end
+end
+local above = {}
+for _, p in c.Post:query():withAuthor():all() do
+    if p.author and p.stars > avg[p.author.id] then above[#above + 1] = p end
+end
+```
 
 `with` runs after the outer query's `limit`, one query per answered row,
 and only for `all` and `first`. An edge with one row at its far end loads a

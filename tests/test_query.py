@@ -111,6 +111,27 @@ function steps.joins(c)
     }
 end
 
+-- hasNo() keeps the rows without a matching link
+function steps.anti(c)
+    local U, P = c.User, c.Post
+    c.User:link("noFly", 3, 4)
+    return {
+        ids(U:query():hasNoPosts()),
+        ids(U:query():hasNoPostsWith(function(p) p:where("stars", "=", 5) end)),
+        ids(U:query():hasNoPostsWith(function(p) p:where("stars", "<", 4) end)),
+        ids(U:query():where("name", "=", "ann"):hasNoPosts()),
+        ids(P:query():hasNoAuthorWith(function(u) u:where("age", ">", 35) end)),
+        ids(U:query():hasPosts():hasNoFriends()),
+        ids(U:query():hasNoFriends():hasPostsWith(function(p) p:where("stars", "=", 5) end)),
+        ids(U:query():hasNoFriendsWith(function(f) f:hasPosts() end)),
+        ids(U:query():hasFriendsWith(function(f) f:hasNoPosts() end)),
+        ids(U:query():hasNo("posts")),
+        tostring(U:query():hasNoPosts():count()),
+        ids(U:query():hasNoFly()),
+        ids(U:query():hasNoNoFly()),
+    }
+end
+
 -- cursor pages: each walk answers its plan, then each page's ids
 function steps.pages(c)
     local U = c.User
@@ -198,6 +219,11 @@ local errors = {
     hasorder = function(c) c.User:query():hasPostsWith(function(p) p:order("stars") end) end,
     hasfn = function(c) c.User:query():hasPostsWith() end,
     hasedge = function(c) c.User:query():hasLikes() end,
+    hasnofn = function(c) c.User:query():hasNoPostsWith() end,
+    hasnoorder = function(c)
+        c.User:query():hasNoPostsWith(function(p) p:limit(1) end)
+    end,
+    hasnoedge = function(c) c.User:query():hasNoLikes() end,
     withfn = function(c) c.User:query():withPosts(3) end,
     cursor = function(c) c.User:query():after("zz"):all() end,
     cursororder = function(c)
@@ -221,7 +247,8 @@ function call(step, mode)
                 fields = { lent.field.string "email":unique(), lent.field.string "name",
                            lent.field.int "age":optional() },
                 indexes = { lent.index("name", "age"), lent.index("age") },
-                edges = { lent.edge.to "posts" "Post", lent.edge.to "friends" "User" },
+                edges = { lent.edge.to "posts" "Post", lent.edge.to "friends" "User",
+                          lent.edge.to "noFly" "User" },
             },
             lent.schema "Post" {
                 id = "int",
@@ -343,6 +370,29 @@ def test_has_filters_and_with_loads(client, mode):
 
 
 @pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
+def test_has_no_keeps_rows_without_links(client, mode):
+    setup(client, "query_anti_" + mode)
+    assert client.execute_command("CALLF", "QUERYAPP", "anti", mode) == [
+        "3,4,5,6 id, has no posts",
+        # a filter that reads part of Post finds the users to leave out
+        "3,4,5,6 id, has no posts from (by_stars = stars)",
+        "2,3,4,5,6 id, has no posts from (by_stars range stars)",
+        "6 by_name_age = name, has no posts",
+        "3 id, has no author from (by_age range age)",
+        "2 id, has posts, has no friends",
+        # only a has check supplies rows; hasNo filters them
+        "2 has posts from (by_stars = stars), has no friends",
+        "2,3,4,5,6 id, has no friends",
+        "1 id, has friends",
+        "3,4,5,6 id, has no posts",
+        "4",
+        # an edge named noFly keeps hasNoFly as its has method
+        "3 id, has noFly",
+        "1,2,4,5,6 id, has no noFly",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["optimistic", "pessimistic"])
 def test_cursor_pages(client, mode):
     setup(client, "query_pages_" + mode)
     assert client.execute_command("CALLF", "QUERYAPP", "pages", mode) == [
@@ -372,6 +422,9 @@ def test_cursor_pages(client, mode):
     ("hasorder", "LENT table User query has posts filters rows with where, has and using"),
     ("hasfn", "LENT table User query hasPostsWith takes a function, got nil"),
     ("hasedge", "LENT table User has no edge likes"),
+    ("hasnofn", "LENT table User query hasNoPostsWith takes a function, got nil"),
+    ("hasnoorder", "LENT table User query hasNo posts filters rows with where, has and using"),
+    ("hasnoedge", "LENT table User has no edge likes"),
     ("withfn", "LENT table User query with takes a function, got 3"),
     ("cursor", "LENT table User query after takes a cursor from cursor\\(\\), got zz"),
     ("cursororder", "LENT table User query cursor follows order age asc, and the query orders by name asc"),
