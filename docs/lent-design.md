@@ -12,25 +12,25 @@ remains.
 
 | part | module | status |
 |---|---|---|
-| key codec | `lent.KEYCODEC` | built, see [README](../README.md#what-it-contains) |
-| row codecs | `lent.ROWCODEC` | built, see [README](../README.md#what-it-contains) |
-| schema language and field ids | `lent.SCHEMA` | built, see [README](../README.md#what-it-contains) |
-| storage layout | `lent.LAYOUT` | built, see [README](../README.md#what-it-contains) |
-| graph catalog and migrations with paged index builds | `lent.MIGRATE` | built, see [README](../README.md#what-it-contains) |
-| create, get, update and delete with index upkeep | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| bulk create and unique-index upsert | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| queries and edges | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| query-wide update and delete | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| privacy policies: query and mutation rules with a viewer | `lent.SCHEMA`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| computed fields, computed on read or stored and filled by `migrate` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [README](../README.md#what-it-contains) |
-| aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| edge fields: values stored on a link | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| path edges: `edge.through`, stored or not, and multi-hop `follow` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
-| expression filters: `where("age > 10 and salary < max", params)` | `lent.EXPR`, `lent.CLIENT` | built, see [README](../README.md#what-it-contains) |
+| key codec | `lent.KEYCODEC` | built, see [codecs](lent/codecs.md) |
+| row codecs | `lent.ROWCODEC` | built, see [codecs](lent/codecs.md) |
+| schema language and field ids | `lent.SCHEMA` | built, see [schema](lent/schema.md) |
+| storage layout | `lent.LAYOUT` | built, see [codecs](lent/codecs.md) |
+| graph catalog and migrations with paged index builds | `lent.MIGRATE` | built, see [migrations](lent/migrate.md) |
+| create, get, update and delete with index upkeep | `lent.CLIENT` | built, see [client](lent/client.md) |
+| bulk create and unique-index upsert | `lent.CLIENT` | built, see [client](lent/client.md#create-many-rows-and-upsert) |
+| queries and edges | `lent.CLIENT` | built, see [queries](lent/queries.md) |
+| query-wide update and delete | `lent.CLIENT` | built, see [queries](lent/queries.md#update-and-delete-by-query) |
+| edge joins: `has`, `has<Edge>With` and `with` eager loading | `lent.CLIENT` | built, see [queries](lent/queries.md#joins-through-edges) |
+| cursor pagination: `cursor` and `after` | `lent.CLIENT` | built, see [queries](lent/queries.md#cursor-pages) |
+| value rules, `time` fields and hooks | `lent.SCHEMA`, `lent.CLIENT` | built, see [schema](lent/schema.md#value-rules) |
+| privacy policies: query and mutation rules with a viewer | `lent.SCHEMA`, `lent.CLIENT` | built, see [schema](lent/schema.md#privacy-policies) |
+| computed fields, computed on read or stored and filled by `migrate` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [schema](lent/schema.md#computed-fields) |
+| enum, JSON and bytes fields | `lent.SCHEMA`, `lent.ROWCODEC`, `lent.VALUES` | built, see [schema](lent/schema.md#enum-bytes-and-json-fields) |
+| aggregates: `sum`, `min`, `max`, `aggregate` over fields or `value` functions, and `groupBy` | `lent.CLIENT` | built, see [queries](lent/queries.md#aggregates) |
+| edge fields: values stored on a link | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [client](lent/client.md#edge-fields) |
+| path edges: `edge.through`, stored or not, and multi-hop `follow` | `lent.SCHEMA`, `lent.MIGRATE`, `lent.CLIENT` | built, see [client](lent/client.md#path-edges) |
+| expression filters: `where("age > 10 and salary < max", params)` | `lent.EXPR`, `lent.CLIENT` | built, see [queries](lent/queries.md#expression-filters) |
 
 ## What barch provides
 
@@ -135,7 +135,7 @@ building indexes current; a building unique index checks the table for
 duplicates, including rows beyond its cursor. Old entries are removed
 before a replacement builds, and row writes to an affected table are
 refused until its pending drops finish. The last build page commits its
-entries and readiness together. See the [migration reference](../README.md#what-it-contains)
+entries and readiness together. See the [migration reference](lent/migrate.md)
 for limits and recovery.
 
 `plan` compares the stored schema with the declaration. `apply` retains the

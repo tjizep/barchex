@@ -69,4 +69,4 @@ CALLF BLOG timeline cy@x         -> 1) "019a1f3c-7d35-7f19-a4d6-0b1c2d3e4f50 1 h
 | `LENT table User index by_email is unique, and row <id> already has email=<email>` | `user` reuses an email |
 
 A data command that fails changes nothing. For migration recovery, follow
-the [paged migration rules](../../README.md#what-it-contains).
+the [paged migration rules](../../docs/lent/migrate.md).
