@@ -11,7 +11,7 @@ the answers:
 | file | workload | queries checked |
 |---|---|---|
 | `tests/test_tpch.py` | TPC-H, 8 tables, 220 line items | Q1, Q3, Q4, Q6, Q10, Q11, Q12, Q13, Q14, Q15, Q18 |
-| `tests/test_nyc_taxi.py` | yellow taxi trips and zones, 300 trips | the four benchmark queries and a group by pickup borough |
+| `tests/test_nyc_taxi.py` | yellow taxi trips and zones, 300 trips | the four benchmark queries, Q4 in pages, and a group by pickup borough |
 
 Run them with the rest of the suite, or alone:
 
@@ -34,6 +34,8 @@ The main limits, in order of impact:
    function call runs for 1 s by default and at most 30 s. A TPC-H
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
+   `aggregatePage` splits the read across calls, so a month of trips takes
+   about 50 seconds of calls; column formats would shorten that.
 2. **Missing query forms.** Correlated subqueries take two passes in
    Luau: one keeps a value per row, and the other compares each row with
    it.
@@ -155,10 +157,11 @@ section is based on the schema text and has no test.
 Each entry names the feature, the workloads that need it, and the TODO
 item it belongs to.
 
-1. **Aggregates over large tables.** Every taxi query and most TPC-H
-   queries read more rows than one call allows. Aggregates need partial
-   results that continue across calls, as paged migrations do. This is the
-   analytics item; column formats reduce the cost per row.
+1. **Aggregates over large tables.** Done: `aggregatePage` reads one
+   page of rows per call and answers a state that the next call continues
+   from, as paged migrations do, and the last page answers what `aggregate`
+   answers. The taxi test runs Q4 in pages of 64 trips. Column formats
+   would reduce the cost per row.
 2. **`count()` reads rows.** An unfiltered `count()` decodes every row,
    at the same speed as a sum. A key count over the table or an index range
    would answer it without decoding.

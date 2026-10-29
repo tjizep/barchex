@@ -1141,6 +1141,7 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
 | `groupBy(...):having(cond, params)`, `:order(name, dir)`, `:limit(n)`, `:offset(n)` | filters, orders and pages the groups before `aggregate(spec)` answers them |
+| `aggregatePage(spec, state, pageSize)`, `groupBy(...):aggregatePage(spec, state, pageSize)` | reads one page of the rows and answers a report; the last page's report holds what `aggregate` answers; see paged aggregates below |
 | `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
 | `delete()` | deletes the selected rows and answers the number it removed |
 | `explain()` | the plan, such as `by_name_age = name range age` or `edge customer_likes in (by_color = color)` |
@@ -1399,6 +1400,59 @@ Aggregates run over the rows the query selects after its filters, order,
 offset, limit and cursor, so `order("stars", "desc"):limit(10):sum("stars")`
 sums the top ten. They read and hold the same rows `all()` would, so a large
 selection costs what `all()` costs.
+
+For a selection too large for one function call, use `aggregatePage` on a
+query or a `groupBy`. Each call reads one page of rows and answers a report.
+Pass the report's `state` to the next call, in the same function call or a
+later one, until `done` is `true`. The last report holds the answer:
+
+```lua
+-- state is nil for the first page, then the state the last call answered
+local r = c.Trip:query():groupBy("passengers")
+    :aggregatePage({ trips = { fn = "count" } }, state)
+if r.done then
+    -- r.result holds the groups, as aggregate answers them
+else
+    -- answer r.state, and pass it to the next call
+end
+```
+
+| report field | meaning |
+|---|---|
+| `done` | `true` on the call that reads the last page |
+| `processed` | the rows this call read, at most the page size |
+| `state` | when `done` is `false`, hex text for the next call |
+| `result` | when `done` is `true`, what `aggregate` answers: the aggregate row, or the group rows after `having`, `order`, `limit` and `offset` |
+
+`pageSize` defaults to `10000` and takes whole numbers from `1` to
+`1000000`. Choose a page that each call finishes within the function
+deadline, and reduce it if a call times out.
+
+Pages read the index or table in key order. After `follow`, or a `has`
+that reads its matches first, pages read the linked ids in id order. The
+query's `order` does not change an aggregate, so pages ignore it. A query
+with `limit`, `offset` or `after` raises
+`reads every matching row, so the query takes no limit, offset or after`.
+Links and view queries raise their `reads table rows` error; aggregate those
+in one call.
+
+The state holds each group's running values, and each value a `distinct`
+aggregate has seen, so it grows with the number of groups and distinct
+values, and each call decodes and encodes it. Use `aggregatePage` when the
+groups are few, such as totals per region or per year. `follow` and a `has`
+that reads its matches first collect their linked ids again on every call.
+
+Calls in separate function calls read separate transactions, so writes
+between them change the answer. A row after the last page read counts as it
+is when its page reads it. A row already read keeps the values it had then,
+even after an update or delete. Keep writers away from the selection until
+the last page for an answer from one moment.
+
+A state works only with the query that answered it: the same table, schema
+version, plan, group keys, aggregates and filter values. Any other state
+raises `state comes from another query, aggregate or schema version; start
+again without a state`. A migration between pages ends a run the same way;
+start again without a state.
 
 `has` and `with` join through edges:
 

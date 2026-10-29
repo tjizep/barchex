@@ -1356,6 +1356,24 @@ local function cursor_order(q: any): (string, string)
     return q.sortField or "id", q.desc and "desc" or "asc"
 end
 
+-- Bytes as lowercase hex digits, which travel through any reply or
+-- argument.
+local function to_hex(raw: string): string
+    return (string.gsub(raw, ".", function(ch)
+        return string.format("%02x", string.byte(ch))
+    end))
+end
+
+-- The bytes of hex text from to_hex, or nil for other text.
+local function from_hex(text: any): string?
+    if type(text) ~= "string" or #text % 2 ~= 0 or string.find(text, "[^0-9a-f]") then
+        return nil
+    end
+    return (string.gsub(text, "..", function(h)
+        return string.char(tonumber(h, 16) :: number)
+    end))
+end
+
 -- A cursor for the rows after `row` in this query's order. Pass it to
 -- after() on the same query to read the next page.
 function Query:cursor(row: any): string
@@ -1365,11 +1383,8 @@ function Query:cursor(row: any): string
         fail(tbl.where .. " query cursor takes a row, got " .. tostring(row))
     end
     local field, dir = cursor_order(self)
-    local raw = kc.pack({ "string", "string", kind_of(tbl, field), lay.id_kind(tbl.t) },
-                        { field, dir, row[field], row.id })
-    return (string.gsub(raw, ".", function(ch)
-        return string.format("%02x", string.byte(ch))
-    end))
+    return to_hex(kc.pack({ "string", "string", kind_of(tbl, field), lay.id_kind(tbl.t) },
+                          { field, dir, row[field], row.id }))
 end
 
 -- Keeps the rows after the cursor's row in the query's order, which is id
@@ -1378,10 +1393,8 @@ function Query:after(cursor: string): any
     local tbl = self.tbl
     rows_only(self, "after")
     local ok, values = false, nil
-    if type(cursor) == "string" and #cursor % 2 == 0 and not string.find(cursor, "[^0-9a-f]") then
-        local raw = string.gsub(cursor, "..", function(h)
-            return string.char(tonumber(h, 16) :: number)
-        end)
+    local raw = from_hex(cursor)
+    if raw then
         ok, values = pcall(kc.unpack, raw, 4)
     end
     if not ok or type(values[1]) ~= "string" or type(values[2]) ~= "string" then
@@ -1930,7 +1943,11 @@ end
 
 -- The matching rows, in order, after offset and limit, with their eager
 -- loaded edges when `loading`.
-local function rows(q: any, loading: boolean?): { any }
+-- The rows q matches. With `page`, it reads one page of them for
+-- aggregatePage: at most page.budget keys or linked ids after page.from, in
+-- key or id order. It sets page.last to the last one read, page.seen to how
+-- many it read, and page.more when more remain.
+local function rows(q: any, loading: boolean?, page: any?): { any }
     if q.tbl.linksOf then
         return link_rows(q)
     end
@@ -1938,7 +1955,7 @@ local function rows(q: any, loading: boolean?): { any }
         return view_rows(q)
     end
     local tbl = q.tbl
-    local p = plan(q)
+    local p = page and page.plan or plan(q)
     prepare(q)
     local idset = q.idset
     local l = q.edgeOf
@@ -1998,6 +2015,9 @@ local function rows(q: any, loading: boolean?): { any }
                 over = true
                 return true
             end
+            if page then
+                page.last, page.seen = k, seen
+            end
             local pk = if primary then lay.row_pk(tbl.t, k) else lay.pk_of(tbl.t, ix.ix, k, v)
             if only and not only[pk] then
                 return false
@@ -2025,7 +2045,7 @@ local function rows(q: any, loading: boolean?): { any }
         return not over
     end
     local done = false
-    if idset and p.within and #idset > 0 and want ~= 0 then
+    if idset and p.within and #idset > 0 and want ~= 0 and page == nil then
         -- reading more index keys than there are linked rows would cost
         -- more than reading the rows, unless using() named the index
         order_by(p.within.ordered)
@@ -2040,13 +2060,36 @@ local function rows(q: any, loading: boolean?): { any }
     end
     if not done then
         order_by(p.ordered)
-        if idset then
+        if idset and page then
+            -- a page reads the linked rows in id order, after the last one
+            -- the previous page read
+            local ids = table.clone(idset)
+            table.sort(ids)
+            for _, pk in ids do
+                if page.from == nil or pk > page.from then
+                    if page.seen == page.budget then
+                        page.more = true
+                        break
+                    end
+                    page.last, page.seen = pk, page.seen + 1
+                    consider(pk)
+                end
+            end
+        elseif idset then
             local n = #idset
             for i = 1, n do
                 if consider(idset[back and n + 1 - i or i]) then
                     break
                 end
             end
+        elseif page then
+            if page.from then
+                local lo = kc.after(page.from) :: string
+                if lo > p.lo then
+                    p.lo = lo
+                end
+            end
+            page.more = not scan_index(p, nil, page.budget)
         elseif want ~= 0 then
             scan_index(p)
         end
@@ -2419,10 +2462,11 @@ local function order_groups(tbl: any, keys: { any }, aggs: { any }, orders: { an
     end)
 end
 
--- One row per group of q's rows, with the keys' values and each aggregate
--- of spec. `shape` holds the having, order, offset and limit calls of a
--- groupBy; without order calls, groups come in the order of their keys.
-local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
+-- An aggregate call over q's rows: the checked aggregates of spec in name
+-- order, the keys and their kinds, the having tests of `shape`, a memo per
+-- key for the linked rows its path reads, and the groups found so far, by
+-- key text and in a list.
+local function aggregation(q: any, keys: { any }, spec: any, shape: any?): any
     local tbl = q.tbl
     if type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
@@ -2431,6 +2475,9 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     for name, s in spec do
         aggs[#aggs + 1] = aggregate_spec(tbl, name, s)
     end
+    table.sort(aggs, function(a, b)
+        return a.name < b.name
+    end)
     local kinds = {}
     for i, k in keys do
         if spec[k.name] ~= nil then
@@ -2450,21 +2497,33 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
         end
         memos[i] = memo
     end
-    local groups, list = {}, {}
-    for _, r in rows(q) do
+    return { tbl = tbl, keys = keys, aggs = aggs, kinds = kinds, tests = tests, memos = memos,
+             shape = shape, groups = {}, list = {} }
+end
+
+-- The group of agg with key text `key` and key values `values`, which it
+-- adds when agg has none.
+local function group_of(agg: any, key: string, values: { any }): any
+    local g = agg.groups[key]
+    if g == nil then
+        g = { key = key, values = values, acc = {}, seen = {} }
+        agg.groups[key] = g
+        agg.list[#agg.list + 1] = g
+    end
+    return g
+end
+
+-- Adds each row of `list` to its group's running values.
+local function fold_rows(agg: any, list: { any })
+    local keys = agg.keys
+    for _, r in list do
         local values = {}
         for i, k in keys do
-            values[i] = key_value(k, r, memos[i])
+            values[i] = key_value(k, r, agg.memos[i])
         end
         -- key text sorts groups the way an index sorts their values
-        local key = kc.pack(kinds, values)
-        local g = groups[key]
-        if g == nil then
-            g = { key = key, values = values, acc = {}, seen = {} }
-            groups[key] = g
-            list[#list + 1] = g
-        end
-        for _, a in aggs do
+        local g = group_of(agg, kc.pack(agg.kinds, values), values)
+        for _, a in agg.aggs do
             local seen
             if a.distinct then
                 seen = g.seen[a.name] or {}
@@ -2473,6 +2532,13 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
             g.acc[a.name] = fold(a, g.acc[a.name], r, seen)
         end
     end
+end
+
+-- One row per group of agg, with the keys' values and each aggregate. The
+-- having, order, offset and limit calls of agg's shape apply; without order
+-- calls, groups come in the order of their keys.
+local function group_rows(agg: any): { any }
+    local keys, aggs, shape, list = agg.keys, agg.aggs, agg.shape, agg.list
     if #keys == 0 and #list == 0 then
         list[1] = { key = "", values = {}, acc = {} }
     end
@@ -2489,7 +2555,7 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
             row[a.name] = result(a, g.acc[a.name])
         end
         local keep = true
-        for _, test in tests do
+        for _, test in agg.tests do
             if not test(row) then
                 keep = false
                 break
@@ -2503,7 +2569,7 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
         return out
     end
     if #shape.orders > 0 then
-        order_groups(tbl, keys, aggs, shape.orders, out)
+        order_groups(agg.tbl, keys, aggs, shape.orders, out)
     end
     if shape.skip > 0 or shape.lim ~= nil then
         local first = shape.skip + 1
@@ -2513,10 +2579,205 @@ local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     return out
 end
 
+-- One row per group of q's rows, with the keys' values and each aggregate
+-- of spec. `shape` holds the having, order, offset and limit calls of a
+-- groupBy.
+local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
+    local agg = aggregation(q, keys, spec, shape)
+    fold_rows(agg, rows(q))
+    return group_rows(agg)
+end
+
+-- paged aggregates -------------------------------------------------------------
+
+-- A paged aggregate's state is hex text of values in key encoding: STATE,
+-- the query's mark, the last key or linked id read, the number of groups,
+-- and for each group its key text and each aggregate's running value. An
+-- avg runs as its sum and count, and a distinct aggregate adds the number
+-- of values it has seen, then each value's Luau type and key.
+local STATE = "lent.aggregate.1"
+local PAGE_SIZE, PAGE_MAX = 10000, 1000000
+
+-- The key text of a state value: a number, string, boolean or nil, with
+-- "n" for NaN, which key encoding refuses.
+local function state_value(v: any): string
+    if v ~= v then
+        return "n"
+    end
+    local t = type(v)
+    if t == "number" then
+        return kc.encode("float", v)
+    elseif t == "string" then
+        return kc.encode("string", v)
+    elseif t == "boolean" then
+        return kc.encode("bool", v)
+    end
+    return "-"
+end
+
+local function mark_value(v: any): string
+    if type(v) == "table" then
+        return VALUES.json(v)
+    end
+    return tostring(v)
+end
+
+-- What a state must match to continue: the table and schema version, the
+-- plan, the group keys, the aggregates and the conditions' values.
+local function page_mark(q: any, p: any, agg: any): string
+    local parts = { q.tbl.where, tostring(q.tbl.version), p.name }
+    for _, k in agg.keys do
+        parts[#parts + 1] = "key " .. k.name
+    end
+    for _, a in agg.aggs do
+        parts[#parts + 1] = a.name .. " " .. a.fn .. " "
+            .. (a.field or (a.value and "(value)") or "") .. (a.distinct and " distinct" or "")
+    end
+    for _, c in q.conds do
+        parts[#parts + 1] = c.field .. " " .. c.op .. " " .. mark_value(c.value)
+    end
+    return table.concat(parts, "\n")
+end
+
+-- The state text of agg after a page that read up to `last`.
+local function encode_state(agg: any, mark: string, last: any): string
+    local parts = { state_value(STATE), state_value(mark), state_value(last),
+                    state_value(#agg.list) }
+    for _, g in agg.list do
+        parts[#parts + 1] = state_value(g.key)
+        for _, a in agg.aggs do
+            local acc = g.acc[a.name]
+            if a.fn == "avg" then
+                parts[#parts + 1] = state_value(acc and acc.sum)
+                parts[#parts + 1] = state_value(acc and acc.n)
+            else
+                parts[#parts + 1] = state_value(acc)
+            end
+            if a.distinct then
+                local at, n = #parts + 1, 0
+                parts[at] = ""
+                for t, set in g.seen[a.name] or {} do
+                    for key in set do
+                        parts[#parts + 1] = state_value(t)
+                        parts[#parts + 1] = state_value(key)
+                        n += 1
+                    end
+                end
+                parts[at] = state_value(n)
+            end
+        end
+    end
+    return to_hex(table.concat(parts))
+end
+
+-- Restores agg's groups from state text and answers the last key or linked
+-- id read. Raises an error for text that is no state, or a state whose mark
+-- differs.
+local function decode_state(agg: any, text: any, mark: string, at: string): any
+    local ok, found = pcall(function()
+        local raw = from_hex(text) :: string
+        local pos = 1
+        local function value(): any
+            if string.sub(raw, pos, pos) == "n" then
+                pos += 1
+                return 0 / 0
+            end
+            local v
+            v, pos = kc.decode(raw, pos)
+            return v
+        end
+        local function count(): number
+            local n = value()
+            assert(type(n) == "number" and n >= 0 and n == math.floor(n))
+            return n
+        end
+        assert(value() == STATE)
+        local m, last = value(), value()
+        if m ~= mark then
+            -- another query's groups may not fit this one's aggregates
+            return { mark = m }
+        end
+        for _ = 1, count() do
+            local key = value()
+            assert(type(key) == "string")
+            local g = group_of(agg, key, (kc.unpack(key, #agg.keys)))
+            for _, a in agg.aggs do
+                if a.fn == "avg" then
+                    local sum, n = value(), value()
+                    g.acc[a.name] = if n == nil then nil else { sum = sum, n = n }
+                else
+                    g.acc[a.name] = value()
+                end
+                if a.distinct then
+                    local seen = {}
+                    for _ = 1, count() do
+                        local t, key = value(), value()
+                        seen[t] = seen[t] or {}
+                        seen[t][key] = true
+                    end
+                    g.seen[a.name] = seen
+                end
+            end
+        end
+        assert(pos == #raw + 1)
+        return { mark = m, last = last }
+    end)
+    if not ok then
+        fail(at .. " takes a state that an earlier aggregatePage answered, or nil to start")
+    end
+    if found.mark ~= mark then
+        fail(at .. " state comes from another query, aggregate or schema version; start again"
+            .. " without a state")
+    end
+    return found.last
+end
+
+-- One page of aggregate(q, keys, spec, shape): it reads up to pageSize keys
+-- or linked ids after those that `state` has read, and answers a report.
+local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, state: any,
+                              pageSize: any): any
+    local tbl = q.tbl
+    local at = tbl.where .. " query aggregatePage"
+    rows_only(q, "aggregatePage")
+    if q.lim ~= nil or q.skip ~= 0 or q.cur ~= nil then
+        fail(at .. " reads every matching row, so the query takes no limit, offset or after")
+    end
+    pageSize = num(pageSize)
+    if pageSize ~= nil and (type(pageSize) ~= "number" or pageSize ~= math.floor(pageSize)
+            or pageSize < 1 or pageSize > PAGE_MAX) then
+        fail(at .. " page size must be a whole number from 1 to " .. PAGE_MAX .. ", got "
+            .. tostring(pageSize))
+    end
+    -- pages read in key order, which leaves every aggregate the same
+    local pq = setmetatable(table.clone(q), Query)
+    pq.sortField, pq.desc = nil, nil
+    local agg = aggregation(pq, keys, spec, shape)
+    local p = plan(pq)
+    local mark = page_mark(pq, p, agg)
+    local last = if state == nil then nil else decode_state(agg, state, mark, at)
+    local page = { plan = p, budget = pageSize or PAGE_SIZE, from = last, seen = 0 }
+    fold_rows(agg, rows(pq, false, page))
+    if page.more then
+        return { done = false, processed = page.seen,
+                 state = encode_state(agg, mark, page.last) }
+    end
+    local out = group_rows(agg)
+    return { done = true, processed = page.seen, result = if shape then out else out[1] }
+end
+
 -- One row with each aggregate of spec over the matching rows, such as
 -- { posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } }.
 function Query:aggregate(spec: { [string]: any }): any
     return aggregate(self, {}, spec)[1]
+end
+
+-- One page of aggregate(spec), for a table too large to read in one call.
+-- It reads up to pageSize keys, 10000 by default, after those `state` has
+-- read, and answers { done, processed, state } until the last page, which
+-- answers { done = true, processed, result } with the aggregate row. Pass
+-- each state to the next call, in a later transaction if needed.
+function Query:aggregatePage(spec: { [string]: any }, state: string?, pageSize: number?): any
+    return aggregate_page(self, {}, spec, nil, state, pageSize)
 end
 
 -- The sum of `field` over the matching rows, 0 when none has a value.
@@ -2594,6 +2855,12 @@ end
 -- having, order, offset and limit calls.
 function Grouped:aggregate(spec: { [string]: any }?): { any }
     return aggregate(self.q, self.keys, spec or {}, self)
+end
+
+-- One page of aggregate(spec), as Query:aggregatePage; the last page's
+-- result holds the group rows.
+function Grouped:aggregatePage(spec: { [string]: any }?, state: string?, pageSize: number?): any
+    return aggregate_page(self.q, self.keys, spec or {}, self, state, pageSize)
 end
 
 -- Updates the selected rows in query order, with the same values and clear

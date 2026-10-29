@@ -104,6 +104,16 @@ function q.q4(c)
     return pick(groups, { "passengers", "year", "miles", "n" })
 end
 
+-- q4 in pages of p.size trips, one page per call; each call answers the
+-- state for the next one, or the groups when it read the last page
+function q.q4pages(c, p)
+    local r = c.Trip:query():groupBy("passengers", "year", "miles")
+        :order("year"):order("n", "desc")
+        :aggregatePage({ n = { fn = "count" } }, if p.state == "" then nil else p.state, p.size)
+    local rows = if r.done then pick(r.result, { "passengers", "year", "miles", "n" }) else {}
+    return simdjson.encode({ state = r.state or "", rows = rows })
+end
+
 -- trips by pickup borough, a field of the zone the origin edge links to
 function q.boroughs(c, p)
     return pick(c.Trip:query():where("pickup >= a and pickup < b", p)
@@ -227,6 +237,25 @@ def test_count_by_passengers_year_and_distance(taxi):
         from trips group by passengers, year, miles
         order by year, n desc, coalesce(passengers, -1), miles""")
     assert run("q4") == nulls(want)
+
+
+def test_count_by_passengers_year_and_distance_in_pages(taxi):
+    run, sql = taxi
+    want = sql("""
+        select passengers, cast(strftime('%Y', pickup) as int) as year,
+               cast(round(distance) as int) as miles, count(*) as n
+        from trips group by passengers, year, miles
+        order by year, n desc, coalesce(passengers, -1), miles""")
+    calls, state = 0, ""
+    while True:
+        calls += 1
+        r = json.loads(run("q4pages", {"state": state, "size": 64}))
+        if r["state"] == "":
+            break
+        state = r["state"]
+    # 300 trips in pages of 64
+    assert calls == 5
+    assert r["rows"] == nulls(want)
 
 
 def test_trips_by_pickup_borough(taxi):

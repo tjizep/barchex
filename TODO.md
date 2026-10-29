@@ -4,7 +4,7 @@ This page lists the work that remains on lent, the ORM described in
 [docs/lent-design.md](docs/lent-design.md). The schema language, migrations
 with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
-`groupBy`, edges, path edges and computed fields (each stored or not), edge
+`groupBy` and paged aggregates, edges, path edges and computed fields (each stored or not), edge
 joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
 `bytes` fields, hooks and privacy policies are built.
 
@@ -41,10 +41,11 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   values, which can be compressed. Luau buffers can pack and read the
   blocks. A query that reads a few fields of many rows then reads only
   those fields' blocks.
-- **Analytics queries.** `aggregate`, `groupBy`, `count`, `sum`, `min` and
-  `max` read every matching row in one function call. Analytics needs more
-  aggregates, filters on groups, and a way to run aggregates over tables too
-  large for one call, such as paged partial results.
+- **Analytics queries.** `aggregate` and `groupBy` take `avg`, `distinct`,
+  `having`, group order and paging, and `aggregatePage` runs them across
+  calls over tables too large for one. A state grows with its groups and
+  distinct values, so many groups need a stored partial result, such as a
+  scratch table.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.

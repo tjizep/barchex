@@ -68,6 +68,11 @@ beside a development server.
   filtered, ordered and limited queries and empty selections, aggregates of
   `value` functions, `groupBy` on fields, several fields and an edge, and the
   aggregate errors.
+- `test_aggregate_pages.py` runs `aggregatePage` over totals, groups,
+  shaped groups, ranges, equal filters, paths, `follow` and `has` in pages
+  of several sizes and checks each answer against one `aggregate` call. It
+  checks rows read per page, writes between pages, and the errors for a
+  paged query, page size and state.
 - `test_views.py` reads a view's rows through `where`, `order`, `limit`,
   `offset`, `first`, `count`, `groupBy`, `having` and the aggregates, passes
   parameters to its function, keeps only the declared fields of each row,
