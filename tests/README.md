@@ -72,6 +72,10 @@ beside a development server.
   ranges, nil and infinite values, orders, limits and offsets, and checks
   which queries read no row. It also checks a transaction's own writes and
   a policy's filter.
+- `test_planner.py` checks that a tie between indexes reads the one with
+  fewer keys, in optimistic and pessimistic transactions, that rows do not
+  depend on the index read, and that paged aggregates and cursors continue
+  when the narrower index changes between calls.
 - `test_aggregate_pages.py` runs `aggregatePage` over totals, groups,
   shaped groups, ranges, equal filters, paths, `follow` and `has` in pages
   of several sizes and checks each answer against one `aggregate` call. It

@@ -178,6 +178,28 @@ out rows with a missing value, so it is used when every one of its fields
 has an `=` filter, or when each field before the last has one and the last
 has a range. Filters on other fields are checked on each row read.
 
+When two indexes match equally well, the query counts the keys each one
+would read and uses the smaller count. Equal counts keep the index declared
+first. `explain` shows the comparison in brackets after the index it chose:
+
+```
+by_customer = customer [2 keys over by_status 38]
+```
+
+Counting has a cost in a transaction. A pessimistic transaction holds a range
+lock on each counted range until it ends, so writers to those ranges wait,
+including ranges of the index the query then skips. An optimistic transaction
+rechecks those ranges at commit, so a write to one of them makes it retry. To
+avoid this on a busy table, call `using(name)`, which reads the named index
+with no count.
+
+Key counts decide only between equal matches, so an index with one more `=`
+field wins even when another index holds fewer keys. Paged aggregates keep the
+index declared first with no count, because their state holds a place in that
+index. Queries from `follow`, `with` and `query<Edge>()` also read with no
+count. A cursor records the order's field and the row's id, so it keeps working
+when a later page reads a different index.
+
 Index keys hold `int` and `time` values up to +-2^53. A filter past that
 limit, such as `where("size", "<", 1e300)`, compares as usual, and the query
 reads every row of the table or chosen range to check it.

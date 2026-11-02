@@ -1543,6 +1543,17 @@ local function bound(kind: string, prefix: string, v: any, open: boolean?, upper
     return if (open == true) == (upper == true) then key else kc.after(key)
 end
 
+-- How many keys plan p reads.
+local function plan_keys(p: any): number
+    local n = 0
+    for _, s in p.spans or { p } do
+        if s.lo < s.hi then
+            n += barch.store.count(s.lo, s.hi)
+        end
+    end
+    return n
+end
+
 -- The key spans of `list`, value ranges of the next value after `prefix`,
 -- within lo..hi, in key order with overlapping spans merged.
 local function spans_of(kind: string, prefix: string, list: { any }, lo: string,
@@ -1573,7 +1584,8 @@ end
 
 -- How to read q: which index, the key span, and whether the keys come in
 -- the order q asks for. A plan with spans reads only those key spans of
--- lo..hi, in order.
+-- lo..hi, in order. Indexes that narrow the read equally well are compared by
+-- their key counts, unless the plan must stay the same across calls.
 local function index_plan(q: any, keys: boolean?): any
     local tbl, t = q.tbl, q.tbl.t
     if q.idset and not keys then
@@ -1603,7 +1615,7 @@ local function index_plan(q: any, keys: boolean?): any
     for _, o in q.ors do
         within[o.field] = within[o.field] or o.ranges
     end
-    local best, bestScore = nil, -1
+    local best, bestScore, tied = nil, -1, {}
     local sources = { PRIMARY }
     for _, ix in t.indexes do
         sources[#sources + 1] = ix
@@ -1637,66 +1649,93 @@ local function index_plan(q: any, keys: boolean?): any
                         .. " needs = on each of its fields, or on each before the last and a"
                         .. " range on the last")
                 end
-            elseif score > bestScore then
-                best, bestScore = { ix = ix, values = values, next = next, ordered = ordered }, score
+            elseif score >= bestScore then
+                local candidate = { ix = ix, values = values, next = next, ordered = ordered }
+                if score > bestScore then
+                    best, bestScore, tied = candidate, score, {}
+                end
+                tied[#tied + 1] = candidate
             end
         end
     end
     if best == nil then
         fail(tbl.where .. " has no index " .. tostring(q.use))
     end
-    local ix = best.ix
-    local prefix
-    if ix.primary then
-        prefix = best.values[1] and lay.row(t, best.values[1]) or lay.row(t)
-    else
-        prefix = lay.index(t, ix, best.values)
-    end
-    best.prefix, best.lo, best.hi = prefix, prefix, kc.after(prefix)
-    best.full = #best.values == 0
-    local parts = { ix.name }
-    if #best.values > 0 then
-        parts[#parts + 1] = "= " .. table.concat(ix.on, ",", 1, #best.values)
-    end
-    local span = best.next and ranges[best.next]
-    if span then
-        local kind = kind_of(tbl, best.next)
-        local lo, hi
-        for _, c in span do
-            local v = c.value
-            if c.op == ">" or c.op == ">=" then
-                v = WHOLE[kind] and math.floor(v) or v
-                lo = (lo == nil or v > lo) and v or lo
-            else
-                v = WHOLE[kind] and math.ceil(v) or v
-                hi = (hi == nil or v < hi) and v or hi
+    -- Fills in candidate c's keys and name.
+    local function finish(c: any): any
+        local ix = c.ix
+        local prefix
+        if ix.primary then
+            prefix = c.values[1] and lay.row(t, c.values[1]) or lay.row(t)
+        else
+            prefix = lay.index(t, ix, c.values)
+        end
+        c.prefix, c.lo, c.hi = prefix, prefix, kc.after(prefix)
+        c.full = #c.values == 0
+        local parts = { ix.name }
+        if #c.values > 0 then
+            parts[#parts + 1] = "= " .. table.concat(ix.on, ",", 1, #c.values)
+        end
+        local span = c.next and ranges[c.next]
+        if span then
+            local kind = kind_of(tbl, c.next)
+            local lo, hi
+            for _, f in span do
+                local v = f.value
+                if f.op == ">" or f.op == ">=" then
+                    v = WHOLE[kind] and math.floor(v) or v
+                    lo = (lo == nil or v > lo) and v or lo
+                else
+                    v = WHOLE[kind] and math.ceil(v) or v
+                    hi = (hi == nil or v < hi) and v or hi
+                end
+            end
+            -- the bounds may let in more keys than the filters keep; every row
+            -- is checked against them
+            if lo ~= nil and (type(lo) ~= "number" or math.abs(lo) ~= math.huge) then
+                c.lo = prefix .. kc.encode(kind, lo)
+                c.full = false
+            end
+            if hi ~= nil and (type(hi) ~= "number" or math.abs(hi) ~= math.huge) then
+                c.hi = kc.after(prefix .. kc.encode(kind, hi))
+                c.full = false
             end
         end
-        -- the bounds may let in more keys than the filters keep; every row
-        -- is checked against them
-        if lo ~= nil and (type(lo) ~= "number" or math.abs(lo) ~= math.huge) then
-            best.lo = prefix .. kc.encode(kind, lo)
-            best.full = false
+        local list = c.next and within[c.next]
+        if list then
+            -- only rows whose value lies in one of the ranges can match
+            c.spans = spans_of(kind_of(tbl, c.next), prefix, list, c.lo, c.hi)
+            c.full = false
         end
-        if hi ~= nil and (type(hi) ~= "number" or math.abs(hi) ~= math.huge) then
-            best.hi = kc.after(prefix .. kc.encode(kind, hi))
-            best.full = false
+        if span or list then
+            local n = c.spans and #c.spans or 1
+            parts[#parts + 1] = (n == 1 and "range " or n .. " ranges ") .. c.next
+        end
+        if not c.ordered then
+            parts[#parts + 1] = "then sort"
+        end
+        c.name = table.concat(parts, " ")
+        return c
+    end
+    -- A full read or a single row has nothing to compare, a named index is
+    -- the caller's choice, and `with` would count once per row.
+    if #tied == 1 or q.use or keys or q.fixedPlan or tbl.memory or bestScore < 2
+        or bestScore >= 1000 then
+        return finish(best)
+    end
+    for _, c in tied do
+        finish(c).keys = plan_keys(c)
+        if c.keys < best.keys then
+            best = c
         end
     end
-    local list = best.next and within[best.next]
-    if list then
-        -- only rows whose value lies in one of the ranges can match
-        best.spans = spans_of(kind_of(tbl, best.next), prefix, list, best.lo, best.hi)
-        best.full = false
+    local beaten = {}
+    for _, c in tied do
+        if c ~= best then
+            beaten[#beaten + 1] = c.ix.name .. " " .. c.keys
+        end
     end
-    if span or list then
-        local n = best.spans and #best.spans or 1
-        parts[#parts + 1] = (n == 1 and "range " or n .. " ranges ") .. best.next
-    end
-    if not best.ordered then
-        parts[#parts + 1] = "then sort"
-    end
-    best.name = table.concat(parts, " ")
+    best.name ..= " [" .. best.keys .. " keys over " .. table.concat(beaten, ", ") .. "]"
     return best
 end
 
@@ -1757,6 +1796,9 @@ local function plan(q: any): any
     local p = index_plan(q)
     local parts = { p.name }
     for _, h in q.checks do
+        if h.sub then
+            h.sub.fixedPlan = q.fixedPlan
+        end
         local sp = h.sub and plan(h.sub)
         h.drive = sp ~= nil and not sp.full
         local part = (h.negate and "has no " or "has ") .. h.e.name
@@ -2804,9 +2846,10 @@ local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, sta
         fail(at .. " page size must be a whole number from 1 to " .. PAGE_MAX .. ", got "
             .. tostring(pageSize))
     end
-    -- pages read in key order, which leaves every aggregate the same
+    -- pages read in key order, which leaves every aggregate the same, and a
+    -- state holds a place in one plan's keys
     local pq = setmetatable(table.clone(q), Query)
-    pq.sortField, pq.desc = nil, nil
+    pq.sortField, pq.desc, pq.fixedPlan = nil, nil, true
     local agg = aggregation(pq, keys, spec, shape)
     local p = plan(pq)
     local mark = page_mark(pq, p, agg)

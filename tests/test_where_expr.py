@@ -227,7 +227,7 @@ def test_like_filters_rows_and_narrows_indexes(run):
         "by_name range name", "ann",
         "by_name range name", "bob",
         "by_name 2 ranges name", "ann,eve", "eve",
-        "by_name range name",
+        "by_name range name [1 keys over by_age 3]",
         "id", "dee,eve",
         "bob",
         "ann,bob,cy",

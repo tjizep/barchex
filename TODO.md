@@ -29,11 +29,18 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   TPC-H, the taxi data and Sakila, is in
   [docs/sql-survey.md](docs/sql-survey.md); its gaps section lists the
   features to add.
-- **Statistics and a better planner.** The planner picks an index by how
-  many leading fields its filters match. Statistics such as row counts and
-  key counts per index, or key counts read at plan time, would let it pick
-  the narrower of two candidate indexes. Keep the plan predictable and show
-  the choice in `explain`.
+- **Count index keys without a conflict.** The planner breaks a tie between
+  indexes with `barch.store.count`, which takes a range lock in a pessimistic
+  transaction and joins the phantom check in an optimistic one. Counting an
+  index the query then skips can block writers or abort the transaction.
+  barch needs a count with no lock and no phantom log; lent then calls it in
+  `plan_keys`, and the cost note under Index choice in
+  `docs/lent/queries.md` goes away.
+- **Statistics for a better planner.** Key counts break ties between
+  indexes, and `explain` shows them. An `=` on one field still beats a range
+  on another with fewer keys, because only equal matches are compared.
+  Comparing every candidate needs the cheap count above or stored statistics
+  such as row counts per index. Keep the plan predictable.
 - **Column formats.** Rows are stored whole in the `binary`, `text` or
   `json` format. A column format stores each field in its own key space in
   the graph, in blocks of many rows. A block holds fixed-length values for
