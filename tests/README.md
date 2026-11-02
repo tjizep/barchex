@@ -68,6 +68,10 @@ beside a development server.
   filtered, ordered and limited queries and empty selections, aggregates of
   `value` functions, `groupBy` on fields, several fields and an edge, and the
   aggregate errors.
+- `test_count.py` compares `count()` with `#all()` over ids, `=` filters,
+  ranges, nil and infinite values, orders, limits and offsets, and checks
+  which queries read no row. It also checks a transaction's own writes and
+  a policy's filter.
 - `test_aggregate_pages.py` runs `aggregatePage` over totals, groups,
   shaped groups, ranges, equal filters, paths, `follow` and `has` in pages
   of several sizes and checks each answer against one `aggregate` call. It

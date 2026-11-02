@@ -123,10 +123,11 @@ All four are verified in `tests/test_nyc_taxi.py`. The `year` computed
 field is `lent.year(r.pickup)`.
 
 These queries read every row, so they show the size limit most clearly. In
-a run on one machine, `count()`, `sum` and each benchmark query took about
-0.5 s for 30,000 trips, and all of them ended with `FUNCTION timeout` at
-100,000 trips under the default 1 s deadline. Loading ran at about 15,000
-trips per second.
+a run on one machine, `sum` and each benchmark query took about 0.5 s for
+30,000 trips, and all of them ended with `FUNCTION timeout` at 100,000
+trips under the default 1 s deadline. Loading ran at about 15,000 trips per
+second. `count()` now reads keys, which took about 1 ms for 40,000 rows of
+a smaller test table.
 
 ## Sakila
 
@@ -162,9 +163,10 @@ item it belongs to.
    from, as paged migrations do, and the last page answers what `aggregate`
    answers. The taxi test runs Q4 in pages of 64 trips. Column formats
    would reduce the cost per row.
-2. **`count()` reads rows.** An unfiltered `count()` decodes every row,
-   at the same speed as a sum. A key count over the table or an index range
-   would answer it without decoding.
+2. **`count()` reads rows.** Done: `count()` counts keys when `=` filters
+   on an index's leading fields and ranges on the next one cover the query,
+   or when it has no filters, so its cost stays flat with table size. Other
+   filters read rows, and `aggregate` with `fn = "count"` always does.
 3. **Natural keys.** Done: `create` takes an `id`, so a table keyed by one
    positive integer or a uuid keeps its keys, and edges name rows by them.
    String and composite keys still need a unique field and a key-to-id map

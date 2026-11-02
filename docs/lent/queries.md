@@ -31,7 +31,8 @@ c.Customer:query():follow("orders.lines.product"):all()   -- follow several
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
 | `whereEdge(field, op, value)`, `whereEdge(fn)`, `whereEdge(expr, params)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
 | `links(edge)` | a query over the links of the matches through an `edge.to` or `edge.from`, one row per link holding `from`, `to` and the link's values |
-| `all()`, `first()`, `ids()`, `count()` | runs the query |
+| `all()`, `first()`, `ids()` | runs the query |
+| `count()` | answers how many rows match, after `offset` and `limit`; see [counting rows](#counting-rows) |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
 | `groupBy(...):having(cond, params)`, `:order(name, dir)`, `:limit(n)`, `:offset(n)` | filters, orders and pages the groups before `aggregate(spec)` answers them |
@@ -151,6 +152,30 @@ each linked row, so the index read costs at most as many keys as the
 follow has links. `using(name)` reads the named index to the end of its range.
 Without `order`, rows come in index order when the index is read and in id
 order otherwise.
+
+## Counting rows
+
+`count()` counts index keys and reads no row when the keys are exactly the
+matching rows, so its cost stays about the same at any table size. In one
+run over 40,000 rows, a count took 1 ms and reading the rows took 280 ms.
+
+`count()` reads keys when the query has only these filters:
+
+- no filters at all, which counts the table's rows;
+- `=` with a value on the leading fields of the chosen index;
+- ranges on the next field of that index, with finite values.
+
+An expression such as `"size >= 3"` counts as the same filter. `order`,
+`limit`, `offset` and `using` work with a key count.
+
+Any other query reads its rows and costs what `all()` costs. That includes
+a `where` function, an expression with `or`, `~=`, `= nil`, a filter on a
+field outside the index, `has`, `hasNo`, `follow`, `after`, and links and
+view queries. `explain()` shows which index a query reads. To count a large
+selection of this kind across calls, use a `count` in
+[`aggregatePage`](#paged-aggregates).
+
+`aggregate` with `fn = "count"` always reads rows.
 
 ## Cursor pages
 

@@ -1643,7 +1643,7 @@ local function index_plan(q: any, keys: boolean?): any
     else
         prefix = lay.index(t, ix, best.values)
     end
-    best.lo, best.hi = prefix, kc.after(prefix)
+    best.prefix, best.lo, best.hi = prefix, prefix, kc.after(prefix)
     best.full = #best.values == 0
     local parts = { ix.name }
     if #best.values > 0 then
@@ -2142,9 +2142,55 @@ function Query:ids(): { number }
     return list
 end
 
--- How many rows the query matches.
+-- How many keys of q's index hold exactly the rows q matches, before offset
+-- and limit, or nil when some row has to be read to tell. The plan's bounds
+-- may let in rows its filters leave out: a `>` starts at the value itself,
+-- and nil values sort before the rest of a `<` range. These bounds are exact.
+local function key_count(q: any): number?
+    if q.tbl.memory or q.idset or q.edgeOf or q.cur or #q.preds > 0 or #q.checks > 0 then
+        return nil
+    end
+    local pq = table.clone(q)
+    pq.sortField = nil
+    local p = index_plan(pq)
+    local lo, hi = p.prefix, kc.after(p.prefix) :: string
+    local equal = {}
+    for i, v in p.values do
+        equal[p.ix.on[i]] = v
+    end
+    local kind = p.next and kind_of(q.tbl, p.next)
+    for _, c in q.conds do
+        if c.value == nil or c.value ~= equal[c.field] or c.op ~= "=" then
+            local v = c.value
+            if not RANGE[c.op] or c.field ~= p.next or v == math.huge or v == -math.huge then
+                return nil
+            end
+            local upper = c.op == "<" or c.op == "<="
+            local key = bound(kind, p.prefix, v, c.op == "<" or c.op == ">", upper)
+            if upper and key < hi then
+                hi = key
+            elseif not upper and key > lo then
+                lo = key
+            end
+            local past = kc.after(p.prefix .. kc.encode(kind, nil)) :: string
+            if past > lo then
+                lo = past
+            end
+        end
+    end
+    return if lo < hi then barch.store.count(lo, hi) else 0
+end
+
+-- How many rows the query matches. When the query's filters are `=` on the
+-- leading fields of an index and ranges on the next one, it counts the
+-- index's keys and reads no row.
 function Query:count(): number
-    return #rows(self)
+    local n = key_count(self)
+    if n == nil then
+        return #rows(self)
+    end
+    local left = math.max(n - self.skip, 0)
+    return if self.lim then math.min(left, self.lim) else left
 end
 
 -- aggregates -------------------------------------------------------------------
