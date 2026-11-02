@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from .test_client import setup
@@ -26,6 +28,7 @@ local app = lent.graph {
             f.string "kind", f.int "size":optional(), f.float "price":optional(),
             f.decimal "cost":scale(2), f.string "tag":optional(),
             f.string "code":optional():unique(), f.string "note":optional(),
+            f.time "at":optional(),
             f.bool "read":computed(function()
                 reads += 1
                 return true
@@ -33,7 +36,7 @@ local app = lent.graph {
         },
         indexes = {
             lent.index("kind", "size"), lent.index("size"), lent.index("price"),
-            lent.index("cost"), lent.index("tag"),
+            lent.index("cost"), lent.index("tag"), lent.index("at"),
         },
         edges = { lent.edge.from "shelf" "Shelf":ref "items":unique() },
     },
@@ -88,6 +91,9 @@ local cases = {
     cheap = function(c) return item(c):where("cost", "<", 2) end,
     fractionOver = function(c) return item(c):where("size", ">", 2.5) end,
     fractionUnder = function(c) return item(c):where("size", "<=", 2.5) end,
+    timeOver = function(c) return item(c):where("at", ">", 3.5) end,
+    timeUnder = function(c) return item(c):where("at", "<", 3.5) end,
+    largest = function(c) return item(c):where("size", "<=", 2 ^ 53) end,
     expr = function(c) return item(c):where("size >= 3") end,
     params = function(c) return item(c):where("kind == k and size < n", { k = "y", n = 3 }) end,
     named = function(c) return item(c):using("by_tag") end,
@@ -105,6 +111,17 @@ local reading = {
     twoFields = function(c) return item(c):where("size", ">", 1):where("price", ">", 1) end,
     equalAndRange = function(c) return item(c):where("size", "=", 2):where("size", ">", 1) end,
     fractionEqual = function(c) return item(c):where("size", "=", 2.5) end,
+    timeEqual = function(c) return item(c):where("at", "=", 3.5) end,
+    hugeUnder = function(c) return item(c):where("size", "<", 1e300) end,
+    hugeOver = function(c) return item(c):where("size", ">", 1e300) end,
+    hugeEqual = function(c) return item(c):where("size", "=", 1e300) end,
+    lowOver = function(c) return item(c):where("size", ">", -1e300) end,
+    lowUnder = function(c) return item(c):where("size", "<", -1e300) end,
+    pastLargest = function(c) return item(c):where("size", "<", 2 ^ 53 + 2) end,
+    hugeTime = function(c) return item(c):where("at", ">", 1e300) end,
+    hugeId = function(c) return item(c):where("id", "=", 1e300) end,
+    idsBelow = function(c) return item(c):where("id", "<", 1e300) end,
+    afterHuge = function(c) return item(c):where("kind", "=", "x"):where("size", ">", 1e300) end,
     infinite = function(c) return item(c):where("price", "<", math.huge) end,
     allFinite = function(c) return item(c):where("price", ">", -math.huge) end,
     top = function(c) return item(c):where("price", ">=", math.huge) end,
@@ -132,6 +149,7 @@ function steps.seed(c)
             tag = if i % 3 == 0 then nil else ({ "a", "ab", "a b", "b" })[i % 4 + 1],
             code = if i % 6 == 0 then nil else "c" .. i,
             note = if i % 2 == 0 then "n" else nil,
+            at = if i % 7 == 0 then nil else i,
             shelf = if i % 3 == 0 then shelf else nil,
         }
     end
@@ -182,11 +200,12 @@ KEYS = [
     "table", "ordered", "paged", "limited", "noLimit", "past", "tailPage", "id", "noId",
     "idsOver", "idSpan", "tag", "spaced", "kind", "both", "code", "noCode", "cost", "sameTwice",
     "below", "upTo", "above", "from", "between", "empty", "afterKind", "priceOver", "priceUnder",
-    "words", "codes", "cheap", "fractionOver", "fractionUnder", "expr", "params", "named", "namedLimit",
+    "words", "codes", "cheap", "fractionOver", "fractionUnder", "timeOver", "timeUnder", "largest", "expr", "params", "named", "namedLimit",
 ]
 ROWS = [
     "other", "differs", "missing", "fn", "orExpr", "twoValues", "twoFields", "equalAndRange",
-    "fractionEqual", "infinite", "allFinite", "top", "computed", "has",
+    "fractionEqual", "timeEqual", "hugeUnder", "hugeOver", "hugeEqual", "lowOver", "lowUnder",
+    "pastLargest", "hugeTime", "hugeId", "idsBelow", "afterHuge", "infinite", "allFinite", "top", "computed", "has",
     "hasNo", "follow", "cursor",
 ]
 
@@ -194,7 +213,7 @@ ROWS = [
 @pytest.fixture
 def run(client, request):
     setup(client)
-    client.execute_command("USE", "cnt_" + request.node.name)
+    client.execute_command("USE", "cnt_" + re.sub(r"\W", "_", request.node.name))
     client.execute_command("SETF", "CNT", APP)
     assert client.execute_command("CALLF", "CNT", "migrate") == 1
     assert client.execute_command("CALLF", "CNT", "seed") == "ok"
@@ -213,6 +232,14 @@ def test_count_reads_rows_for_other_filters(run):
         n, every, read = run("rows", case)
         assert n == every, case
         assert read > 0 or case in ("twoValues",), case
+
+
+@pytest.mark.parametrize("case, want", [
+    ("hugeUnder", 24), ("hugeOver", 0), ("hugeEqual", 0), ("lowOver", 24), ("lowUnder", 0),
+    ("pastLargest", 24), ("hugeTime", 0), ("hugeId", 0), ("idsBelow", 30), ("afterHuge", 0),
+])
+def test_filters_past_the_key_range_answer_as_comparisons(run, case, want):
+    assert run("rows", case)[:2] == [want, want]
 
 
 def test_count_sees_the_transactions_writes(run):

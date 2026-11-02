@@ -1208,6 +1208,14 @@ local RANGE = { ["<"] = true, ["<="] = true, [">"] = true, [">="] = true }
 local OPS = { ["="] = true, ["~="] = true, ["<"] = true, ["<="] = true, [">"] = true,
               [">="] = true }
 local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
+local WHOLE = { int = true, time = true }
+local KEY_MAX = 2 ^ 53
+
+-- Whether index keys can hold a bound of `v`: the keys of whole-number kinds
+-- stop at +-2^53, so a filter past them is checked on each row.
+local function in_keys(kind: string, v: any): boolean
+    return not WHOLE[kind] or math.abs(v) <= KEY_MAX
+end
 
 -- The kind of tbl's field, or nil when tbl has no such field.
 local function field_kind(tbl: any, field: any): string?
@@ -1521,7 +1529,7 @@ end
 -- the keys of v itself. Answers false when no key qualifies, and the
 -- open-ended key when v has no key text.
 local function bound(kind: string, prefix: string, v: any, open: boolean?, upper: boolean?): any
-    if kind == "int" and v ~= nil and v ~= math.floor(v) and math.abs(v) ~= math.huge then
+    if WHOLE[kind] and v ~= nil and v ~= math.floor(v) and math.abs(v) ~= math.huge then
         v, open = if upper then math.floor(v) else math.ceil(v), false
     end
     if v == (if upper then -math.huge else math.huge) then
@@ -1583,9 +1591,10 @@ local function index_plan(q: any, keys: boolean?): any
     end
     local eq, ranges = {}, {}
     for _, c in q.conds do
-        if c.op == "=" and c.value ~= nil and (c.kind ~= "int" or c.value == math.floor(c.value)) then
+        if c.op == "=" and c.value ~= nil and in_keys(c.kind, c.value)
+            and (not WHOLE[c.kind] or c.value == math.floor(c.value)) then
             eq[c.field] = c.value
-        elseif RANGE[c.op] then
+        elseif RANGE[c.op] and in_keys(c.kind, c.value) then
             ranges[c.field] = ranges[c.field] or {}
             table.insert(ranges[c.field], c)
         end
@@ -1656,10 +1665,10 @@ local function index_plan(q: any, keys: boolean?): any
         for _, c in span do
             local v = c.value
             if c.op == ">" or c.op == ">=" then
-                v = kind == "int" and math.floor(v) or v
+                v = WHOLE[kind] and math.floor(v) or v
                 lo = (lo == nil or v > lo) and v or lo
             else
-                v = kind == "int" and math.ceil(v) or v
+                v = WHOLE[kind] and math.ceil(v) or v
                 hi = (hi == nil or v < hi) and v or hi
             end
         end
@@ -2162,7 +2171,8 @@ local function key_count(q: any): number?
     for _, c in q.conds do
         if c.value == nil or c.value ~= equal[c.field] or c.op ~= "=" then
             local v = c.value
-            if not RANGE[c.op] or c.field ~= p.next or v == math.huge or v == -math.huge then
+            if not RANGE[c.op] or c.field ~= p.next or v == math.huge or v == -math.huge
+                or not in_keys(c.kind, v) then
                 return nil
             end
             local upper = c.op == "<" or c.op == "<="

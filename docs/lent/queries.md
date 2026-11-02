@@ -142,6 +142,10 @@ out rows with a missing value, so it is used when every one of its fields
 has an `=` filter, or when each field before the last has one and the last
 has a range. Filters on other fields are checked on each row read.
 
+Index keys hold `int` and `time` values up to +-2^53. A filter past that
+limit, such as `where("size", "<", 1e300)`, compares as usual, and the query
+reads every row of the table or chosen range to check it.
+
 A query from `follow` or `query<Edge>()`, or the query `with` runs for each
 row, starts from the linked ids. When its filters narrow an index, or its
 `order` matches an index and it has a `limit`, it reads that index's keys
@@ -163,7 +167,8 @@ run over 40,000 rows, a count took 1 ms and reading the rows took 280 ms.
 
 - no filters at all, which counts the table's rows;
 - `=` with a value on the leading fields of the chosen index;
-- ranges on the next field of that index, with finite values.
+- ranges on the next field of that index, with finite values, up to +-2^53
+  on `int` and `time` fields.
 
 An expression such as `"size >= 3"` counts as the same filter. `order`,
 `limit`, `offset` and `using` work with a key count.
