@@ -184,5 +184,5 @@ def test_dates_in_queries(run):
         """LENT table Event query where "year(name) == 1" at column 1: year takes a number, got field name"""
         """ (string)""",
         """LENT table Event query where "week(at) == 1" at column 1: has no function week; expressions call date,"""
-        """ year, month and day""",
+        """ year, month, day and like""",
     ]

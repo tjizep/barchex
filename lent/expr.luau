@@ -5,14 +5,18 @@
 -- An expression reads the row's fields and the parameters by name, and uses
 -- literals (numbers, strings, true, false, nil), `and`, `or`, `not`, the
 -- comparisons == ~= < <= > >=, the arithmetic + - * / // % ^, unary minus,
--- `..`, `#`, parentheses, and the date calls below. Nothing else parses, so
--- an expression reaches only the row and its parameters.
+-- `..`, `#`, parentheses, and the calls below. Nothing else parses, so an
+-- expression reaches only the row and its parameters.
 --
 --   date('1995-03-15')   Unix milliseconds of ISO 8601 text, as lent.date
 --   year(t), month(t), day(t)   the UTC calendar part of a time
+--   like(text, pattern)  whether text matches: % is any run of characters,
+--                        _ is one character, \ takes the next one literally
 --
 -- A call on a constant is worked out once, so `shipdate >= date('1994-01-01')`
--- is a comparison with a value that an index can use.
+-- is a comparison with a value that an index can use. So is a constant like
+-- pattern that starts with literal text: `like(type, 'PROMO%')` holds only
+-- within the range of values starting with PROMO.
 --
 -- Required, not called: `local EXPR = require("lent.EXPR")`. A function key
 -- has to define call(), so this one answers a self-check:
@@ -39,7 +43,7 @@ local SYMBOLS2 = { ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true, [
                    [".."] = true }
 local SYMBOLS1 = { ["<"] = true, [">"] = true, ["+"] = true, ["-"] = true, ["*"] = true,
                    ["/"] = true, ["%"] = true, ["^"] = true, ["#"] = true, ["("] = true,
-                   [")"] = true }
+                   [")"] = true, [","] = true }
 local ESCAPES = { n = "\n", t = "\t", r = "\r", a = "\a", b = "\b", f = "\f", v = "\v",
                   ["\\"] = "\\", ['"'] = '"', ["'"] = "'" }
 
@@ -67,7 +71,129 @@ local CALLS = {
     year = { takes = "number", fn = part("year") },
     month = { takes = "number", fn = part("month") },
     day = { takes = "number", fn = part("day") },
+    like = { takes = "string", two = true, gives = "boolean" },
 }
+
+-- Stands for `_` in a like pattern's pieces.
+local ONE = false
+
+-- The pieces of like pattern p, which its `%`s separate. A piece is a list
+-- of literal strings and ONEs. Answers nil and why for a bad pattern.
+local function like_pieces(p: string): (any, string?)
+    local piece, pieces, text = {}, {}, {}
+    local function flush()
+        if #text > 0 then
+            piece[#piece + 1] = table.concat(text)
+            text = {}
+        end
+    end
+    local i = 1
+    while i <= #p do
+        local c = string.sub(p, i, i)
+        if c == "\\" then
+            i += 1
+            if i > #p then
+                return nil, "pattern ends with \\; write \\\\ for a backslash"
+            end
+            text[#text + 1] = string.sub(p, i, i)
+        elseif c == "%" then
+            flush()
+            pieces[#pieces + 1] = piece
+            piece = {}
+        elseif c == "_" then
+            flush()
+            piece[#piece + 1] = ONE
+        else
+            text[#text + 1] = c
+        end
+        i += 1
+    end
+    flush()
+    pieces[#pieces + 1] = piece
+    return pieces
+end
+
+-- The bytes of the UTF-8 character at position i of s, one for a stray byte.
+local function char_width(s: string, i: number): number
+    local b = string.byte(s, i)
+    local width = if b < 0xC0 or b >= 0xF8 then 1 elseif b < 0xE0 then 2 elseif b < 0xF0 then 3 else 4
+    for k = 1, width - 1 do
+        local c = string.byte(s, i + k)
+        if c == nil or c < 0x80 or c >= 0xC0 then return 1 end
+    end
+    return width
+end
+
+-- The position after `piece` when it matches s at position i, or nil.
+local function piece_at(piece: any, s: string, i: number): number?
+    for _, item in piece do
+        if item == ONE then
+            if i > #s then return nil end
+            i += char_width(s, i)
+        else
+            if string.sub(s, i, i + #item - 1) ~= item then return nil end
+            i += #item
+        end
+    end
+    return i
+end
+
+-- The position after the first match of `piece` in s from position i, or nil.
+local function piece_after(piece: any, s: string, i: number): number?
+    if #piece == 1 and piece[1] ~= ONE then
+        local _, e = string.find(s, piece[1], i, true)
+        return e and e + 1
+    end
+    while true do
+        local e = piece_at(piece, s, i)
+        if e or i > #s then return e end
+        i += char_width(s, i)
+    end
+end
+
+-- Whether s matches. Each `%` takes the first match of the next piece, which
+-- leaves the most text for the pieces after it, so no piece is tried twice
+-- and the cost stays proportional to the text times the pattern.
+local function like_match(s: string, pieces: any): boolean
+    local i = piece_at(pieces[1], s, 1)
+    local last = pieces[#pieces]
+    if i == nil then
+        return false
+    elseif #pieces == 1 then
+        return i == #s + 1
+    end
+    for k = 2, #pieces - 1 do
+        i = piece_after(pieces[k], s, i)
+        if i == nil then return false end
+    end
+    if #last == 0 then
+        return true
+    elseif #last == 1 and last[1] ~= ONE then
+        return #s - #last[1] + 1 >= i and string.sub(s, -#last[1]) == last[1]
+    end
+    while true do
+        if piece_at(last, s, i) == #s + 1 then return true end
+        if i > #s then return false end
+        i += char_width(s, i)
+    end
+end
+
+-- The value range of text that like pattern p can match, or nil when p starts
+-- with a wildcard. The upper bound is open, and missing when no string
+-- follows every string with that start.
+local function like_range(p: string): any
+    local pieces = like_pieces(p)
+    local start = pieces and pieces[1][1]
+    if not start then
+        return nil
+    end
+    local top = string.gsub(start, "\xFF+$", "")
+    if top == "" then
+        return { lo = start }
+    end
+    local hi = string.sub(top, 1, -2) .. string.char(string.byte(top, -1) + 1)
+    return { lo = start, hi = hi, hiOpen = true }
+end
 
 local ARITH = {
     ["+"] = function(x, y) return x + y end,
@@ -220,7 +346,7 @@ local function tokenize(src: string, bad: any): { any }
 end
 
 -- The tree of src. Nodes are { k = "const", v }, { k = "name", name },
--- { k = "call", name, a }, { k = "un", op, a } and { k = "bin", op, a, b },
+-- { k = "call", name, a, b }, { k = "un", op, a } and { k = "bin", op, a, b },
 -- each with its column `at`.
 local function parse_tree(src: string, bad: any): any
     local toks = tokenize(src, bad)
@@ -234,10 +360,18 @@ local function parse_tree(src: string, bad: any): any
             return { k = "const", v = t.v, at = t.at }
         elseif t.k == "name" and toks[pos + 1].k == "(" then
             if CALLS[t.v] == nil then
-                bad(t.at, "has no function " .. t.v .. "; expressions call date, year, month and day")
+                bad(t.at, "has no function " .. t.v
+                    .. "; expressions call date, year, month, day and like")
             end
             pos += 2
             local node = { k = "call", name = t.v, a = expr(0), at = t.at }
+            if CALLS[t.v].two then
+                if toks[pos].k ~= "," then
+                    bad(t.at, "has a call to " .. t.v .. " without its second value")
+                end
+                pos += 1
+                node.b = expr(0)
+            end
             if toks[pos].k ~= ")" then
                 bad(t.at, "has a call to " .. t.v .. " without its )")
             end
@@ -359,7 +493,27 @@ local function build(n: any, bad: any): (any) -> any
     end
     local op = n.op
     local fa = build(n.a, bad)
-    if n.k == "call" then
+    if n.k == "call" and n.name == "like" then
+        local fb = build(n.b, bad)
+        local pattern, pieces
+        local function compile_pattern(p: string)
+            local list, why = like_pieces(p)
+            if list == nil then bad(n.at, "like " .. tostring(why)) end
+            pattern, pieces = p, list
+        end
+        if n.b.k == "const" and type(n.b.v) == "string" then
+            compile_pattern(n.b.v)
+        end
+        return function(r)
+            local x, y = fa(r), fb(r)
+            if x == nil or y == nil then return nil end
+            if type(x) ~= "string" or type(y) ~= "string" then
+                bad(n.at, "like takes strings, got " .. type(x) .. " and " .. type(y))
+            end
+            if y ~= pattern then compile_pattern(y) end
+            return like_match(x, pieces)
+        end
+    elseif n.k == "call" then
         local name, at, call = n.name, n.at, CALLS[n.name]
         return function(r)
             local x = fa(r)
@@ -518,12 +672,15 @@ local function resolve(n: any, kindOf: any, params: any, bad: any): any
     local out = { k = n.k, op = n.op, name = n.name, at = n.at,
                   a = resolve(n.a, kindOf, params, bad) }
     if n.k == "call" then
-        local takes = CALLS[n.name].takes
-        if out.a.t ~= takes and out.a.t ~= "any" and out.a.t ~= "nil" then
-            bad(n.at, n.name .. " takes a " .. takes .. ", got " .. describe(out.a))
+        local call = CALLS[n.name]
+        out.b = n.b and resolve(n.b, kindOf, params, bad)
+        for _, x in { out.a, out.b } do
+            if x.t ~= call.takes and x.t ~= "any" and x.t ~= "nil" then
+                bad(n.at, n.name .. " takes a " .. call.takes .. ", got " .. describe(x))
+            end
         end
-        out.t = "number"
-        if out.a.k == "const" then
+        out.t = call.gives or "number"
+        if out.a.k == "const" and (out.b == nil or out.b.k == "const") then
             local v = build(out, bad)(nil)
             return { k = "const", v = v, t = type_of(v) }
         end
@@ -607,7 +764,8 @@ end
 
 -- For each field that n holds only within some value ranges, the list of
 -- those ranges: a row whose field lies outside every range fails n. Only
--- comparisons of number and string fields with values count.
+-- comparisons of number and string fields with values and like calls on
+-- string fields with constant patterns count.
 local function ranges_of(n: any): { [string]: { any } }
     if n.k == "bin" and n.op == "or" then
         local a, b = ranges_of(n.a), ranges_of(n.b)
@@ -634,6 +792,10 @@ local function ranges_of(n: any): { [string]: { any } }
             end
         end
         return a
+    elseif n.k == "call" and n.name == "like" then
+        local r = n.a.k == "field" and n.a.kind == "string" and n.b.k == "const"
+            and type(n.b.v) == "string" and like_range(n.b.v)
+        return if r then { [n.a.name] = { r } } else {}
     end
     local c = n.k == "bin" and as_cond(n)
     local t = c and type(c.value)
@@ -731,6 +893,12 @@ function call()
           "age[nil,5) age[9,nil] age[2,2]" },
         { "(age < 5 or age > 9) and (age < 3 or age > 4) or age == 1",
           "age[nil,3) age(4,5) age(9,nil] age[1,1]" },
+        { "like(name, 'an%') or name == 'bo'", "name[an,ao) name[bo,bo]" },
+        { "like(name, 'a\\\\%_b%')", "name[a%,a&)" },
+        { "like(name, '\\xFF\\xFF%')", "name[\xFF\xFF,nil]" },
+        { "like(name, 'a\\xFF%')", "name[a\xFF,b)" },
+        { "like(name, '%an') or like(name, '_b')", "" },
+        { "not like(name, 'an%')", "" },
         { "name == 'ann' or age > 3", "" },
         { "age ~= 3 or age == nil", "" },
     }
@@ -759,11 +927,36 @@ function call()
         { "name < 'bob' and not active == false", true },
         { "year(at) == 1995 and month(at) == 3 and day(at + 86400000) == 16", true },
         { "at < date('1995-03-15T00:00:00.001Z') and year(missing) == nil", true },
+        { "like(name, 'a%') and not like(name, 'b%') and like(name, pat)", true },
+        { "like(nope, 'a%') == nil and like(name, nope) == nil and not like(nope, 'a%')", true },
+        { "like('ann', 'a_n') == true and like(name .. '!', '%!')", true },
     }
+    local matches = {
+        { "", "", true }, { "", "%", true }, { "", "_", false }, { "a", "", false },
+        { "abc", "abc", true }, { "abc", "ab", false }, { "abc", "abcd", false },
+        { "abc", "a%", true }, { "abc", "%c", true }, { "abc", "%b%", true }, { "abc", "%d%", false },
+        { "abc", "a_c", true }, { "abc", "___", true }, { "abc", "__", false }, { "abc", "____", false },
+        { "abcabc", "%bc", true }, { "abcabd", "a%c%d", true }, { "abab", "ab%ab", true },
+        { "aba", "ab%ab", false }, { "abc", "a%%c", true }, { "abc", "%_%", true },
+        { "abcd", "%b_", false }, { "abcbd", "%b_", true }, { "xaxb", "%a_b", true },
+        { "special packages requests", "%special%requests%", true },
+        { "requests special", "%special%requests%", false },
+        { "a\nb", "a%b", true }, { "a\nb", "a_b", true }, { "ABC", "abc", false },
+        { "50%", "50\\%", true }, { "50x", "50\\%", false }, { "a_b", "a\\_b", true },
+        { "axb", "a\\_b", false }, { "a\\b", "a\\\\b", true }, { "ab", "\\a\\b", true },
+        { "caf\u{E9}", "caf_", true }, { "\u{65E5}\u{672C}", "__", true },
+        { "\u{65E5}", "__", false }, { "\u{65E5}", "%__", false }, { "\u{65E5}", "%_", true },
+        { "\u{1F600}x", "_x", true }, { "\xFFx", "_x", true }, { "\xC3", "_", true },
+    }
+    for i, c in matches do
+        if like_match(c[1], (like_pieces(c[2]))) ~= c[3] then
+            return "failed: like " .. i
+        end
+    end
     local extra = { age = "int", missing = "int", nope = "string", salary = "float",
                     name = "string", active = "bool", tags = "json", at = "time" }
     for i, c in cases do
-        if eval(c[1], extra, { lo = 4, want = { "a" } }, r) ~= c[2] then
+        if eval(c[1], extra, { lo = 4, want = { "a" }, pat = "%nn" }, r) ~= c[2] then
             return "failed: case " .. i
         end
     end
@@ -781,7 +974,17 @@ function call()
             .. " has values, names and operators" },
         { "age > 3 3", 'EXPR "age > 3 3" at column 9: has 3 after the end of the expression' },
         { "now() > 1", 'EXPR "now() > 1" at column 1: has no function now; expressions call'
-            .. " date, year, month and day" },
+            .. " date, year, month, day and like" },
+        { "like(age, 'a')", 'EXPR "like(age, \'a\')" at column 1: like takes a string, got field'
+            .. " age (int)" },
+        { "like(name, 3)", 'EXPR "like(name, 3)" at column 1: like takes a string, got 3' },
+        { "like(name)", 'EXPR "like(name)" at column 1: has a call to like without its second'
+            .. " value" },
+        { "like(name, 'a', 'b')", 'EXPR "like(name, \'a\', \'b\')" at column 1: has a call to like'
+            .. " without its )" },
+        { "like(name, 'a\\\\')", 'EXPR "like(name, \'a\\\\\\\\\')" at column 1: like pattern ends'
+            .. " with \\; write \\\\ for a backslash" },
+        { "age, name", 'EXPR "age, name" at column 4: has , after the end of the expression' },
         { "year(name) > 1", 'EXPR "year(name) > 1" at column 1: year takes a number, got field'
             .. " name (string)" },
         { "age > date('1995-02-30')", 'EXPR "age > date(\'1995-02-30\')" at column 7: date wants'

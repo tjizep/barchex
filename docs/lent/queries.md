@@ -54,9 +54,10 @@ c.Emp:query():where("(age or 0) * 2 > salary / 10 or name .. '!' == shout",
 
 It takes numbers, strings, `true`, `false` and `nil`, the names of fields,
 computed fields and parameters, `and`, `or`, `not`, `==`, `~=`, `<`, `<=`,
-`>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#`, parentheses, and
-the calls `date(text)`, `year(t)`, `month(t)` and `day(t)`, which work as
-the `lent` helpers of the same names. Anything else is a syntax error, so an expression reads only the row and its
+`>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#`, parentheses, the
+calls `date(text)`, `year(t)`, `month(t)` and `day(t)`, which work as the
+`lent` helpers of the same names, and [`like(text, pattern)`](#string-patterns).
+Anything else is a syntax error, so an expression reads only the row and its
 parameters. A parameter is a number, string, boolean or JSON table; a name
 that is both a field and a parameter is an error, and so is a name that is
 neither. Pass values through `params` to keep them out of the expression
@@ -96,6 +97,41 @@ shows `by_age 2 ranges age`. When a side has no comparison of that field
 with a value, as in `age ~= 3` or `age == nil`, the query checks the `or`
 on each row it reads. Every part of the expression is checked on each row
 the index reads.
+
+## String patterns
+
+`like(text, pattern)` is true when `text` matches `pattern`, as SQL's `LIKE`
+does:
+
+```lua
+c.Part:query():where("like(type, 'PROMO%')")
+c.Part:query():where("like(name, '%green%')")
+c.Order:query():where("not like(comment, pattern)", { pattern = "%special%requests%" })
+```
+
+| in a pattern | matches |
+|---|---|
+| `%` | any run of characters, including none and including newlines |
+| `_` | exactly one UTF-8 character |
+| `\` followed by a character | that character, so `\%` is a literal `%` |
+| anything else | itself, with upper and lower case kept distinct |
+
+Inside an expression's quotes a backslash is written twice, so `'50\\%'` is
+the pattern `50\%`. A pattern in `params` needs no such doubling. A pattern
+that ends with a lone `\` raises an error.
+
+A pattern that starts with literal text gives its field a value range, so an
+index on a `string` field reads only the keys with that start, and
+`like(type, 'PROMO%')` on an index on `type` shows `by_type range type` in
+`explain()`. The pattern must be a value or parameter, and `or` combines these
+ranges as it combines [comparisons](#expression-filters). A pattern that
+starts with `%` or `_`, or comes from a field, reads every row the rest of the
+query selects, and each row costs about the length of the text times the
+length of the pattern.
+
+`like` gives `nil` when the text or pattern is `nil`, so
+`not like(note, 'x%')` keeps rows without a `note`. SQL's `NOT LIKE` drops
+those rows; write `note ~= nil and not like(note, 'x%')` to do the same.
 
 ## Update and delete by query
 
@@ -174,8 +210,8 @@ An expression such as `"size >= 3"` counts as the same filter. `order`,
 `limit`, `offset` and `using` work with a key count.
 
 Any other query reads its rows and costs what `all()` costs. That includes
-a `where` function, an expression with `or`, `~=`, `= nil`, a filter on a
-field outside the index, `has`, `hasNo`, `follow`, `after`, and links and
+a `where` function, `like`, an expression with `or`, `~=`, `= nil`, a filter
+on a field outside the index, `has`, `hasNo`, `follow`, `after`, and links and
 view queries. `explain()` shows which index a query reads. To count a large
 selection of this kind across calls, use a `count` in
 [`aggregatePage`](#paged-aggregates).

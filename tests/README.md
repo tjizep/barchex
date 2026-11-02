@@ -140,7 +140,8 @@ beside a development server.
   links with expression strings and parameters in optimistic and
   pessimistic transactions. It checks missing values, arithmetic, JSON and
   computed fields, the index an expression's `and` parts pick, the key
-  spans an `or` reads, cursor pages across those spans in both directions,
+  spans an `or` reads, `like` patterns and the index ranges they read,
+  cursor pages across those spans in both directions,
   `whereEdge`, `has` and query writes, and the errors for syntax, unknown
   names, kinds and values checked per row.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id

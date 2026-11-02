@@ -72,19 +72,19 @@ from the query text.
 | query | status | how lent answers it, or what it lacks |
 |---|---|---|
 | Q1 pricing summary | verified | `where` on `shipdate`, `groupBy("returnflag", "linestatus")`, sums with `value` functions, and `avg` |
-| Q2 minimum cost supplier | Luau | `links("parts")` from suppliers in a region, then the minimum cost per part in Luau; `LIKE '%BRASS'` needs a `where` function |
+| Q2 minimum cost supplier | Luau | `links("parts")` from suppliers in a region, then the minimum cost per part in Luau; `LIKE '%BRASS'` as `like(type, '%BRASS')` |
 | Q3 shipping priority | verified | nested `hasOrderWith` and `hasCustomerWith`, `groupBy("order", "order.orderdate", "order.shippriority")` ordered by revenue and `order.orderdate` |
 | Q4 order priority checking | verified | `hasLinesWith` with the expression `commitdate < receiptdate` for `EXISTS` |
 | Q5 local supplier volume | Luau | needs the customer's nation to equal the supplier's nation, a condition across two paths; load both with `with` and compare in Luau |
 | Q6 forecasting revenue change | verified | one expression filter read through `by_shipdate` |
 | Q7 volume shipping | Luau | nation pairs as in Q5, and the year of `shipdate` |
 | Q8 national market share | Luau | eight-table join, the year of `orderdate`, and a `CASE` share |
-| Q9 product type profit | Luau | `LIKE '%green%'`, the `PARTSUPP` cost per line through `c.Part:edge("supplies", part, supplier)`, and the year |
+| Q9 product type profit | Luau | `like(name, '%green%')`, the `PARTSUPP` cost per line through `c.Part:edge("supplies", part, supplier)`, and the year |
 | Q10 returned item reporting | verified | `groupBy("customer", "customer.name", "customer.acctbal", "customer.nation.name")` over the path edge, with `order("revenue", "desc"):limit(20)` |
 | Q11 important stock | verified | `links("parts")` reads the `PARTSUPP` values; `HAVING` against a total in Luau |
 | Q12 shipping modes | verified | `IN` as an `or` of `==`; each `CASE` sum is a separate `hasOrderWith` query |
-| Q13 customer distribution | verified | `withOrders` keeps customers without orders, as `LEFT OUTER JOIN` does; `NOT LIKE` as a `where` function |
-| Q14 promotion effect | verified | `LIKE 'PROMO%'` as the range `type >= 'PROMO' and type < 'PROMP'`, read through `by_type` |
+| Q13 customer distribution | verified | `withOrders` keeps customers without orders, as `LEFT OUTER JOIN` does; `NOT LIKE` as `not like(comment, pattern)` |
+| Q14 promotion effect | verified | `LIKE 'PROMO%'` as `like(type, 'PROMO%')`, read through `by_type` |
 | Q15 top supplier | verified | the `Revenue` view groups lines by supplier; `max("revenue")` on the view, then `where("revenue == top")` |
 | Q16 parts/supplier relationship | Luau | `NOT IN` a subquery; `count` with `distinct = true` counts the suppliers |
 | Q17 small-quantity-order revenue | verified | a correlated `avg` per part: `groupBy("part")` keeps each part's average, then lines loaded `withPart()` compare with it |
@@ -206,9 +206,9 @@ item it belongs to.
     the fields, so `(L_ORDERKEY, L_LINENUMBER)` is a unique index that `by`
     and `upsert` read. Links and unlinks keep the entries current and
     refuse a duplicate.
-11. **String patterns.** A `LIKE` prefix works as a range on an index. A
-    pattern elsewhere in the string needs a `where` function, because
-    expressions call only the date functions.
+11. **String patterns.** Done: the expression call `like(text, pattern)`
+    takes `%` and `_`, and a pattern that starts with literal text reads an
+    index on the field as a value range. Q13 and Q14 use it.
 12. **Luau integers.** Done: lent takes the Luau `integer` values that
     `simdjson.parse` answers for whole numbers beyond 32 bits, such as
     millisecond times, wherever it takes a number, and the tests pass

@@ -296,7 +296,7 @@ end
 -- Q13, customer distribution
 function q.q13(c, p)
     local customers = c.Customer:query():withOrders(function(o)
-        o:where(function(r) return not string.find(r.comment, p.pattern) end)
+        o:where("not like(comment, pattern)", p)
     end):all()
     local dist = {}
     for _, cu in customers do dist[#cu.orders] = (dist[#cu.orders] or 0) + 1 end
@@ -309,7 +309,7 @@ end
 function q.q14(c, p)
     local function lines() return c.Lineitem:query():where("shipdate >= a and shipdate < b", p) end
     local promo = lines():hasPartWith(function(pt)
-        pt:where("type >= 'PROMO' and type < 'PROMP'")
+        pt:where("like(type, 'PROMO%')")
     end)
     local spec = { revenue = { fn = "sum", value = revenue } }
     return { promo:aggregate(spec).revenue, lines():aggregate(spec).revenue, promo:explain() }
@@ -725,7 +725,7 @@ def test_q13_customer_distribution(tpch):
               on c_custkey = o_custkey and o_comment not like '%special%requests%'
             group by c_custkey)
         group by c_count order by custdist desc, c_count desc""")
-    assert run("q13", {"pattern": "special.*requests"}) == want
+    assert run("q13", {"pattern": "%special%requests%"}) == want
 
 
 def test_q14_promotion_effect(tpch):

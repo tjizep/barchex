@@ -92,6 +92,29 @@ function steps.reads(c)
     }
 end
 
+function steps.patterns(c)
+    local function q(...) return c.Emp:query():where(...) end
+    return {
+        -- literal text at the start of a pattern narrows the name index
+        q("like(name, 'a%')"):explain(),
+        names(q("like(name, 'a%')")),
+        q("like(name, start)", { start = "b_b" }):explain(),
+        names(q("like(name, start)", { start = "b_b" })),
+        q("like(name, 'a%') or like(name, 'e%')"):explain(),
+        names(q("like(name, 'a%') or like(name, 'e%')")),
+        q("like(name, 'a%') or like(name, 'e%')"):order("name", "desc"):limit(1):all()[1].name,
+        q("like(name, 'a%') and age > 20"):explain(),
+        -- a pattern that starts with a wildcard reads every row
+        q("like(name, '%e')"):explain(),
+        names(q("like(name, '%e')")),
+        names(q("like(name, '_o_')")),
+        names(q("not like(name, '%e%')")),
+        tostring(q("like(name, '%e')"):count()),
+        -- the pattern can come from the row
+        names(q("like('anna', name .. '%')")),
+    }
+end
+
 -- Pages through the rows outside ages 20 to 100, two at a time, in age
 -- order: the read starts at the cursor and skips the gap between spans.
 function steps.pages(c, dir)
@@ -135,6 +158,10 @@ function steps.errors(c)
         -- cy has no age, so the `or` gives a string there
         err(function() q("(age or 'none') > 3"):all() end),
         err(function() c.Emp:query():links("knows"):where("id > 1") end),
+        err(function() q("like(age, 'a%')") end),
+        err(function() q("like(name, bad)", { bad = "a\\\\" }) end),
+        err(function() q("like(age or 'none', '%')"):all() end),
+        err(function() q("like('a', name .. bad)", { bad = "\\\\" }):all() end),
     }
 end
 
@@ -195,6 +222,20 @@ def test_expressions_filter_rows(run):
     ]
 
 
+def test_like_filters_rows_and_narrows_indexes(run):
+    assert run("patterns") == [
+        "by_name range name", "ann",
+        "by_name range name", "bob",
+        "by_name 2 ranges name", "ann,eve", "eve",
+        "by_name range name",
+        "id", "dee,eve",
+        "bob",
+        "ann,bob,cy",
+        "2",
+        "ann",
+    ]
+
+
 @pytest.mark.parametrize("dir", ["asc", "desc"])
 def test_or_pages_read_index_spans(run, dir):
     order = "dee,bob,eve" if dir == "asc" else "eve,bob,dee"
@@ -211,6 +252,7 @@ def test_expressions_select_rows_to_write(run):
 
 def test_expression_errors(run):
     where = 'LENT table Emp query where '
+    ends = "like pattern ends with \\; write \\\\ for a backslash"
     assert run("errors") == [
         where + '"age >": ends where a value should come',
         where + '"nope > 1" at column 1: has no field or parameter nope',
@@ -223,4 +265,9 @@ def test_expression_errors(run):
         where + '"(age or \'none\') > 3": > compares string with number',
         'LENT table Emp links knows query where "id > 1" at column 1: has no field or'
         ' parameter id',
+        where + '"like(age, \'a%\')" at column 1: like takes a string, got field age (int)',
+        where + '"like(name, bad)" at column 1: ' + ends,
+        where + '"like(age or \'none\', \'%\')" at column 1: like takes strings, got number'
+                ' and string',
+        where + '"like(\'a\', name .. bad)" at column 1: ' + ends,
     ]
