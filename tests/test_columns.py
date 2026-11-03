@@ -4,6 +4,7 @@ import re
 
 import pytest
 
+from .conftest import install
 from .test_client import setup
 
 redis = pytest.importorskip("redis")
@@ -171,8 +172,63 @@ function cases.byId(t)
         :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" } }))
 end
 
+-- folds that barch.vec runs: conditions, keys and aggregates on fields
+-- without a default, other than bool, decimal and distinct ones
+local STATS = {
+    n = { fn = "count" }, scored = { fn = "count", field = "score" },
+    sum = { fn = "sum", field = "score" }, mean = { fn = "avg", field = "score" },
+    low = { fn = "min", field = "score" }, high = { fn = "max", field = "at" },
+}
+function cases.vAll(t) return row_text(t:query():aggregate(STATS)) end
+function cases.vIds(t) return row_text(t:query():where("id > 5 and id <= 1500"):aggregate(STATS)) end
+function cases.vSpans(t) return row_text(t:query():where("id < 3 or id > 2040"):aggregate(STATS)) end
+function cases.vRange(t)
+    return row_text(t:query():where("at", "<", 5e8):where("score", ">=", 2):aggregate(STATS))
+end
+function cases.vEq(t) return t:query():where("score", "=", 2.5):count() end
+function cases.vNe(t) return t:query():where("score", "~=", 2.5):count() end
+function cases.vText(t) return t:query():where("raw", "<", "b"):where("raw", "~=", ""):count() end
+function cases.vNoText(t) return t:query():where("note", ">", "note2"):sum("score") end
+function cases.vByQty(t) return rows_text(t:query():groupBy("qty"):aggregate(STATS)) end
+function cases.vByScore(t) return rows_text(t:query():groupBy("score"):aggregate(STATS)) end
+function cases.vByNote(t) return rows_text(t:query():groupBy("note"):aggregate(STATS)) end
+function cases.vByState(t)
+    return rows_text(t:query():where("state", "~=", "new"):groupBy("state"):aggregate(STATS))
+end
+function cases.vPaged(t)
+    local out = {}
+    for _, size in { 300, 1000, 5000 } do
+        local state, pages, r = nil, 0, nil
+        repeat
+            r = t:query():where("score", ">", 1):groupBy("region"):aggregatePage(STATS, state, size)
+            state, pages = r.state, pages + 1
+        until r.done
+        out[#out + 1] = pages
+        out[#out + 1] = rows_text(r.result)
+    end
+    return out
+end
+
 function steps.ask(c, tname, name)
     return cases[name](c[tname])
+end
+
+-- case `name` answered with each set of kernels a fold can use: barch.vec
+-- when barch has it, lent.VEC, and the Luau loops
+function steps.paths(c, tname, name)
+    local out = {}
+    local was = col.kernels(nil)
+    for _, k in { barch.vec or false, require("lent.VEC"), false } do
+        col.kernels(k or nil)
+        local ok, v = pcall(cases[name], c[tname])
+        if not ok then
+            col.kernels(was)
+            error(v, 0)
+        end
+        out[#out + 1] = show(v)
+    end
+    col.kernels(was)
+    return out
 end
 
 -- rows read a page at a time by cursor, either way
@@ -334,6 +390,7 @@ end
 @pytest.fixture(params=["optimistic", "pessimistic"])
 def run(client, request):
     setup(client)
+    install(client, "lent", "VEC", "lent/vec.luau")
     client.execute_command("USE", "cols_" + re.sub(r"\W", "_", request.node.name))
     client.execute_command("SETF", "COLS", APP)
     assert client.execute_command("CALLF", "COLS", "migrate", "") == 1
@@ -431,6 +488,26 @@ def test_column_answers_what_binary_answers(run, seed):
     same(run, "ask", "all")
     same(run, "delete_all")
     same(run, "ask", "all")
+
+
+VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
+                "vByQty", "vByScore", "vByNote", "vByState", "vPaged"]
+
+
+def test_vector_kernels_answer_what_luau_loops_answer(run):
+    rng = random.Random(3)
+    # full blocks, then nils and holes in them
+    for lo in range(1, 3101, 500):
+        hi = str(min(lo + 499, 3100))
+        assert run("fill", "Sale", str(lo), hi) == run("fill", "Plain", str(lo), hi)
+    for pk in rng.sample(range(1, 3101), 300):
+        write_both(run, "update", pk, {k: v for k, v in seed_row(rng, pk).items()
+                                       if k in ("score", "at", "raw", "note", "state")})
+    for pk in rng.sample(range(1, 3101), 200):
+        write_both(run, "delete", pk, {})
+    for case in VECTOR_CASES:
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
 
 
 def test_full_blocks_answer_what_binary_answers(run):

@@ -41,6 +41,10 @@ local MAX_ENTRY = 524032
 
 local NAN = 0 / 0
 
+-- barch's vector kernels (docs/barch-vec.md), or nil on a barch without
+-- them; folds then run their own Luau loops
+local vec = (barch :: any).vec
+
 local function fill_nil(): buffer
     local b = buffer.create(SIZE * 8)
     for i = 0, SIZE - 1 do
@@ -50,6 +54,14 @@ local function fill_nil(): buffer
 end
 
 local NIL_NUMBERS = fill_nil()
+-- SIZE str elements that are all nil, SIZE i8 elements that are all 0,
+-- and each slot's number as an f64
+local NIL_TEXTS = buffer.create(SIZE * 8)
+local ZEROS = buffer.create(SIZE)
+local SLOTS = buffer.create(SIZE * 8)
+for s = 0, SIZE - 1 do
+    buffer.writef64(SLOTS, s * 8, s)
+end
 local NO_ROWS = buffer.create(SIZE + 4)
 local PRESENT, ABSENT = buffer.create(1), buffer.create(1)
 buffer.writeu8(PRESENT, 0, 1)
@@ -317,7 +329,7 @@ local function load(c: any, block: number)
     -- a key removed in this transaction reads as barch.tomb
     local stored = barch.store.getBufferAt(block_key(c.prefix, block), 0)
     local b = if type(stored) == "buffer" then stored else nil
-    c.b, c.located = b, false
+    c.b, c.located, c.elements = b, false, false
 end
 
 -- Finds where each slot's value starts in text source c's loaded block.
@@ -634,6 +646,33 @@ local function plain(c: any): boolean
     return c ~= nil and not (c.id or c.text or c.bool) and c.default == nil
 end
 
+-- Whether source c holds text with no default to read in place of nil.
+local function plain_text(c: any): boolean
+    return c.text and c.default == nil
+end
+
+-- Whether barch.vec can run every step of a fold: conditions that compare
+-- ids or plain numbers with a number or plain text with a string, at most
+-- one plain key, and count, sum, avg, min and max of plain numbers or rows.
+local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
+    for _, c in conds do
+        local kind = type(c.value)
+        if not ((kind == "number" and (plain(c.source) or c.source.id))
+                or (kind == "string" and plain_text(c.source))) then
+            return false
+        end
+    end
+    if #keys > 1 or (#keys == 1 and not (plain(keys[1]) or plain_text(keys[1]))) then
+        return false
+    end
+    for _, a in aggs do
+        if a.distinct or a.scale or (a.source and not plain(a.source)) then
+            return false
+        end
+    end
+    return true
+end
+
 -- A fold over the rows of table t: the conditions they must pass, the
 -- fields they group by and the aggregates to add them to. `spec` holds
 --
@@ -678,17 +717,28 @@ function start_fold(t: any, fields: any, spec: any): any
     for _, c in sources do
         list[#list + 1] = c
     end
+    local job = { sources = list, conds = conds, keys = keys, aggs = aggs, group = spec.group,
+                  budget = spec.budget, seen = 0, records = {}, tree = {}, short = {},
+                  sel = table.create(SIZE, 0), gids = table.create(SIZE, 1) }
+    if vec and vectors(conds, keys, aggs) then
+        -- each aggregate adds to records that grouper id i keeps at 32 * i,
+        -- and finish adds them to group gis[i + 1]
+        job.vec, job.gis, job.capacity = vec, if #keys == 0 then { 1 } else {}, 0
+        job.presence, job.selb, job.gidb = buffer.create(SIZE), buffer.create(SIZE * 4),
+            buffer.create(SIZE * 4)
+        if #keys == 1 then
+            job.grouper = vec.grouper(if keys[1].text then "str" else "f64")
+        end
+        return job
+    end
     -- one number range filter and one plain sum fold in one pass
-    local fuse
     local a1, c1 = aggs[1], conds[1]
     if #conds == 1 and #keys == 0 and #aggs == 1 and a1.fn == "sum" and plain(a1.source)
         and not a1.distinct and a1.scale == nil and plain(c1.source) and type(c1.value) == "number"
         and (c1.op == "<" or c1.op == "<=" or c1.op == ">" or c1.op == ">=") then
-        fuse = c1
+        job.fuse = c1
     end
-    return { sources = list, conds = conds, keys = keys, aggs = aggs, group = spec.group,
-             budget = spec.budget, seen = 0, records = {}, tree = {}, short = {}, fuse = fuse,
-             sel = table.create(SIZE, 0), gids = table.create(SIZE, 1) }
+    return job
 end
 
 -- The bits of the first 4 and the next 2 bytes that a text value of 0 to 6
@@ -803,9 +853,184 @@ local function filtered_sum(job: any, c: any, op: string, w: any, a: any): boole
     return true
 end
 
+-- Text source c's loaded block as str elements: a buffer of SIZE elements,
+-- then the block, which the elements point into.
+local function elements(v: any, c: any): buffer
+    local w = c.work
+    if not c.elements then
+        local b: buffer = c.b
+        local need = SIZE * 8 + buffer.len(b)
+        if w == nil or buffer.len(w) < need then
+            w = buffer.create(need)
+            c.work = w
+        end
+        buffer.copy(w, SIZE * 8, b)
+        v.offsets(w, SIZE * 8 + TEXT_SLOTS, SIZE, SIZE * 8 + TEXT_VALUES, w)
+        c.elements = true
+    end
+    return w
+end
+
+-- Makes room in each aggregate's records for `size` grouper ids, each
+-- record starting as no values: a count and sum of 0, a least of inf and a
+-- greatest of -inf.
+local function grow(job: any, size: number)
+    local was = job.capacity
+    if size <= was then
+        return
+    end
+    local cap = math.max(size, was * 2, 16)
+    for _, a in job.aggs do
+        local r = buffer.create(cap * 32)
+        if a.recs then
+            buffer.copy(r, 0, a.recs, 0, was * 32)
+        end
+        for i = was, cap - 1 do
+            buffer.writef64(r, i * 32 + 16, math.huge)
+            buffer.writef64(r, i * 32 + 24, -math.huge)
+        end
+        a.recs = r
+    end
+    job.capacity = cap
+end
+
+-- Gives the grouper's ids from #job.gis to size - 1 their groups.
+local function new_ids(job: any, size: number)
+    local g, gis, tree = job.grouper, job.gis, job.tree
+    for id = #gis, size - 1 do
+        local v = g:key(id)
+        local k = if v == nil then NIL_KEY else v
+        local gi = tree[k]
+        if gi == nil then
+            gi = new_group(job, { v })
+            tree[k] = gi
+        end
+        gis[id + 1] = gi
+    end
+    grow(job, size)
+end
+
+-- fold_block with barch.vec: the selection, group ids and running values
+-- stay in buffers, and each step is one kernel call over the block.
+local function vector_block(job: any, block: number, presence: string, a: number,
+                            z: number): boolean
+    local v = job.vec
+    local selb: buffer = job.selb
+    local budget, seen = job.budget, job.seen
+    local sel: buffer?, n, more = nil, SIZE, false
+    if not (a == 0 and z == SIZE - 1 and live(presence) == SIZE
+            and (budget == nil or budget - seen >= SIZE)) then
+        -- the slots from a to z that hold rows, up to the budget
+        local pb: buffer = job.presence
+        buffer.writestring(pb, 0, presence, SIZE)
+        buffer.fill(pb, 0, 0, a)
+        buffer.fill(pb, z + 1, 0, SIZE - 1 - z)
+        sel, n = selb, v.mask(pb, 0, SIZE, selb)
+        if budget ~= nil and n > budget - seen then
+            n, more = budget - seen, true
+        end
+    end
+    job.seen = seen + n
+    if n == 0 then
+        return more
+    end
+    job.last = block * SIZE + (if sel then buffer.readu32(sel, (n - 1) * 4) else n - 1)
+    for _, c in job.sources do
+        load(c, block)
+    end
+    for _, cd in job.conds do
+        local c = cd.source
+        if c.id then
+            -- slot s holds id c.base + s
+            n = v.filter("f64", SLOTS, 0, 8, cd.op, cd.value - c.base, nil, sel, n, selb)
+            sel = selb
+            if n == 0 then
+                return more
+            end
+        elseif c.b == nil then
+            -- every row reads nil, which passes only ~=
+            if cd.op ~= "~=" then
+                return more
+            end
+        else
+            local kind, b = "f64", c.b
+            if c.text then
+                kind, b = "str", elements(v, c)
+            end
+            n = v.filter(kind, b, 0, 8, cd.op, cd.value, nil, sel, n, selb)
+            sel = selb
+            if n == 0 then
+                return more
+            end
+        end
+    end
+    local gids: buffer? = nil
+    local k = job.keys[1]
+    if k then
+        local b = if k.b == nil then (if k.text then NIL_TEXTS else NIL_NUMBERS)
+            elseif k.text then elements(v, k) else k.b
+        gids = job.gidb
+        local size = job.grouper:ids(b, 0, 8, nil, if k.b == nil then nil else sel, n, gids)
+        if size > #job.gis then
+            new_ids(job, size)
+        end
+    elseif #job.records == 0 then
+        new_group(job, {})
+        grow(job, 1)
+    end
+    for _, ag in job.aggs do
+        local c = ag.source
+        if c == nil then
+            v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, ag.recs)
+        elseif c.b ~= nil then
+            v.fold("f64", c.b, 0, 8, nil, sel, n, gids, ag.recs)
+        end
+    end
+    return more
+end
+
+-- Adds the records of a job that ran on barch.vec to its groups' running
+-- values.
+local function add_records(job: any)
+    for _, a in job.aggs do
+        local r: buffer, vals, ns, fn = a.recs, a.vals, a.ns, a.fn
+        if r == nil then
+            continue
+        end
+        for id, gi in job.gis do
+            local at = (id - 1) * 32
+            local count = buffer.readf64(r, at)
+            if count > 0 then
+                local acc = vals[gi]
+                if fn == "count" then
+                    vals[gi] = (acc or 0) + count
+                elseif fn == "sum" then
+                    vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
+                elseif fn == "avg" then
+                    vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
+                    ns[gi] = (ns[gi] or 0) + count
+                elseif fn == "min" then
+                    local x = buffer.readf64(r, at + 16)
+                    if acc == nil or x < acc then
+                        vals[gi] = x
+                    end
+                else
+                    local x = buffer.readf64(r, at + 24)
+                    if acc == nil or x > acc then
+                        vals[gi] = x
+                    end
+                end
+            end
+        end
+    end
+end
+
 -- Adds the slots from `a` to `z` of a block to the job's groups. Answers
 -- true when the job's budget ran out before the block's last row.
 local function fold_block(job: any, block: number, presence: string, a: number, z: number): boolean
+    if job.vec then
+        return vector_block(job, block, presence, a, z)
+    end
     local sel: { number }, n = job.sel, 0
     local budget, seen = job.budget, job.seen
     local more, full = false, false
@@ -901,6 +1126,9 @@ end
 
 -- Writes the job's running values into the group records it read.
 function finish(job: any)
+    if job.vec then
+        add_records(job)
+    end
     for gi, g in job.records do
         for _, a in job.aggs do
             local v = a.vals[gi]
@@ -916,6 +1144,14 @@ function finish(job: any)
             end
         end
     end
+end
+
+-- Sets the kernels later folds use: barch.vec, lent.VEC, or nil for the
+-- Luau loops. Answers the kernels it replaces. Tests compare the paths.
+function kernels(v: any): any
+    local was = vec
+    vec = v
+    return was
 end
 
 -- Whether table t holds a row at pk.

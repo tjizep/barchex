@@ -37,15 +37,15 @@ and privacy policies are built.
   `binary` rate. With an overlay of changed bytes, lent can restore the text
   append it dropped, which gains only 5% over a rewrite today. Text blocks
   already keep the slots in use for it.
-- **Vector kernels for column scans.** A column scan folds each block in a
-  Luau loop. On 409,600 rows in a transaction, a sum reads 53 million rows/s,
-  a sum under one filter 35 million and a sum grouped by a short `string`
-  field 15 million. [docs/barch-vec.md](docs/barch-vec.md) asks barch for
-  `barch.vec`: native filter, dictionary filter, fold, grouper, mask and
-  offset kernels over `i8`, `i32`, `i64`, `f64` and `str` elements, in
-  column blocks or fixed-width rows. `lent/vec.luau` is the reference, and
-  `tests/test_vec.py` checks both. Each block read in a transaction also
-  logs the read, which adds about 1.5 ms to the sum's 6.3 ms.
+- **Read many blocks in one call.** With `barch.vec`, a column scan's
+  kernels take under 1 µs per block, and reading the blocks takes nearly
+  all the rest. On 409,600 rows in a transaction, a sum runs at 85 million
+  rows/s, and reading its presence and field blocks alone takes as long.
+  Each block costs about 11 µs in a transaction and 7 µs outside one:
+  `getBufferAt` copies the value twice and logs the read. A call that
+  answers buffers for many keys, or a read-only view of a stored value,
+  would remove most of it; [docs/barch-vec.md](docs/barch-vec.md) describes
+  both.
 
 ## Planned work
 

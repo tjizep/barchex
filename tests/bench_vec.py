@@ -3,7 +3,8 @@ reference, and barch.vec when barch provides it.
 
     BARCHD=.../barchd python -m tests.bench_vec
 
-Each row is millions of elements per second through one kernel, on a column
+An optional argument sets how many milliseconds each measurement lasts, 200
+by default. Each row is millions of elements per second through one kernel, on a column
 block (elements packed) and on a block of fixed-width rows (29 bytes, so most
 elements are unaligned)."""
 
@@ -52,17 +53,25 @@ local function block(kind, shape)
     return b, off, stride
 end
 
-local function timed(reps, f)
-    local t0 = barch.time()
-    for _ = 1, reps do f() end
-    local ms = math.max(barch.time() - t0, 0.001)
-    return reps * N / ms / 1000      -- millions of elements per second
+-- millions of elements per second through f, doubling the repetitions
+-- until a run lasts `ms` milliseconds, since barch.time() counts whole ones
+local function timed(ms, f)
+    local reps = 8
+    while true do
+        local t0 = barch.time()
+        for _ = 1, reps do f() end
+        local took = barch.time() - t0
+        if took >= ms then
+            return reps * N / took / 1000
+        end
+        reps *= 2
+    end
 end
 
-function call(impl, kind, shape, kernel, reps)
+function call(impl, kind, shape, kernel, ms)
     local vec = if impl == "native" then barch.vec else require("lent.VEC")
     if vec == nil then return "-" end
-    reps = tonumber(reps)
+    ms = tonumber(ms)
     local b, off, stride = block(kind, shape)
     local sel = buffer.create(N * 4)
     local out = buffer.create(N * 4)
@@ -74,33 +83,33 @@ function call(impl, kind, shape, kernel, reps)
     for i = 0, N - 1, 2 do buffer.writeu32(sel, half * 4, i); half += 1 end
     local rate
     if kernel == "filter" then
-        rate = timed(reps, function() vec.filter(kind, b, off, stride, "<", mid, nil, nil, N, out) end)
+        rate = timed(ms, function() vec.filter(kind, b, off, stride, "<", mid, nil, nil, N, out) end)
     elseif kernel == "filter sel" then
-        rate = timed(reps, function() vec.filter(kind, b, off, stride, "<", mid, nil, sel, half, out) end)
+        rate = timed(ms, function() vec.filter(kind, b, off, stride, "<", mid, nil, sel, half, out) end)
         rate = rate * half / N
     elseif kernel == "filterIn" then
         if kind ~= "i8" and kind ~= "i32" then return "-" end
         local set = buffer.create(16)
         for c = 0, 15, 2 do buffer.writeu8(set, c, 1) end
-        rate = timed(reps, function() vec.filterIn(kind, b, off, stride, set, nil, N, out) end)
+        rate = timed(ms, function() vec.filterIn(kind, b, off, stride, set, nil, N, out) end)
     elseif kernel == "fold" then
-        rate = timed(reps, function() vec.fold(kind, b, off, stride, nil, nil, N, nil, recs) end)
+        rate = timed(ms, function() vec.fold(kind, b, off, stride, nil, nil, N, nil, recs) end)
     elseif kernel == "fold groups" then
         local g = vec.grouper(kind)
         g:ids(b, off, stride, nil, nil, N, gids)
-        rate = timed(reps, function() vec.fold(kind, b, off, stride, nil, nil, N, gids, recs) end)
+        rate = timed(ms, function() vec.fold(kind, b, off, stride, nil, nil, N, gids, recs) end)
     elseif kernel == "grouper ids" then
         local g = vec.grouper(kind)
-        rate = timed(reps, function() g:ids(b, off, stride, nil, nil, N, gids) end)
+        rate = timed(ms, function() g:ids(b, off, stride, nil, nil, N, gids) end)
     elseif kernel == "mask" then
         if kind ~= "i8" then return "-" end
         local m = buffer.create(N)
         for i = 0, N - 1, 3 do buffer.writeu8(m, i, 1) end
-        rate = timed(reps, function() vec.mask(m, 0, N, out) end)
+        rate = timed(ms, function() vec.mask(m, 0, N, out) end)
     elseif kernel == "plain sum" then
         -- a Luau loop written for one kind and layout, for comparison
         if kind ~= "f64" or impl ~= "ref" then return "-" end
-        rate = timed(reps, function()
+        rate = timed(ms, function()
             local s = 0
             for i = 0, N - 1 do s += buffer.readf64(b, off + i * stride) end
             return s
@@ -115,7 +124,7 @@ KERNELS = ["filter", "filter sel", "filterIn", "fold", "fold groups", "grouper i
            "plain sum"]
 
 
-def main(reps: int = 2000) -> None:
+def main(ms: int = 200) -> None:
     with _spawn_barchd() as server:
         c = server.client
         install(c, "lent", "VEC", "lent/vec.luau")
@@ -133,11 +142,11 @@ def main(reps: int = 2000) -> None:
                 for shape in ["column", "row"]:
                     for impl in impls:
                         cells.append(c.execute_command("CALLF", "BENCH", impl, kind, shape,
-                                                       kernel, reps))
+                                                       kernel, ms))
                 if all(x == "-" for x in cells):
                     continue
                 print(f"| {kernel} | {kind} | " + " | ".join(cells) + " |")
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else 2000)
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else 200)

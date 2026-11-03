@@ -1,19 +1,19 @@
 # barch.vec: vector kernels for column scans
 
-This is a request for barch: add `barch.vec`, a table of native functions
-that filter, group and aggregate typed values held in Luau buffers. lent
-calls them to scan column blocks and blocks of fixed-width rows. The Luau
-reference in the lent repository defines every result and error, and lent's
-tests run against both versions:
+barch provides `barch.vec`, a table of native functions that filter, group
+and aggregate typed values held in Luau buffers. lent calls them to scan
+column blocks and blocks of fixed-width rows. This page specifies them for
+barch's C++ version. The Luau reference in the lent repository defines every
+result and error, and lent's tests run against both versions:
 
 - reference: `/home/test/projects/barchex/lent/vec.luau` (`lent.VEC`)
 - conformance tests: `/home/test/projects/barchex/tests/test_vec.py`
 - benchmark: `/home/test/projects/barchex/tests/bench_vec.py`
 
-Today the reference runs at 45 to 55 million elements/s for number kernels
-and 10 to 20 million for strings. The goal for the native version is 1 to 2
-billion elements/s on number kernels over blocks of 1,024 elements, where
-the cost of the call itself starts to dominate.
+The reference runs at 45 to 55 million elements/s for number kernels and 10
+to 20 million for strings. The native version runs at 1 to 7 billion
+elements/s for number kernels and 0.6 to 3 billion for strings, as
+[Testing](#testing) lists.
 
 ## Scope
 
@@ -177,26 +177,29 @@ BARCHD=/home/test/barch/cmake-build-release/barchd python -m tests.bench_vec
 ```
 
 `test_vec.py` runs each test twice, as `ref` on `lent.VEC` and as `native`
-on `barch.vec`. The native runs skip while `barch.vec` is nil. The
-benchmark adds `native` columns when `barch.vec` exists. Leave the lent
+on `barch.vec`. The native runs skip on a barch without `barch.vec`. The
+benchmark adds `native` columns when `barch.vec` exists and times each
+measurement for 200 ms, or the milliseconds its argument gives. Leave the lent
 files unchanged; report a disagreement with the reference so lent's owner
 decides which side changes.
 
-Reference rates on one machine, in millions of elements/s, blocks of 1,024
-elements, column layout (the 29-byte row layout runs at the same rates):
+Rates on one machine, in millions of elements/s, blocks of 1,024 elements,
+column layout, as the reference and then native:
 
 | kernel | i8 | i32 | i64 | f64 | str |
 |---|---:|---:|---:|---:|---:|
-| `filter`, dense | 51 | 53 | 47 | 54 | 21 |
-| `filter`, half the slots in `sel` | 85 | 85 | 79 | 85 | 22 |
-| `filterIn`, dense | 43 | 43 | | | |
-| `fold`, one group | 49 | 50 | 46 | 53 | 59 |
-| `fold`, 16 groups | 50 | 50 | 45 | 53 | 59 |
-| `g:ids`, 16 distinct values | 33 | 33 | 28 | 31 | 10 |
-| `mask` | 186 | | | | |
+| `filter`, dense | 53 / 4,490 | 54 / 4,130 | 46 / 2,500 | 55 / 4,050 | 21 / 1,170 |
+| `filter`, half the slots in `sel` | 89 / 1,190 | 85 / 1,140 | 78 / 1,370 | 90 / 1,340 | 22 / 650 |
+| `filterIn`, dense | 42 / 4,440 | 42 / 3,980 | | | |
+| `fold`, one group | 49 / 6,650 | 50 / 7,380 | 46 / 4,510 | 53 / 5,680 | 60 / 2,940 |
+| `fold`, 16 groups | 50 / 980 | 50 / 1,000 | 44 / 1,080 | 53 / 1,020 | 56 / 2,430 |
+| `g:ids`, 16 distinct values | 32 / 2,640 | 33 / 1,140 | 27 / 1,190 | 30 / 1,110 | 10 / 600 |
+| `mask` | 200 / 5,510 | | | | |
 
-A plain Luau loop that only sums an `f64` block runs at 52, the same as the
-reference `fold`, so the Luau side has no headroom left.
+In the 29-byte row layout the reference runs at the same rates, and native
+dense `filter` and one-group `fold` run at 1.5 to 2.8 billion, since each
+element sits in its own row. A plain Luau loop that only sums an `f64`
+block runs at 52 million, the same as the reference `fold`.
 
 ## Where the time goes after this
 

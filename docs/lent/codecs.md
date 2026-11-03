@@ -164,11 +164,24 @@ These rules apply to a column table:
 `count`, `aggregate` and `aggregatePage` on a column table fold each block
 of 1,024 rows in one loop inside barch. The loop tests the filters on a
 block's field values, then adds the rows that pass to their groups, and
-creates no row tables. On 409,600 rows, on one machine, one `aggregate` call
-summed a `float` field at 53 million rows/s, summed it under a filter at 35
-million rows/s, and summed it grouped by a `string` field at 15 million
-rows/s. Each call also costs about 0.3 ms, so small tables and small pages
-gain less.
+creates no row tables. When barch provides the vector kernels `barch.vec`,
+described in [barch.vec](../barch-vec.md), the loop runs each step as one
+native call over the block. Otherwise it runs Luau loops, which give the
+same answers.
+
+On 409,600 rows in a transaction, on one machine, one `aggregate` call ran
+at these rates:
+
+| fold | with `barch.vec` | Luau loops |
+|---|---:|---:|
+| sum of a `float` field | 85 million rows/s | 48 million rows/s |
+| the same sum, filtered on an `int` field | 51 million rows/s | 31 million rows/s |
+| the same sum, grouped by a `string` field with 10 values | 42 million rows/s | 14 million rows/s |
+
+With `barch.vec`, reading the blocks takes nearly all of that time, about
+11 µs per block for the presence block and one field, so each filter or key
+on another field adds a block read. Each call also costs about 0.3 ms, so
+small tables and small pages gain less.
 
 A call uses the block loop when all of these hold:
 
@@ -180,6 +193,18 @@ A call uses the block loop when all of these hold:
 - Each `groupBy` key and aggregate field is a field of the table other than
   a `json` field, with no edge in its path.
 - `aggregate` has no `order`, `limit` or `offset` on the query.
+
+The loop uses `barch.vec` when the call also meets these:
+
+- Each filter compares `id` or an `int`, `float`, `decimal` or `time`
+  field with a number, or a `string`, `enum` or `bytes` field with a
+  string.
+- The call has at most one `groupBy` key.
+- Each aggregate counts rows, or counts, sums, averages or finds the least
+  or greatest of an `int`, `float`, `time` or `decimal` field. A `decimal`
+  sum or average, and a `distinct` aggregate, run the Luau loops.
+- No key or aggregate names `id`, and no filter, key or aggregate names a
+  `bool` field or a field with a `:default()`.
 
 Any other call reads its rows one at a time, at a million rows/s or less.
 That includes a filter function, an expression part such as `qty + 1 > 3`,
