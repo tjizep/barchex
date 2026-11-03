@@ -12,6 +12,8 @@
 --   lent.r<table><pk>                   the row, as ROWCODEC wrote it
 --   lent.p<table><block>                which rows of a column block exist
 --   lent.c<table><field id><block>      one field of a column block's rows
+--   lent.c<table><field id>x<pk>        a column text value longer than its
+--                                       block keeps, whole
 --   lent.i<table><index><values><pk>    "" for each row of a plain index
 --   lent.u<table><index><values>        the pk, for each row of a unique index
 --   lent.e<edge><from pk><to pk>        "" for each edge, read forwards
@@ -83,6 +85,15 @@ end
 -- encoded number completes.
 function column(t: any, field: number): string
     return "lent.c" .. name(t.key) .. kc.encode("int", field)
+end
+
+-- The key of the whole value of field `field` at row `pk` of a column table,
+-- for a text value longer than its block keeps, or with pk nil, the prefix
+-- of them all. It shares the field's column prefix, so dropping the field
+-- drops these too.
+function overflow(t: any, field: number, pk: number?): string
+    local key = column(t, field) .. "x"
+    return pk == nil and key or key .. kc.encode("int", pk)
 end
 
 -- The pk of a row key.

@@ -29,6 +29,10 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 `lent.graph` also takes views made with `lent.view`, which name a query
 that the client reads like a table; see [views](queries.md#views).
 
+A `column` table also takes `block`, the size of its blocks: `"htap"`,
+`"balanced"`, `"scan"` or a byte count; see
+[block size](codecs.md#block-size).
+
 | builder | modifiers |
 |---|---|
 | `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |

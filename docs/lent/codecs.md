@@ -129,24 +129,89 @@ aggregates read whole rows when the query has a filter function or a query
 policy, when the table has computed fields, or when an aggregate takes a
 `value` function.
 
-Ids split into blocks of 1,024: the block is `floor(id / 1024)`, and the slot
-is the id's place in its block. Each block has a presence key and one key per
-field that holds a value in it.
+### Block size
+
+Set `block` on a column table to choose how large its blocks are. Smaller
+blocks make each write cheaper and conflict with fewer other writes. Larger
+blocks make scans and aggregates faster.
+
+```lua
+lent.schema "Trip" {
+    id = "int",
+    format = "column",
+    block = "htap",            -- or "balanced", "scan", or a byte count
+    fields = { lent.field.time "pickup", lent.field.float "fare",
+               lent.field.string "zone" },
+}
+```
+
+| `block` | bytes per block | use |
+|---|---:|---|
+| `"htap"` | 4,096 | tables written row by row while queries scan them |
+| `"balanced"` | 8,192 | tables that are both written and scanned |
+| `"scan"` | 65,536 | tables loaded in bulk and then scanned |
+| a whole number | 1,024 to 262,144 | your own trade-off |
+
+lent fits each block close to the target size. The table and each field get
+the power of two of rows nearest to it: a presence block takes 1 byte per
+row, a number field 8, and a text field 4 plus the field's `maxLen`, its
+longest `enum` choice, or 12 bytes, up to 33. A field never has more rows
+than the presence blocks. With `block = "htap"`, presence blocks hold 4,096
+rows, number fields 512 and a `string` field without `maxLen` 256.
+
+`migrate` records the rows in the catalog when it creates the table or adds
+a field, and a field keeps them after that. `migrate` refuses a change of
+`block` on a stored table with `changes block from A to B; copy its rows
+into a new table to change its block size`. A table without `block` keeps
+1,024 rows in every block.
+
+On 409,600 rows of three fields, one `aggregate` call and one `update` of
+one row per transaction ran at these rates on one machine:
+
+| `block` | sum | filtered sum | `groupBy` and sum | `update` | `createMany` |
+|---|---:|---:|---:|---:|---:|
+| none, 1,024 rows | 79 million rows/s | 43 million rows/s | 36 million rows/s | 370 µs | 25,000 rows/s |
+| `1024` | 23 million rows/s | 11 million rows/s | 8 million rows/s | 300 µs | 31,000 rows/s |
+| `"htap"` | 63 million rows/s | 28 million rows/s | 20 million rows/s | 350 µs | 29,000 rows/s |
+| `"balanced"` | 80 million rows/s | 54 million rows/s | 27 million rows/s | 440 µs | 26,000 rows/s |
+| `"scan"` | 143 million rows/s | 70 million rows/s | 90 million rows/s | 1,090 µs | 9,300 rows/s |
+
+The sum reads a `float` field, the filter compares an `int` field, and the
+group key is a `string` field with 10 values. An `update` copies each block
+it writes, so its cost grows with the block, and so does a concurrent
+writer's chance of a conflict on that block.
+
+### Stored blocks
+
+Ids split into blocks: the block is `floor(id / rows)`, and the slot is the
+id's place in its block. Each presence block has a key, and each field one
+key per block of its own rows that holds a value. A block of a table with
+`block` starts with a header that holds its rows, and a read whose header
+disagrees with the catalog fails with `the stored blocks do not match the
+schema`.
 
 | block | stored value | fields |
 |---|---|---|
-| presence | 1,024 bytes, 1 for a slot that holds a row, then the row count as an int32 | every table |
-| number | an f64 per slot, with NaN for nil | `int`, `float`, `decimal`, `time`, `bool` |
-| text | bytes in use, slots in use, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order | `string`, `enum`, `json`, `bytes` |
+| presence | a 16-byte header, then 1 byte per slot, 1 for a slot that holds a row; without `block`, the 1,024 bytes, then the row count as an int32 | every table |
+| number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
+| text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
+
+With `block`, a text block keeps the first 33 bytes of a value longer than
+32 bytes, and the whole value is stored under its own key. Reads, filters
+and groups use the whole value. A scan reads those keys only for the long
+values it filters, groups or returns. A scan that filters or groups on a
+text field runs the Luau loops for each block that holds a long value of it.
 
 These rules apply to a column table:
 
 - **Ids.** The table needs `id = "int"`. A `uuid` table has no block numbers,
   and `lent.schema` refuses it with `has format column, which needs id =
   "int"`.
-- **Value size.** All values of a text field in one block share one store
-  value, and a key and value together hold at most 524,032 bytes. A write
-  past that fails with `would hold N bytes in column block B`. Keep large
+- **Value size.** A key and value together hold at most 524,032 bytes.
+  Without `block`, all values of a text field in one block share one store
+  value, and a write past that limit fails with `would hold N bytes in
+  column block B`. With `block`, each long value has its own key, and a
+  longer value fails with `would hold a value of N bytes`. Keep large
   values in a `binary` table.
 - **Conflicts.** Rows in one block share its keys. Two transactions that
   create rows in one block, or write one field in one block, conflict in
@@ -155,14 +220,17 @@ These rules apply to a column table:
 - **Format changes.** `migrate` refuses a change to or from `column` with
   `changes format from A to B; copy its rows into a new table to move them
   to or from column`.
+- **Block changes.** `migrate` refuses a change of `block`; see
+  [block size](#block-size).
 - **Dropped fields.** `migrate` removes a dropped field's blocks in pages,
   with a `drop Table.field blocks` step. Writes to the table continue while
   the step runs.
 
 ### Scans in barch's block loop
 
-`count`, `aggregate` and `aggregatePage` on a column table fold each block
-of 1,024 rows in one loop inside barch. The loop tests the filters on a
+`count`, `aggregate` and `aggregatePage` on a column table fold its blocks
+in one loop inside barch, a run of rows at a time as long as the smallest
+block the call reads. The loop tests the filters on a
 block's field values, then adds the rows that pass to their groups, and
 creates no row tables. When barch provides the vector kernels `barch.vec`,
 described in [barch.vec](../barch-vec.md), the loop runs each step as one
@@ -178,8 +246,9 @@ at these rates:
 | the same sum, filtered on an `int` field | 51 million rows/s | 31 million rows/s |
 | the same sum, grouped by a `string` field with 10 values | 42 million rows/s | 14 million rows/s |
 
-With `barch.vec`, reading the blocks takes nearly all of that time, about
-11 µs per block for the presence block and one field, so each filter or key
+These rates are for a table without `block`; see [block size](#block-size)
+for larger blocks. With `barch.vec`, reading the blocks takes nearly all of
+that time, about 11 µs per block for the presence block and one field, so each filter or key
 on another field adds a block read. Each call also costs about 0.3 ms, so
 small tables and small pages gain less.
 

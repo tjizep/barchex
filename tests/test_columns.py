@@ -19,6 +19,8 @@ local client = require("lent.CLIENT")
 local col = require("lent.COLUMNS")
 local VALUES = require("lent.VALUES")
 local f = lent.field
+-- the block option the test gives Sale
+local BLOCK = BLOCK_OPTION
 
 local function fields()
     return {
@@ -34,20 +36,24 @@ local function indexes()
     return { lent.index("region"), lent.index("qty"), lent.index("note"):unique() }
 end
 
-local app = lent.graph {
-    lent.schema "Sale" {
-        id = "int", format = "column", fields = fields(), indexes = indexes(),
-        edges = { lent.edge.from "shop" "Shop":ref "sales":unique() },
-    },
-    lent.schema "Plain" {
-        id = "int", format = "binary", fields = fields(), indexes = indexes(),
-        edges = { lent.edge.from "shop" "Shop":ref "plains":unique() },
-    },
-    lent.schema "Shop" {
-        id = "int", format = "column", fields = { f.string "city" },
-        edges = { lent.edge.to "sales" "Sale", lent.edge.to "plains" "Plain" },
-    },
-}
+-- Sale's blocks are the size `block` names, or 1024 rows each with nil
+local function graph(block)
+    return lent.graph {
+        lent.schema "Sale" {
+            id = "int", format = "column", block = block, fields = fields(),
+            indexes = indexes(), edges = { lent.edge.from "shop" "Shop":ref "sales":unique() },
+        },
+        lent.schema "Plain" {
+            id = "int", format = "binary", fields = fields(), indexes = indexes(),
+            edges = { lent.edge.from "shop" "Shop":ref "plains":unique() },
+        },
+        lent.schema "Shop" {
+            id = "int", format = "column", fields = { f.string "city" },
+            edges = { lent.edge.to "sales" "Sale", lent.edge.to "plains" "Plain" },
+        },
+    }
+end
+local app = graph(BLOCK)
 local db = client.open(app)
 
 
@@ -195,6 +201,14 @@ function cases.vByNote(t) return rows_text(t:query():groupBy("note"):aggregate(S
 function cases.vByState(t)
     return rows_text(t:query():where("state", "~=", "new"):groupBy("state"):aggregate(STATS))
 end
+-- note blocks hold half the rows of state's in a sized table, so state's
+-- chunks start partway into its blocks
+function cases.vMixed(t)
+    return rows_text(t:query():where("note", ">", "note1"):groupBy("state"):aggregate(STATS))
+end
+function cases.vMixedText(t)
+    return t:query():where("raw", ">=", "by"):where("state", "=", "done"):count()
+end
 function cases.vPaged(t)
     local out = {}
     for _, size in { 300, 1000, 5000 } do
@@ -290,8 +304,12 @@ function steps.fill(c, tname, from, to)
             at = if i % 4 == 0 then nil else i * 7919 % 1e9,
             state = if i % 7 == 0 then nil elseif i % 2 == 0 then "new" else "done",
             -- values of 0 to 8 bytes, some repeating
-            raw = if i % 6 == 0 then nil else string.sub("bytes" .. i, 1, i % 9),
-            note = if i % 4 == 1 then nil else "note" .. i,
+            -- values of 0 to 8 bytes, some repeating, and a long one that
+            -- repeats
+            raw = if i % 6 == 0 then nil elseif i % 37 == 0 then string.rep("r", 40)
+                else string.sub("bytes" .. i, 1, i % 9),
+            note = if i % 4 == 1 then nil elseif i % 50 == 0 then string.rep("long", 10) .. i
+                else "note" .. i,
         }
     end
     c[tname]:createMany(rows)
@@ -370,9 +388,55 @@ function steps.huge_update(c, id, size)
     return err(function() c.Sale:update(id, { raw = string.rep("y", size) }) end)
 end
 
+-- the rows the catalog keeps for Sale and some of its fields
+function steps.catalog()
+    local t = m.load().tables.sale
+    local out = { tostring(t.block), tostring(t.rows) }
+    for _, f in t.fields do
+        if f.name == "region" or f.name == "qty" or f.name == "state" or f.name == "raw" then
+            out[#out + 1] = f.name .. "=" .. tostring(f.rows)
+        end
+    end
+    return out
+end
+
+-- the schemas and migrations a block option refuses
+function steps.refused_blocks()
+    local function declare(spec)
+        return function()
+            spec.fields = { f.int "a" }
+            lent.schema "Odd" (spec)
+        end
+    end
+    return {
+        err(declare { id = "int", block = "htap" }),
+        err(declare { id = "int", format = "column", block = "huge" }),
+        err(declare { id = "int", format = "column", block = 512 }),
+        err(declare { id = "int", format = "column", block = 2048.5 }),
+        err(function() m.plan(m.load(), graph(if BLOCK then nil else "scan")) end),
+        lent.schema "Fine" { id = "int", format = "column", block = "balanced",
+                             fields = { f.int "a" } }.block,
+    }
+end
+
+-- whether a value longer than a block keeps is stored whole, by id
+function steps.long(c, tname, id)
+    local lay = require("lent.LAYOUT")
+    local t = m.load().tables.sale
+    for _, f in t.fields do
+        if f.name == "note" then
+            return if barch.store.exists(lay.overflow(t, f.id, id)) then 1 else 0
+        end
+    end
+    return 0
+end
+
 function call(step, mode, ...)
     if step == "migrate" then
         return m.migrate(app).version
+    end
+    if step == "catalog" or step == "refused_blocks" then
+        return steps[step]()
     end
     if step == "selftest" then
         return col.call()
@@ -387,15 +451,25 @@ end
 """
 
 
-@pytest.fixture(params=["optimistic", "pessimistic"])
+# Sale with blocks of 1024 rows and no header, and with the smallest blocks
+# a `block` option asks for, whose field blocks hold 64 or 128 rows
+BLOCKS = {"fixed": "nil", "small": "1024"}
+
+
+@pytest.fixture(params=[(m, b) for b in BLOCKS for m in ("optimistic", "pessimistic")],
+                ids=lambda p: "-".join(p))
 def run(client, request):
     setup(client)
     install(client, "lent", "VEC", "lent/vec.luau")
     client.execute_command("USE", "cols_" + re.sub(r"\W", "_", request.node.name))
-    client.execute_command("SETF", "COLS", APP)
+    mode, block = request.param
+    client.execute_command("SETF", "COLS", APP.replace("BLOCK_OPTION", BLOCKS[block], 1))
     assert client.execute_command("CALLF", "COLS", "migrate", "") == 1
-    mode = request.param
-    return lambda step, *a: client.execute_command("CALLF", "COLS", step, mode, *a)
+
+    def call(step, *a):
+        return client.execute_command("CALLF", "COLS", step, mode, *a)
+    call.block = block
+    return call
 
 
 def write_both(run, op, pk, values):
@@ -434,9 +508,9 @@ def seed_row(rng, pk):
     if rng.random() < .5:
         row["tags"] = {"n": rng.randrange(5), "list": [1, "a"]}
     if rng.random() < .5:
-        row["raw"] = rng.choice(["", "ab", "bytesé"])
+        row["raw"] = rng.choice(["", "ab", "bytesé", "é" * 16, "b" * 33, "c" * 32])
     if rng.random() < .5:
-        row["note"] = "note%d" % pk
+        row["note"] = "note%d" % pk + ("-" * 40 if rng.random() < .3 else "")
     return row
 
 
@@ -491,7 +565,7 @@ def test_column_answers_what_binary_answers(run, seed):
 
 
 VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
-                "vByQty", "vByScore", "vByNote", "vByState", "vPaged"]
+                "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -526,6 +600,7 @@ def test_full_blocks_answer_what_binary_answers(run):
 
 
 def test_rows_use_blocks_and_leave_with_their_last_row(run):
+    # a row of each table in two presence blocks, of 1024 rows either way
     for pk in (1, 2, 1030):
         write_both(run, "create", pk, {"region": "n", "qty": 1, "note": "n%d" % pk})
     # region, qty, rank and note in each of two blocks
@@ -574,6 +649,8 @@ def test_error_rolls_back_block_writes(run):
 
 
 def test_a_block_past_the_value_limit_fails_clearly(run):
+    if run.block != "fixed":
+        pytest.skip("a block of a sized table keeps 33 bytes of each value")
     # eleven 50,000 byte values fill a block past its limit of 524,032
     assert run("huge", "0", "10", "50000") == "ok"
     with pytest.raises(redis.exceptions.ResponseError, match="in column block 0, and a block holds"):
@@ -594,3 +671,68 @@ def test_blocks_fill_in_batches(run, rows):
         done += n
     assert run("ask", "Sale", "count") == rows
     assert json.loads(run("keys"))["present"] == rows // 1024 + 1
+
+
+def test_the_catalog_keeps_block_rows(run):
+    got = run("catalog")
+    if run.block == "fixed":
+        assert got == ["nil", "nil", "region=nil", "qty=nil", "state=nil", "raw=nil"]
+    else:
+        # 1024 bytes: 1024 presence bytes, 128 f64s, 64 lengths and
+        # values of up to 12 bytes, or 128 of up to 4 for the enum
+        assert got == ["1024", "1024", "region=64", "qty=128", "state=128", "raw=64"]
+
+
+def test_block_options_refused(run):
+    got = run("refused_blocks")
+    assert "sets block, which needs format = \"column\"" in got[0]
+    assert "block takes htap, balanced, scan or a whole number of bytes" in got[1]
+    assert "got huge" in got[1]
+    assert "got 512" in got[2]
+    assert "got 2048.5" in got[3]
+    assert "table Sale changes block from" in got[4]
+    assert got[5] == 8192
+
+
+def test_field_blocks_leave_with_their_last_row(run):
+    if run.block == "fixed":
+        pytest.skip("each field block of a fixed table spans its presence block")
+    # ids 1 and 100 share a presence block and an int block, and lie in
+    # two text blocks of 64 rows
+    for pk in (1, 100):
+        write_both(run, "create", pk, {"region": "n", "qty": 1, "note": "n%d" % pk})
+    assert json.loads(run("keys")) == {"present": 1, "fields": 6, "rows": 0}
+    write_both(run, "delete", 100, {})
+    assert json.loads(run("keys")) == {"present": 1, "fields": 4, "rows": 0}
+    same(run, "ask", "all")
+
+
+def test_long_text_keeps_its_whole_value(run):
+    long = "x" * 40
+    write_both(run, "create", 1, {"region": "n", "qty": 1, "note": long})
+    write_both(run, "create", 2, {"region": long, "qty": 2, "note": "c" * 33})
+    assert run("long", "Sale", "1") == int(run.block != "fixed")
+    same(run, "get", "1")
+    write_both(run, "update", 1, {"note": "y" * 32})
+    assert run("long", "Sale", "1") == 0
+    same(run, "get", "1")
+    write_both(run, "update", 1, {"note": long + "z"})
+    assert run("long", "Sale", "1") == int(run.block != "fixed")
+    for case in ("all", "region", "grouped", "byRaw"):
+        same(run, "ask", case)
+    write_both(run, "delete", 1, {})
+    assert run("long", "Sale", "1") == 0
+    write_both(run, "clear", 2, "note")
+    write_both(run, "delete", 2, {})
+    assert json.loads(run("keys")) == {"present": 0, "fields": 0, "rows": 0}
+
+
+def test_a_long_value_past_the_value_limit_fails_clearly(run):
+    if run.block == "fixed":
+        pytest.skip("a fixed table keeps whole values in its blocks")
+    # a block keeps 33 bytes of each value, so eleven of 50,000 bytes fit
+    assert run("huge", "0", "11", "50000") == "ok"
+    assert len(run("get", "Sale", "11")) > 50000
+    got = run("huge_update", "1", "600000")
+    assert "would hold a value of 600000 bytes" in got
+    assert len(run("get", "Sale", "1")) > 50000

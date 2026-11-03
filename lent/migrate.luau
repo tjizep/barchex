@@ -199,8 +199,10 @@ end
 -- Gives the fields of catalog table or edge `t` their Luau values back.
 local function load_fields(t: any)
     t.next = num(t.next)
+    t.block, t.rows = num(t.block), num(t.rows)
     for _, f in t.fields or {} do
         f.id = num(f.id)
+        f.rows = num(f.rows)
         f.computed = num(f.computed)
         f.scale = num(f.scale)
         f.default = num(f.default)
@@ -343,8 +345,21 @@ function plan(prev: any, app: any): any
             fail(where .. " changes format from " .. old.format .. " to " .. t.format
                 .. "; copy its rows into a new table to move them to or from column")
         end
+        if old and old.format == "column" and old.block ~= t.block then
+            fail(where .. " changes block from " .. tostring(old.block) .. " to "
+                .. tostring(t.block) .. "; copy its rows into a new table to change its"
+                .. " block size")
+        end
         local before = by_name(old and old.fields)
         local fields, ver = check_fields(where, old, t, before)
+        -- a field keeps the block rows its values were stored with
+        if t.block then
+            for i, f in fields do
+                local d = t.fields[i]
+                local was = before[d.name] or (d.was and before[d.was])
+                f.rows = if was and was.rows then was.rows else col.block_rows(t.block, f)
+            end
+        end
         local after = by_name(fields)
         -- stored computed fields that rows stored before need computed:
         -- new ones, and ones whose revision changed
@@ -361,6 +376,7 @@ function plan(prev: any, app: any): any
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
+            block = t.block, rows = if old then old.rows else t.block and col.block_rows(t.block),
             fields = fields, indexes = {}, edges = {},
         }
         for i, ix in t.indexes do c.indexes[i] = index_spec(ix) end
@@ -608,7 +624,8 @@ local function write_catalog(c: any)
         local base = "/lent/tables/" .. key
         g.mkdir(base)
         g.put(base .. "/table", simdjson.encode({ name = t.name, format = t.format, id = t.id,
-                                                  next = t.next }), "json")
+                                                  next = t.next, block = t.block,
+                                                  rows = t.rows }), "json")
         nodes[t.name] = g.stat(base .. "/table").id
         g.mkdir(base .. "/fields")
         local fieldNode = {}
@@ -1048,13 +1065,13 @@ local function analyze_page(t: any, ix: any, run: any, limit: number): (number, 
         local keys, values = barch.store.rangeValues(run.last and run.last .. "\2" or all,
                                                      kc.after(all), limit)
         for i, k in keys do
-            local rows = col.rows_in(values[i])
+            local rows = col.rows_in(t, values[i])
             while run.next <= wanted do
                 local at = sample_at(run.next, run.total)
                 if at >= run.pos + rows then
                     break
                 end
-                local id = col.nth_id(lay.present_block(k), values[i], at - run.pos)
+                local id = col.nth_id(t, lay.present_block(k), values[i], at - run.pos)
                 if id ~= nil then
                     take_sample(run, prefix, lay.row(t, id))
                 else

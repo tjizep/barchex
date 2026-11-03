@@ -20,10 +20,13 @@ and privacy policies are built.
   at once can deadlock on the shared lock of the unique check.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
   order the two calls.
-- **Column tables.** `format = "column"` needs `int` ids, keeps a field's
-  values of one block within 524,032 bytes, and shares conflicts and locks
-  across each block. `migrate` refuses a format change to or from `column`.
-  See `docs/lent/codecs.md`.
+- **Column tables.** `format = "column"` needs `int` ids and shares
+  conflicts and locks across each block. Without `block`, a field's values
+  of one block stay within 524,032 bytes. `migrate` refuses a format change
+  to or from `column`. See `docs/lent/codecs.md`.
+- **Changing a column table's block size.** `migrate` refuses a change of
+  `block`. A paged rebuild would copy each block's rows into blocks of the
+  new rows, the way index builds page, and switch the catalog when it ends.
 
 ## Needed from barch
 
@@ -63,14 +66,36 @@ and privacy policies are built.
   barch needs a count with no lock and no phantom log; lent then calls it in
   `plan_keys`, and the cost note under Index choice in
   `docs/lent/queries.md` goes away.
-- **Typed and dictionary column blocks.** Column blocks hold every number as
-  an f64 and every string as bytes. Store `int` fields that fit as `i8` or
-  `i32` blocks, and short repeated strings as `i8` or `i32` codes into a
-  per-table dictionary, so scans read a half to an eighth of the bytes
-  and filter, group and fold codes with `barch.vec`. Equality, `in` and
-  groups work on codes directly; other string conditions mark the passing
-  codes once and call `filterIn`. Decide how a block widens when its values
-  outgrow `i8`, and how the dictionary stays bounded.
+- **Typed column blocks.** Column blocks hold every number as an f64. Store
+  `int` fields that fit as `i8` or `i32` blocks, so scans read a half to an
+  eighth of the bytes. Decide how a block widens when its values outgrow
+  `i8`. Typed blocks can use the header that blocks of a table with `block`
+  start with: its version and tag bytes can name the element type, and the
+  rows sizing then takes the element width.
+- **Dictionary text blocks.** Grouping by a text field runs at about half
+  the rate of grouping by a number: each block needs an `offsets` pass, and
+  the grouper hashes every row's string. Store a text block with few
+  distinct values as a dictionary block, tagged in its header: its distinct
+  values in sorted order, then one code per slot, `i8` while the block holds
+  at most 255 values and `i32` above that. The codes follow the order of the
+  values within the block, so:
+  - a group runs the grouper on the codes, then maps the block's few codes
+    to the scan's groups by their strings;
+  - a range condition finds its bounds in the sorted values with one binary
+    search per block and filters the codes as numbers; equality and `in`
+    mark the passing codes and call `filterIn`;
+  - `min`, `max` and ordering compare codes.
+
+  Each block keeps its own dictionary, so a new value re-sorts and recodes
+  one block, which a write already rewrites, and writers to different
+  blocks share no dictionary key. A block uses the plain text layout once
+  its distinct values pass a limit, so names and phone numbers stay plain.
+  A table-wide ordered dictionary would make codes comparable across
+  blocks, but every new value between two others then relabels codes in
+  many blocks; see order-maintenance labeling (Dietz and Sleator, 1987),
+  order-preserving dictionaries for column stores (Binnig, Hildenbrand and
+  Färber, SIGMOD 2009) and the delta merge of SAP HANA. The rows sizing
+  takes the code width plus the dictionary's share of the block.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.

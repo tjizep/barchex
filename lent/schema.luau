@@ -692,7 +692,12 @@ local function plain_policy(where: string, spec: any): any
 end
 
 local OPTIONS = { format = true, id = true, fields = true, edges = true, indexes = true,
-                  hooks = true, policy = true }
+                  hooks = true, policy = true, block = true }
+
+-- the block sizes in bytes that a column table's `block` names, and the
+-- range a byte count may take
+local BLOCKS = { htap = 4096, balanced = 8192, scan = 65536 }
+local LEAST_BLOCK, MOST_BLOCK = 1024, 262144
 
 -- Checks the value rules of field `f` and copies them into `out`.
 local function rules(where: string, f: any, out: any)
@@ -855,10 +860,13 @@ local function edge_fields(where: string, list: { any }): { any }
 end
 
 -- One table:
--- `lent.schema "Name" { format?, id?, fields, edges?, indexes?, hooks?,
--- policy? }`.
+-- `lent.schema "Name" { format?, id?, block?, fields, edges?, indexes?,
+-- hooks?, policy? }`. A column table's `block` names the size of its blocks:
+-- "htap" (4096 bytes), "balanced" (8192), "scan" (65536), or a byte count
+-- from 1024 to 262144; the answer holds the bytes. Without it, every block
+-- holds 1024 rows.
 -- The answer is plain data:
---   { name, key, format, id, fields = { { name, kind, optional, unique,
+--   { name, key, format, id, block?, fields = { { name, kind, optional, unique,
 --     default, was, immutable, min?, max?, minLen?, maxLen?, match?, values? } },
 --     indexes = { { name, on, edges?, unique } },
 --     edges = { { name, dir, target, unique, ref?, fields?, via?, stored? } } }
@@ -892,7 +900,20 @@ function schema(name: string)
         if format == "column" and id ~= "int" then
             fail(where .. " has format column, which needs id = \"int\"")
         end
-        local t = { name = name, key = snake(name), format = format, id = id,
+        local block = spec.block
+        if block ~= nil then
+            if format ~= "column" then
+                fail(where .. " sets block, which needs format = \"column\"")
+            end
+            block = BLOCKS[block] or block
+            if type(block) ~= "number" or block % 1 ~= 0 or block < LEAST_BLOCK
+                or block > MOST_BLOCK then
+                fail(where .. " block takes htap, balanced, scan or a whole number of bytes"
+                    .. " from " .. LEAST_BLOCK .. " to " .. MOST_BLOCK .. ", got "
+                    .. tostring(spec.block))
+            end
+        end
+        local t = { name = name, key = snake(name), format = format, id = id, block = block,
                     fields = {}, indexes = {}, edges = {}, computed = {} }
 
         local byName, was, computed = {}, {}, {}

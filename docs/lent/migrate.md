@@ -80,6 +80,7 @@ changes or a unique-index conflict:
   the field for a stored row;
 - a change to a table's `id` kind;
 - a change of a table's format to or from `column`;
+- a change of a `column` table's `block`;
 - an `edge.to` or `edge.from` that takes the name of a stored path edge in
   the same migration.
 
