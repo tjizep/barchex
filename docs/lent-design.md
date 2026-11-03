@@ -234,14 +234,18 @@ the basics work.
 ## Row formats
 
 Each table names its row format. Every stored row records the schema
-version it was written with, and `ROWCODEC` reads any format, so a table can
-change format and convert its rows over time.
+version it was written with, and `ROWCODEC` reads `json`, `text` and
+`binary`, so a table can change between them and convert its rows over time.
+A `column` table stores fields in blocks with no row keys, so `migrate`
+refuses a change to or from `column`; see
+[Column tables](lent/codecs.md#column-tables-with-columns).
 
 | format | stored value | fields named by | use |
 |---|---|---|---|
 | `json` | a JSON object with the version in `_v` | name | rows other tools read as JSON; strings must be UTF-8 |
 | `text` | `t<version>` then tab-separated `<id>=<value>` | field id | rows a person reads with `GET` |
 | `binary` | `b`, a u32 version, then (id, tag, value) entries | field id | compact rows that hold any bytes |
+| `column` | blocks of 1,024 rows, one key per field | field id | tables scanned and aggregated more than they are written row by row |
 
 Field ids stay with a field for the table's life. A row written by an older
 schema reads with the current field list: a field added since reads as nil,

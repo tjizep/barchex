@@ -7,7 +7,7 @@ SCHEMA declares lent tables in Luau. `lent.schema` checks one table and
 ```lua
 local lent = require("lent.SCHEMA")
 local User = lent.schema "User" {
-    format = "json",                              -- default "binary"
+    format = "json",                              -- or "text" or "column"; default "binary"
     fields = {
         lent.field.string "email":unique(),        -- adds unique index by_email
         lent.field.string "name",

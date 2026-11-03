@@ -50,6 +50,7 @@
 
 local rc = require("lent.ROWCODEC")
 local lay = require("lent.LAYOUT")
+local col = require("lent.COLUMNS")
 local kc = require("lent.KEYCODEC")
 local mig = require("lent.MIGRATE")
 local SCHEMA = require("lent.SCHEMA")
@@ -212,15 +213,28 @@ end
 
 -- The row at pk, filled with defaults and computed fields, or nil. A pessimistic caller about
 -- to write the row reads it with the exclusive lock.
--- The row at pk, from `v`, the value stored at its key.
-local function row_of(self: any, pk: any, v: string): any
-    local r = lay.fill(self.t, (rc.decode(self.fields, v)))
+-- The row at pk, from `v`, the value stored at its key or a column table's
+-- values.
+local function row_of(self: any, pk: any, v: any): any
+    local r = lay.fill(self.t, if type(v) == "table" then v else (rc.decode(self.fields, v)))
     r.id = pk
     return compute(self, r)
 end
 
+local function is_column(self: any): boolean
+    return self.t.format == "column"
+end
+
+-- What the table stores for the row at pk, or nil, for row_of.
+local function stored_row(self: any, pk: any, exclusive: boolean?): any
+    if is_column(self) then
+        return col.read(self.t, self.fields, pk, exclusive and self.lock)
+    end
+    return get(self, lay.row(self.t, pk), exclusive)
+end
+
 local function read(self: any, pk: any, exclusive: boolean?): any
-    local v = get(self, lay.row(self.t, pk), exclusive)
+    local v = stored_row(self, pk, exclusive)
     if v == nil then
         return nil
     end
@@ -416,15 +430,21 @@ local function check_free(self: any, ix: any, key: string, pk: any, r: any, ids:
         duplicate(self, ix, other, r, ids)
     end
     if ix.state == "building" then
-        local rows = lay.row(self.t)
-        lay.scan_values(rows, kc.after(rows), function(k, v)
-            local otherPk = lay.row_pk(self.t, k)
+        local function check(otherPk: any, v: any): boolean
             if otherPk ~= pk and lay.entry(self.t, ix, row_of(self, otherPk, v), otherPk,
                                            lay.linked(self.allEdges, ix, otherPk)) == key then
                 duplicate(self, ix, tostring(otherPk), r, ids)
             end
             return false
-        end)
+        end
+        local rows = lay.row(self.t)
+        if is_column(self) then
+            col.scan(self.t, self.fields, rows, kc.after(rows), check)
+        else
+            lay.scan_values(rows, kc.after(rows), function(k, v)
+                return check(lay.row_pk(self.t, k), v)
+            end)
+        end
     end
 end
 
@@ -453,7 +473,13 @@ end
 -- before the first write, so an error leaves the store as it was. A new
 -- row has no links yet; linking it moves the entries of indexes with edges.
 local function store(self: any, pk: any, old: any, r: any, counter: string?): any
-    local value = rc.encode(self.fields, self.t.format, self.version, r)
+    local write
+    if is_column(self) then
+        write = col.write(self.t, self.fields, pk, old, r, self.lock)
+    else
+        local value = rc.encode(self.fields, self.t.format, self.version, r)
+        write = function() barch.store.set(lay.row(self.t, pk), value) end
+    end
     local moves = {}
     for _, ix in self.t.indexes do
         local ids = old and lay.linked(self.allEdges, ix, pk)
@@ -471,7 +497,7 @@ local function store(self: any, pk: any, old: any, r: any, counter: string?): an
         barch.store.set(counter, tostring(pk))
     end
     move_entries(moves)
-    barch.store.set(lay.row(self.t, pk), value)
+    write()
     r.id = pk
     return r
 end
@@ -525,6 +551,9 @@ end
 
 local function exists(self: any, pk: any): boolean
     check_pk(self, pk)
+    if is_column(self) then
+        return col.exists(self.t, pk)
+    end
     return barch.store.exists(lay.row(self.t, pk))
 end
 
@@ -707,10 +736,10 @@ local function relink(self: any, s: any, from: any, to: any, sign: number): { an
         if not l.forward then
             pk, other = to, from
         end
-        local v = get(tbl, lay.row(tbl.t, pk), true)
+        local v = stored_row(tbl, pk, true)
         if v ~= nil then
             writable(tbl)
-            local r = lay.fill(tbl.t, (rc.decode(tbl.fields, v)))
+            local r = lay.fill(tbl.t, if type(v) == "table" then v else (rc.decode(tbl.fields, v)))
             local ids = lay.linked(self.allEdges, ix, pk) :: any
             local was = lay.entry(tbl.t, ix, r, pk, ids)
             ids[l.name] = if sign > 0 then other else nil
@@ -896,7 +925,7 @@ function Table:create(values: { [string]: any }): any
     end
     if given ~= nil then
         check_pk(self, given)
-        if get(self, lay.row(self.t, given), true) ~= nil then
+        if stored_row(self, given, true) ~= nil then
             fail(self.where .. " already has a row " .. tostring(given))
         end
     end
@@ -1141,7 +1170,11 @@ function Table:delete(pk: any): boolean
             barch.store.remove(key)
         end
     end
-    barch.store.remove(lay.row(self.t, pk))
+    if is_column(self) then
+        col.remove(self.t, self.fields, pk, old, self.lock)
+    else
+        barch.store.remove(lay.row(self.t, pk))
+    end
     return true
 end
 
@@ -1246,7 +1279,8 @@ local function fits(kind: string, v: any): boolean
 end
 
 local function new_query(tbl: any): any
-    return setmetatable({ tbl = tbl, conds = {}, ors = {}, preds = {}, checks = {}, loads = {},
+    return setmetatable({ tbl = tbl, conds = {}, ors = {}, preds = {}, exprPreds = 0,
+                          exprFields = {}, checks = {}, loads = {},
                           skip = 0 }, Query)
 end
 
@@ -1284,11 +1318,14 @@ function Query:where(field: any, op: any, value: any): any
     end
     if type(field) == "string" and value == nil and (op == nil or type(op) == "table") then
         local tbl = self.tbl
-        local parts = EXPR.compile(field, function(name) return field_kind(tbl, name) end, op,
-                                   "LENT " .. tbl.where .. " query where")
+        local parts = EXPR.compile(field, function(name)
+            self.exprFields[name] = true
+            return field_kind(tbl, name)
+        end, op, "LENT " .. tbl.where .. " query where")
         for _, p in parts do
             if p.fn then
                 self.preds[#self.preds + 1] = p.fn
+                self.exprPreds += 1
                 for f, list in p.ranges or {} do
                     self.ors[#self.ors + 1] = { field = f, ranges = list }
                 end
@@ -1543,12 +1580,21 @@ local function bound(kind: string, prefix: string, v: any, open: boolean?, upper
     return if (open == true) == (upper == true) then key else kc.after(key)
 end
 
+-- How many keys of table `tbl` lie in index `ix` from lo up to hi. A column
+-- table has no keys for its rows, so its primary index counts them.
+local function keys_within(tbl: any, ix: any, lo: string, hi: string): number
+    if ix.primary and is_column(tbl) then
+        return col.count(tbl.t, lo, hi)
+    end
+    return barch.store.count(lo, hi)
+end
+
 -- How many keys plan p reads.
-local function plan_keys(p: any): number
+local function plan_keys(q: any, p: any): number
     local n = 0
     for _, s in p.spans or { p } do
         if s.lo < s.hi then
-            n += barch.store.count(s.lo, s.hi)
+            n += keys_within(q.tbl, p.ix, s.lo, s.hi)
         end
     end
     return n
@@ -1724,7 +1770,7 @@ local function index_plan(q: any, keys: boolean?): any
         return finish(best)
     end
     for _, c in tied do
-        finish(c).keys = plan_keys(c)
+        finish(c).keys = plan_keys(q, c)
         if c.keys < best.keys then
             best = c
         end
@@ -1997,8 +2043,9 @@ end
 -- The rows q matches. With `page`, it reads one page of them for
 -- aggregatePage: at most page.budget keys or linked ids after page.from, in
 -- key or id order. It sets page.last to the last one read, page.seen to how
--- many it read, and page.more when more remain.
-local function rows(q: any, loading: boolean?, page: any?): { any }
+-- many it read, and page.more when more remain. A column table's rows hold
+-- the fields in the set `need`, or all of them with need nil.
+local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
     if q.tbl.linksOf then
         return link_rows(q)
     end
@@ -2059,8 +2106,10 @@ local function rows(q: any, loading: boolean?, page: any?): { any }
     local function scan_index(ix: any, only: any, budget: number?): boolean
         local seen, over = 0, false
         local primary, unique = ix.ix.primary, ix.ix.unique
-        local rowValues = primary and only == nil
-        local function each(k: string, v: string?): boolean
+        local blocks = primary and is_column(tbl)
+        local rowValues = primary and (only == nil or blocks)
+        -- a column table's scan answers each row's pk in place of a key
+        local function each(k: any, v: any): boolean
             seen += 1
             if budget and seen > budget then
                 over = true
@@ -2069,14 +2118,20 @@ local function rows(q: any, loading: boolean?, page: any?): { any }
             if page then
                 page.last, page.seen = k, seen
             end
-            local pk = if primary then lay.row_pk(tbl.t, k) else lay.pk_of(tbl.t, ix.ix, k, v)
+            local pk = if blocks then k elseif primary then lay.row_pk(tbl.t, k)
+                else lay.pk_of(tbl.t, ix.ix, k, v)
             if only and not only[pk] then
                 return false
             end
             return consider(pk, if rowValues then v else nil)
         end
         local scan, first
-        if rowValues or (unique and not primary) then
+        if blocks then
+            first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
+            scan = function(lo: string, hi: string, fn: any, limit: number?): boolean
+                return col.scan(tbl.t, tbl.fields, lo, hi, fn, limit, back, need)
+            end
+        elseif rowValues or (unique and not primary) then
             first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
             scan = back and lay.scan_back_values or lay.scan_values
         else
@@ -2092,6 +2147,9 @@ local function rows(q: any, loading: boolean?, page: any?): { any }
             if lo < hi and scan(lo, hi, each, first) then
                 break
             end
+        end
+        if page and blocks and page.last then
+            page.last = lay.row(tbl.t, page.last)
         end
         return not over
     end
@@ -2193,6 +2251,28 @@ function Query:ids(): { number }
     return list
 end
 
+-- The set of fields q's filters and order read from a row, with those of
+-- `more`, or nil when a function may read any field. It lets a column table
+-- read only those fields' blocks.
+local function needed(q: any, more: { string }?): any
+    local tbl = q.tbl
+    if tbl.memory or #tbl.computed > 0 or #tbl.stored > 0 or tbl.queryRules
+        or #q.preds ~= q.exprPreds then
+        return nil
+    end
+    local need = table.clone(q.exprFields)
+    for _, c in q.conds do
+        need[c.field] = true
+    end
+    if q.sortField then
+        need[q.sortField] = true
+    end
+    for _, name in more or {} do
+        need[name] = true
+    end
+    return need
+end
+
 -- How many keys of q's index hold exactly the rows q matches, before offset
 -- and limit, or nil when some row has to be read to tell. The plan's bounds
 -- may let in rows its filters leave out: a `>` starts at the value itself,
@@ -2230,7 +2310,7 @@ local function key_count(q: any): number?
             end
         end
     end
-    return if lo < hi then barch.store.count(lo, hi) else 0
+    return if lo < hi then keys_within(q.tbl, p.ix, lo, hi) else 0
 end
 
 -- How many rows the query matches. When the query's filters are `=` on the
@@ -2239,7 +2319,7 @@ end
 function Query:count(): number
     local n = key_count(self)
     if n == nil then
-        return #rows(self)
+        return #rows(self, false, nil, needed(self))
     end
     local left = math.max(n - self.skip, 0)
     return if self.lim then math.min(left, self.lim) else left
@@ -2595,7 +2675,7 @@ local function aggregation(q: any, keys: { any }, spec: any, shape: any?): any
         end
         memos[i] = memo
     end
-    return { tbl = tbl, keys = keys, aggs = aggs, kinds = kinds, tests = tests, memos = memos,
+    return { q = q, tbl = tbl, keys = keys, aggs = aggs, kinds = kinds, tests = tests, memos = memos,
              shape = shape, groups = {}, list = {} }
 end
 
@@ -2609,6 +2689,23 @@ local function group_of(agg: any, key: string, values: { any }): any
         agg.list[#agg.list + 1] = g
     end
     return g
+end
+
+-- The set of fields agg's query reads from a row, or nil for any.
+local function aggregate_needs(agg: any): any
+    local more = {}
+    for _, a in agg.aggs do
+        if a.value then
+            return nil
+        end
+        more[#more + 1] = a.field
+    end
+    for _, k in agg.keys do
+        if k.hops == nil then
+            more[#more + 1] = k.name
+        end
+    end
+    return needed(agg.q, more)
 end
 
 -- Adds each row of `list` to its group's running values.
@@ -2682,7 +2779,7 @@ end
 -- groupBy.
 local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     local agg = aggregation(q, keys, spec, shape)
-    fold_rows(agg, rows(q))
+    fold_rows(agg, rows(q, false, nil, aggregate_needs(agg)))
     return group_rows(agg)
 end
 
@@ -2855,7 +2952,7 @@ local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, sta
     local mark = page_mark(pq, p, agg)
     local last = if state == nil then nil else decode_state(agg, state, mark, at)
     local page = { plan = p, budget = pageSize or PAGE_SIZE, from = last, seen = 0 }
-    fold_rows(agg, rows(pq, false, page))
+    fold_rows(agg, rows(pq, false, page, aggregate_needs(agg)))
     if page.more then
         return { done = false, processed = page.seen,
                  state = encode_state(agg, mark, page.last) }

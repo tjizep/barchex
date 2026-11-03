@@ -35,7 +35,8 @@ The main limits, in order of impact:
    scale-factor-1 `lineitem` table has 6 million rows and one month of
    taxi trips has about 3 million, so neither fits in one call.
    `aggregatePage` splits the read across calls, so a month of trips takes
-   about 50 seconds of calls; column formats would shorten that.
+   about 50 seconds of calls. A `column` table reads a field 4 to 7 times
+   faster.
 2. **Missing query forms.** Correlated subqueries take two passes in
    Luau: one keeps a value per row, and the other compares each row with
    it.
@@ -161,8 +162,9 @@ item it belongs to.
 1. **Aggregates over large tables.** Done: `aggregatePage` reads one
    page of rows per call and answers a state that the next call continues
    from, as paged migrations do, and the last page answers what `aggregate`
-   answers. The taxi test runs Q4 in pages of 64 trips. Column formats
-   would reduce the cost per row.
+   answers. The taxi test runs Q4 in pages of 64 trips. Done too: a
+   `column` table reads only the fields a query adds up, 4 to 7 times faster
+   per row; see [Column tables](lent/codecs.md#column-tables-with-columns).
 2. **`count()` reads rows.** Done: `count()` counts keys when `=` filters
    on an index's leading fields and ranges on the next one cover the query,
    or when it has no filters, so its cost stays flat with table size. Other

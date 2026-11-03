@@ -20,6 +20,14 @@ beside a development server.
 - `test_rowcodec.py` runs the row codec's self-check, stores rows in each
   format and reads them back, reads rows written by an older field list, and
   checks that bad rows are refused before anything is stored.
+- `test_columns.py` runs the column self-check and holds a `column` table to
+  a `binary` twin: the same random writes across block boundaries, every query
+  form, cursors and paged aggregates must answer the same in both transaction
+  modes. It also checks block removal, rollback and the block size limit.
+- `test_column_migrate.py` migrates a `column` table beside a `binary` twin
+  through index builds, stored computed fills, added, renamed, dropped and
+  retyped fields and stored path edges, and checks that format changes and
+  `uuid` ids are refused.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

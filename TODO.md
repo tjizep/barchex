@@ -6,7 +6,7 @@ with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
 `groupBy` and paged aggregates, edges, path edges and computed fields (each stored or not), edge
 joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
-`bytes` fields, hooks and privacy policies are built.
+`bytes` fields, column tables, hooks and privacy policies are built.
 
 ## Limits of what is built
 
@@ -19,6 +19,23 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   at once can deadlock on the shared lock of the unique check.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
   order the two calls.
+- **Column tables.** `format = "column"` needs `int` ids, keeps a field's
+  values of one block within 524,032 bytes, and shares conflicts and locks
+  across each block. `migrate` refuses a format change to or from `column`.
+  See `docs/lent/codecs.md`.
+
+## Needed from barch
+
+- **Patch overlays that record only the changed bytes.** Inside a
+  transaction, `setBufferAt`, `setF64At` and `setInt32At` copy the whole value
+  through the overlay, log a read, and take an exclusive key lock in a
+  pessimistic transaction, so their cost scales with the value. Outside a
+  transaction, writing a row into 11 blocks reaches 70,000 to 100,000 rows/s;
+  inside one it falls to about 2,500 rows/s on 8 KiB blocks and 260 on
+  128 KiB. Column writes pay this: `create` runs at a quarter of the
+  `binary` rate. With an overlay of changed bytes, lent can restore the text
+  append it dropped, which gains only 5% over a rewrite today. Text blocks
+  already keep the slots in use for it.
 
 ## Planned work
 
@@ -41,13 +58,12 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   on another with fewer keys, because only equal matches are compared.
   Comparing every candidate needs the cheap count above or stored statistics
   such as row counts per index. Keep the plan predictable.
-- **Column formats.** Rows are stored whole in the `binary`, `text` or
-  `json` format. A column format stores each field in its own key space in
-  the graph, in blocks of many rows. A block holds fixed-length values for
-  fields that have them, or a header of value lengths followed by the
-  values, which can be compressed. Luau buffers can pack and read the
-  blocks. A query that reads a few fields of many rows then reads only
-  those fields' blocks.
+- **Compress column blocks.** A block written in place stays uncompressed,
+  because barch never compresses a value after an in-place write (barch TODO
+  51). A sealed block could be packed once it fills; the reads then need a
+  decompress step, so measure the space against the cost first.
+- **Reclaim dropped column blocks.** `migrate` leaves the blocks of a dropped
+  field in the store. A paged step could remove them.
 - **Analytics queries.** `aggregate` and `groupBy` take `avg`, `distinct`,
   `having`, group order and paging, and `aggregatePage` runs them across
   calls over tables too large for one. A state grows with its groups and

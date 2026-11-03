@@ -9,7 +9,7 @@
 -- packages:
 --
 --   local User = lent.schema "User" {
---       format = "binary",                       -- "json", "text" or "binary"
+--       format = "binary",                       -- "json", "text", "binary", "column"
 --       id = "uuid",                             -- or "int"
 --       fields = {
 --           lent.field.string "email":unique(),
@@ -62,7 +62,7 @@ local KINDS = { string = true, int = true, float = true, decimal = true, bool = 
                 time = true, enum = true, json = true, bytes = true }
 local NUMERIC = { int = true, float = true, decimal = true, time = true }
 local LENGTH = { string = true, enum = true, bytes = true }
-local FORMATS = { json = true, text = true, binary = true }
+local FORMATS = { json = true, text = true, binary = true, column = true }
 local IDS = { uuid = true, int = true }
 local MAX_INT = 2 ^ 53
 
@@ -888,6 +888,9 @@ function schema(name: string)
         local id = spec.id or "uuid"
         if not IDS[id] then
             fail(where .. " ids are uuid or int, got " .. tostring(id))
+        end
+        if format == "column" and id ~= "int" then
+            fail(where .. " has format column, which needs id = \"int\"")
         end
         local t = { name = name, key = snake(name), format = format, id = id,
                     fields = {}, indexes = {}, edges = {}, computed = {} }

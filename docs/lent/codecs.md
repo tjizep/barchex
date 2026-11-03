@@ -91,11 +91,83 @@ modules. `lent.VALUES` also answers `ok` for its self-check. CLIENT requires
 `lent.EXPR` for its expression filters, so install it with CLIENT;
 `lent.EXPR` answers `ok` for its self-check.
 
+## Column tables with COLUMNS
+
+Set `format = "column"` on a table to store its rows by field in blocks. A
+query that reads a few fields of many rows then reads only those fields'
+blocks. Choose it for tables you scan and aggregate more often than you
+write one row at a time. The table's API, queries, indexes, edges, hooks and
+policies work the same as in the row formats.
+
+```lua
+lent.schema "Trip" {
+    id = "int",                -- required for format = "column"
+    format = "column",
+    fields = { lent.field.time "pickup", lent.field.float "fare",
+               lent.field.string "zone" },
+}
+```
+
+Measured on 40,960 trips of 10 fields, on one machine:
+
+| work | `column` | `binary` |
+|---|---|---|
+| `aggregatePage` sum of one field | 610,000 rows/s | 130,000 rows/s |
+| `groupBy` and sum | 375,000 rows/s | 112,000 rows/s |
+| `count` with a filter | 1,110,000 rows/s | 153,000 rows/s |
+| `createMany`, 1,024 rows per transaction | 13,000 rows/s | 25,000 rows/s |
+| `get`, one per transaction | 3,800 rows/s | 5,200 rows/s |
+| `update` of one field, one per transaction | 2,200 rows/s | 4,100 rows/s |
+| `create`, one per transaction | 960 rows/s | 3,800 rows/s |
+
+A `create` falls to about 200 rows/s in a nearly full block of 200-byte
+strings, since each write copies its block. Load rows with `createMany`.
+
+`count` and aggregates read only the fields they filter, sort, group and
+sum on, and `all`, `first` and `get` read every field. `count` and
+aggregates read whole rows when the query has a filter function or a query
+policy, when the table has computed fields, or when an aggregate takes a
+`value` function.
+
+Ids split into blocks of 1,024: the block is `floor(id / 1024)`, and the slot
+is the id's place in its block. Each block has a presence key and one key per
+field that holds a value in it.
+
+| block | stored value | fields |
+|---|---|---|
+| presence | 1,024 bytes, 1 for a slot that holds a row, then the row count as an int32 | every table |
+| number | an f64 per slot, with NaN for nil | `int`, `float`, `decimal`, `time`, `bool` |
+| text | bytes in use, slots in use, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order | `string`, `enum`, `json`, `bytes` |
+
+These rules apply to a column table:
+
+- **Ids.** The table needs `id = "int"`. A `uuid` table has no block numbers,
+  and `lent.schema` refuses it with `has format column, which needs id =
+  "int"`.
+- **Value size.** All values of a text field in one block share one store
+  value, and a key and value together hold at most 524,032 bytes. A write
+  past that fails with `would hold N bytes in column block B`. Keep large
+  values in a `binary` table.
+- **Conflicts.** Rows in one block share its keys. Two transactions that
+  create rows in one block, or write one field in one block, conflict in
+  optimistic mode and wait for each other in pessimistic mode. Keep
+  concurrent writers on different blocks, or batch their rows in one writer.
+- **Format changes.** `migrate` refuses a change to or from `column` with
+  `changes format from A to B; copy its rows into a new table to move them
+  to or from column`.
+- **Dropped fields.** A field dropped from the schema keeps its blocks in the
+  store. They use space, and rows no longer read them.
+
+`lent.COLUMNS` runs the module's self-check and answers `ok`. Install it with
+CLIENT and MIGRATE, which both require it.
+
 ## Store keys with LAYOUT
 
 LAYOUT names the store keys lent uses in the application's space: rows
-(`lay.row(t, pk)`), index entries (`lay.entry(t, ix, row, pk)`), edges and a
-table's pk counter. `lay.walk(prefix, each)` calls `each(key)` for every key
+(`lay.row(t, pk)`), index entries (`lay.entry(t, ix, row, pk)`), edges, a
+table's pk counter, and a column table's presence blocks
+(`lay.present(t, block)`) and field blocks (`lay.column(t, field)` is the
+prefix). `lay.walk(prefix, each)` calls `each(key)` for every key
 under a prefix, a page at a time, and `each` may remove the key it is given.
 `lay.scan(lo, hi, each)` and `lay.scan_back(lo, hi, each)` call `each(key)`
 for the keys in `[lo, hi)`, in key order or highest first, and stop when

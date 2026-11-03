@@ -305,6 +305,12 @@ end
 
 -- binary --------------------------------------------------------------------
 
+-- Raises an error unless `row` is a row of `schema`, for a store that keeps
+-- its values without ROWCODEC.
+function validate(schema: any, row: { [string]: any })
+    check_row(schema, row)
+end
+
 local function enc_binary(schema: any, version: number, row: any): string
     local size = 5
     local payloads = {}

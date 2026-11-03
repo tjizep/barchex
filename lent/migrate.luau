@@ -60,6 +60,7 @@
 local SCHEMA = require("lent.SCHEMA")
 local rc = require("lent.ROWCODEC")
 local lay = require("lent.LAYOUT")
+local col = require("lent.COLUMNS")
 local kc = require("lent.KEYCODEC")
 local VALUES = require("lent.VALUES")
 
@@ -338,6 +339,10 @@ function plan(prev: any, app: any): any
             fail(where .. " has " .. (old.id or "int") .. " ids, so its schema needs id = \""
                 .. (old.id or "int") .. "\"; a table keeps the id kind its rows were stored with")
         end
+        if old and old.format ~= t.format and (old.format == "column" or t.format == "column") then
+            fail(where .. " changes format from " .. old.format .. " to " .. t.format
+                .. "; copy its rows into a new table to move them to or from column")
+        end
         local before = by_name(old and old.fields)
         local fields, ver = check_fields(where, old, t, before)
         local after = by_name(fields)
@@ -440,6 +445,37 @@ local function row_fields(t: any): any
     return rc.fields(t.fields)
 end
 
+-- Calls each(key, stored) for each row of table t: its key, or a column
+-- table's place for it in key order, and what the store holds for it.
+local function each_row(t: any, each: (string, any) -> ())
+    local fields, rows = row_fields(t), lay.row(t)
+    if t.format == "column" then
+        col.scan(t, fields, rows, kc.after(rows), function(pk, r)
+            each(lay.row(t, pk), r)
+            return false
+        end)
+    else
+        lay.scan_values(rows, kc.after(rows), function(k, v)
+            each(k, v)
+            return false
+        end)
+    end
+end
+
+-- Up to `limit` row keys of t from lo up to hi, with what the store holds
+-- for each.
+local function row_page(t: any, lo: string, hi: string, limit: number): ({ string }, { any })
+    if t.format == "column" then
+        return col.page(t, row_fields(t), lo, hi, limit)
+    end
+    return barch.store.rangeValues(lo, hi, limit)
+end
+
+-- The fields of a stored row.
+local function decoded(fields: any, stored: any): any
+    return if type(stored) == "table" then stored else (rc.decode(fields, stored))
+end
+
 local function drop(t: any, ix: any)
     lay.walk(lay.index(t, ix), function(k)
         barch.store.remove(k)
@@ -448,9 +484,9 @@ end
 
 -- Stores index ix's entry for the row at key k, whose value is `stored`.
 -- `edges` are the catalog's edge stores, which the index's edges read.
-local function build_row(t: any, ix: any, edges: any, fields: any, k: string, stored: string)
+local function build_row(t: any, ix: any, edges: any, fields: any, k: string, stored: any)
     local pk = lay.row_pk(t, k)
-    local r = lay.fill(t, rc.decode(fields, stored))
+    local r = lay.fill(t, decoded(fields, stored))
     local key, value = lay.entry(t, ix, r, pk, lay.linked(edges, ix, pk))
     if key == nil then return end
     if ix.unique then
@@ -466,8 +502,9 @@ end
 -- Computes the stored computed fields `names` of the row at key k, whose
 -- value is `stored`, with their functions `fns`, and stores the row again.
 local function fill_row(t: any, names: { string }, fns: any, fields: any, version: number,
-                        k: string, stored: string)
-    local r = lay.fill(t, (rc.decode(fields, stored)))
+                        k: string, stored: any)
+    local old = if type(stored) == "table" then table.clone(stored) else nil
+    local r = lay.fill(t, decoded(fields, stored))
     for _, name in names do
         local v = fns[name](table.clone(r))
         for _, f in t.fields do
@@ -479,7 +516,11 @@ local function fill_row(t: any, names: { string }, fns: any, fields: any, versio
         end
         r[name] = v
     end
-    barch.store.set(k, rc.encode(fields, t.format, version, r))
+    if t.format == "column" then
+        col.write(t, fields, lay.row_pk(t, k), old, r)()
+    else
+        barch.store.set(k, rc.encode(fields, t.format, version, r))
+    end
 end
 
 -- The functions of the stored computed fields `names` of catalog table t,
@@ -522,10 +563,9 @@ local function fill_paths(t: any, p: any, edges: any, k: string)
 end
 
 local function build(t: any, ix: any, edges: any)
-    local fields, rows = row_fields(t), lay.row(t)
-    lay.scan_values(rows, kc.after(rows), function(k, v)
+    local fields = row_fields(t)
+    each_row(t, function(k, v)
         build_row(t, ix, edges, fields, k, v)
-        return false
     end)
 end
 
@@ -599,16 +639,15 @@ function apply(p: any)
             while drop_edge(s.edge, 1000) == 1000 do end
         elseif s.edge then
             local store = p.compiled.edges[s.edge]
-            lay.walk(lay.row(s.table), function(k)
+            each_row(s.table, function(k)
                 fill_paths(s.table, store, p.compiled.edges, k)
             end)
         elseif s.op == "drop" then
             drop(s.table, s.index)
         elseif s.op == "fill" then
-            local fields, rows = row_fields(s.table), lay.row(s.table)
-            lay.scan_values(rows, kc.after(rows), function(k, v)
+            local fields = row_fields(s.table)
+            each_row(s.table, function(k, v)
                 fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k, v)
-                return false
             end)
         else
             build(s.table, s.index, p.compiled.edges)
@@ -640,8 +679,8 @@ local function advance(c: any, budget: number, app: any): number
                 done = n < limit
             else
                 local store, prefix = c.edges[step.edge], lay.row(t)
-                local keys = barch.store.range(work.cursor and work.cursor .. "\2" or prefix,
-                                               kc.after(prefix), limit)
+                local keys = row_page(t, work.cursor and work.cursor .. "\2" or prefix,
+                                      kc.after(prefix), limit)
                 for _, k in keys do
                     fill_paths(t, store, c.edges, k)
                 end
@@ -664,7 +703,7 @@ local function advance(c: any, budget: number, app: any): number
         -- the row steps read each row with its key
         local keys, values
         if rows then
-            keys, values = barch.store.rangeValues(lo, hi, limit)
+            keys, values = row_page(t, lo, hi, limit)
         else
             keys = barch.store.range(lo, hi, limit)
         end
@@ -681,7 +720,8 @@ local function advance(c: any, budget: number, app: any): number
         end
         processed += #keys
         local nextKey = rows and keys[#keys] and keys[#keys] .. "\2" or prefix
-        local done = #keys < limit or #barch.store.range(nextKey, hi, 1) == 0
+        local done = #keys < limit
+            or #(if rows then row_page(t, nextKey, hi, 1) else barch.store.range(nextKey, hi, 1)) == 0
         if done then
             if step.op == "build" then ix.state = nil end
             if step.op == "fill" then

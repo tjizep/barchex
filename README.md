@@ -47,6 +47,7 @@ watchdog/
 lent/
   keycodec.luau    →  function KEYCODEC   (order-preserving keys for lent indexes)
   rowcodec.luau    →  function ROWCODEC   (lent rows as json, text or binary)
+  columns.luau     →  function COLUMNS    (lent rows stored by field in blocks)
   schema.luau      →  function SCHEMA     (lent tables, fields, indexes and edges)
   layout.luau      →  function LAYOUT     (the store keys of lent rows, indexes and edges)
   migrate.luau     →  function MIGRATE    (the lent catalog and index builds)
@@ -66,7 +67,7 @@ Each module has a reference page in `docs/`:
 | [docs/vectors.md](docs/vectors.md) | VECTORS: store vectors and find the closest ones |
 | [docs/s3.md](docs/s3.md) | S3, SIGV4 and BACKUP: bucket access, file stores that fall through to a bucket, and key space backups |
 | [docs/watchdog.md](docs/watchdog.md) | WATCHDOG: alerts by mail or webhook when error rates climb |
-| [docs/lent/codecs.md](docs/lent/codecs.md) | lent KEYCODEC, ROWCODEC and LAYOUT: keys, stored rows and store keys |
+| [docs/lent/codecs.md](docs/lent/codecs.md) | lent KEYCODEC, ROWCODEC, COLUMNS and LAYOUT: keys, stored rows, column blocks and store keys |
 | [docs/lent/schema.md](docs/lent/schema.md) | lent SCHEMA: tables, fields, indexes, edges, value rules, hooks, policies, computed fields and views |
 | [docs/lent/migrate.md](docs/lent/migrate.md) | lent MIGRATE: the catalog and paged index builds |
 | [docs/lent/client.md](docs/lent/client.md) | lent CLIENT: transactions, row writes, upserts, edges and path edges |

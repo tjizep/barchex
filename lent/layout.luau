@@ -10,6 +10,8 @@
 -- keys that start with it:
 --
 --   lent.r<table><pk>                   the row, as ROWCODEC wrote it
+--   lent.p<table><block>                which rows of a column block exist
+--   lent.c<table><field id><block>      one field of a column block's rows
 --   lent.i<table><index><values><pk>    "" for each row of a plain index
 --   lent.u<table><index><values>        the pk, for each row of a unique index
 --   lent.e<edge><from pk><to pk>        "" for each edge, read forwards
@@ -41,6 +43,10 @@ function id_kind(t: any): string
     return t.id or "int"
 end
 
+-- A table of format "column" stores no key per row: COLUMNS keeps its rows in
+-- blocks, and row() and row_pk() name its rows' places in key order, for
+-- cursors, paged reads and index plans.
+
 -- The pk at the end of `key`, in a table or edge end of id kind `kind`.
 local function tail(kind: string, key: string): any
     return (kc.decode(key, #key - kc.WIDTH[kind] + 1))
@@ -55,6 +61,24 @@ end
 function row(t: any, pk: any): string
     local key = "lent.r" .. name(t.key)
     return pk == nil and key or key .. kc.encode(id_kind(t), pk)
+end
+
+-- The key of a column block's presence, or with block nil, the prefix of
+-- them all.
+function present(t: any, block: number?): string
+    local key = "lent.p" .. name(t.key)
+    return block == nil and key or key .. kc.encode("int", block)
+end
+
+-- The block number of a presence key.
+function present_block(key: string): number
+    return tail("int", key)
+end
+
+-- The prefix of the blocks of the field with id `field`, which a block's
+-- encoded number completes.
+function column(t: any, field: number): string
+    return "lent.c" .. name(t.key) .. kc.encode("int", field)
 end
 
 -- The pk of a row key.
