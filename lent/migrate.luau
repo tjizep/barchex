@@ -398,6 +398,18 @@ function plan(prev: any, app: any): any
                 steps[#steps + 1] = { op = "drop", table = old, index = ix }
             end
         end
+        -- field ids are never given out again, so a dropped field's column
+        -- blocks would stay unread
+        if old and c.format == "column" then
+            local kept = {}
+            for _, f in fields do kept[f.id] = true end
+            for _, f in old.fields do
+                if not kept[f.id] then
+                    steps[#steps + 1] = { op = "drop", table = old,
+                                          field = { id = f.id, name = f.name } }
+                end
+            end
+        end
     end
     for key, old in prev.tables do
         if tables[key] == nil then
@@ -476,10 +488,17 @@ local function decoded(fields: any, stored: any): any
     return if type(stored) == "table" then stored else (rc.decode(fields, stored))
 end
 
-local function drop(t: any, ix: any)
-    lay.walk(lay.index(t, ix), function(k)
+-- Removes the keys under prefix.
+local function drop(prefix: string)
+    lay.walk(prefix, function(k)
         barch.store.remove(k)
     end)
+end
+
+-- The keys a drop step removes: an index's entries, or the column blocks of
+-- a dropped field.
+local function drop_prefix(t: any, step: any): string
+    return if step.field then lay.column(t, step.field.id) else lay.index(t, step.index)
 end
 
 -- Stores index ix's entry for the row at key k, whose value is `stored`.
@@ -643,7 +662,7 @@ function apply(p: any)
                 fill_paths(s.table, store, p.compiled.edges, k)
             end)
         elseif s.op == "drop" then
-            drop(s.table, s.index)
+            drop(drop_prefix(s.table, s))
         elseif s.op == "fill" then
             local fields = row_fields(s.table)
             each_row(s.table, function(k, v)
@@ -696,7 +715,7 @@ local function advance(c: any, budget: number, app: any): number
         end
         local rows = step.op ~= "drop"
         local ix = step.op == "build" and find_index(t, step.index.name) or step.index
-        local prefix = rows and lay.row(t) or lay.index(t, ix)
+        local prefix = rows and lay.row(t) or drop_prefix(t, step)
         local lo = rows and work.cursor and work.cursor .. "\2" or prefix
         local hi = kc.after(prefix)
         local limit = budget - processed
@@ -788,7 +807,8 @@ function migrate(app: any, pageSize: number?): any
                         if table.find(s.fields, f.name) then f.state = "filling" end
                     end
                 else
-                    work.steps[i] = { op = s.op, table = s.table.key, index = index_spec(s.index) }
+                    work.steps[i] = { op = s.op, table = s.table.key, field = s.field,
+                                      index = s.index and index_spec(s.index) }
                 end
                 if s.op == "build" then s.index.state = "building" end
             end
@@ -799,7 +819,8 @@ function migrate(app: any, pageSize: number?): any
             if s.edge then
                 steps[i] = s.op .. " " .. s.label
             else
-                local what = s.op == "fill" and table.concat(s.fields, ",") or s.index.name
+                local what = if s.op == "fill" then table.concat(s.fields, ",")
+                    elseif s.field then s.field.name .. " blocks" else s.index.name
                 steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. what
             end
         end

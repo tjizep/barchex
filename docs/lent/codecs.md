@@ -155,8 +155,9 @@ These rules apply to a column table:
 - **Format changes.** `migrate` refuses a change to or from `column` with
   `changes format from A to B; copy its rows into a new table to move them
   to or from column`.
-- **Dropped fields.** A field dropped from the schema keeps its blocks in the
-  store. They use space, and rows no longer read them.
+- **Dropped fields.** `migrate` removes a dropped field's blocks in pages,
+  with a `drop Table.field blocks` step. Writes to the table continue while
+  the step runs.
 
 `lent.COLUMNS` runs the module's self-check and answers `ok`. Install it with
 CLIENT and MIGRATE, which both require it.

@@ -16,8 +16,8 @@ and persists its progress under `/lent` in the space's graph. Separate
 function calls give each page its own function deadline.
 
 The optional page size defaults to `1000` and accepts whole numbers from
-`1` to `10000`. It bounds the total row visits and removed index entries
-across all indexes in that call. Each fill and index build visits every
+`1` to `10000`. It bounds the total row visits, removed index entries and
+removed column blocks across all steps in that call. Each fill and index build visits every
 row, including rows whose missing values leave them out of a unique index.
 
 | report field | meaning |
@@ -25,8 +25,8 @@ row, including rows whose missing values leave them out of a unique index.
 | `version` | the active schema version; it advances on the first committed page and stays the same while the migration resumes |
 | `changed` | `true` when this call installs a schema or advances pending work |
 | `done` | `true` when every index drop, fill and build is complete |
-| `processed` | row visits plus removed index entries in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges; empty for an unchanged, completed schema |
+| `processed` | row visits plus removed index entries and column blocks in this call, at most the page size |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges and `drop Table.field blocks` for a field dropped from a `column` table; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
@@ -50,8 +50,9 @@ build finishes.
 
 Index replacements and removals drop old entries first. Creating, updating
 or deleting rows in an affected table raises a `LENT` error until that
-table's pending drops finish. Reads continue, and other tables remain
-writable.
+table's pending index drops finish. Reads continue, and other tables remain
+writable. A `column` table stays writable while its dropped fields' blocks
+are removed.
 
 An error or timeout rolls back the current page; earlier pages and their
 schema changes stay committed. Call `migrate` with the same schema to

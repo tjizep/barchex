@@ -26,8 +26,8 @@ beside a development server.
   modes. It also checks block removal, rollback and the block size limit.
 - `test_column_migrate.py` migrates a `column` table beside a `binary` twin
   through index builds, stored computed fills, added, renamed, dropped and
-  retyped fields and stored path edges, and checks that format changes and
-  `uuid` ids are refused.
+  retyped fields and stored path edges, checks that a dropped field's blocks
+  leave in pages, and checks that format changes and `uuid` ids are refused.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

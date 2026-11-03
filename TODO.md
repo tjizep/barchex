@@ -62,8 +62,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   because barch never compresses a value after an in-place write (barch TODO
   51). A sealed block could be packed once it fills; the reads then need a
   decompress step, so measure the space against the cost first.
-- **Reclaim dropped column blocks.** `migrate` leaves the blocks of a dropped
-  field in the store. A paged step could remove them.
 - **Analytics queries.** `aggregate` and `groupBy` take `avg`, `distinct`,
   `having`, group order and paging, and `aggregatePage` runs them across
   calls over tables too large for one. A state grows with its groups and

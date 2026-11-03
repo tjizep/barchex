@@ -212,12 +212,17 @@ function steps.page_seed(c, start)
     return #c.Item:createMany(input)
 end
 
-function steps.pages(c)
+-- one call per query write keeps each under the function deadline
+function steps.pages_update(c)
     local updated = c.Item:query():where("score", ">", 0):order("score"):update({ score = 2000 })
     local repeated = c.Item:query():where("revision", "~=", 1):count()
     local moved = c.Item:query():where("score", "=", 2000):count()
+    return { updated, repeated, moved }
+end
+
+function steps.pages_delete(c)
     local deleted = c.Item:query():where("score", "=", 2000):order("score", "desc"):delete()
-    return { updated, repeated, moved, deleted, c.Item:query():count(), entries(), c.Log:query():count() }
+    return { deleted, c.Item:query():count(), entries(), c.Log:query():count() }
 end
 
 function steps.insert(c) return c.Item:create({ name = "e", score = 5 }).id end
@@ -385,7 +390,8 @@ def test_query_writes_across_index_scan_pages_process_each_row_once(client, mode
     run = app(client, "query_write_pages_" + mode, mode, seed=False)
     for start in range(1, 1006, 200):
         assert run("page_seed", start) == min(200, 1006 - start)
-    assert run("pages") == [1005, 0, 1005, 1005, 0, ZERO_ENTRIES, 2010]
+    assert run("pages_update") == [1005, 0, 1005]
+    assert run("pages_delete") == [1005, 0, ZERO_ENTRIES, 2010]
 
 
 @pytest.mark.parametrize("op", ["update", "delete"])

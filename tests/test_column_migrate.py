@@ -12,6 +12,7 @@ APP = """
 local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
+local lay = require("lent.LAYOUT")
 local f = lent.field
 
 local function total(r) return r.qty * 2 end
@@ -168,7 +169,17 @@ function call(step, stage, ...)
     for i, a in args do args[i] = tonumber(a) or a end
     if step == "migrate" then
         local r = m.migrate(app(stage), args[1])
-        return { if r.done then 1 else 0, r.processed }
+        return { if r.done then 1 else 0, r.processed, r.steps }
+    end
+    if step == "apply" then
+        barch.tx.run(function() m.apply(m.plan(m.load(), app(stage))) end)
+        return "ok"
+    end
+    if step == "blocks" then
+        -- how many blocks field id args[1] of Cold holds
+        return barch.tx.run(function()
+            return lay.walk(lay.column(m.load().tables.cold, args[1]), function() end)
+        end)
     end
     local db = client.open(app(stage))
     return db.tx(function(c) return steps[step](c, table.unpack(args)) end)
@@ -189,7 +200,7 @@ def migrate(run, stage, page=1000):
     calls = 0
     while True:
         calls += 1
-        done, _ = run("migrate", stage, page)
+        done = run("migrate", stage, page)[0]
         if done == 1:
             return calls
 
@@ -304,6 +315,39 @@ def test_a_dropped_field_stays_gone(run):
     migrate(run, "base")
     same_rows(run, "base")
     assert "note=" not in run("dump", "base")[0][0]
+
+
+NOTE, QTY = 5, 2
+
+
+def test_a_dropped_field_takes_its_blocks_in_pages(run):
+    seeded(run, 2500)
+    assert run("blocks", "base", NOTE) == 3
+    done, processed, steps = run("migrate", "dropped", 2)
+    assert (done, processed) == (0, 2)
+    assert steps == ["drop Cold.note blocks"]
+    assert run("blocks", "base", NOTE) == 1
+    # writes go on while the blocks leave
+    cold, warm = run("both", "dropped", "write", 2100)
+    assert cold == warm
+    assert run("migrate", "dropped", 2)[:2] == [1, 1]
+    assert run("blocks", "base", NOTE) == 0
+    assert run("blocks", "base", QTY) == 3
+    same_rows(run, "dropped")
+
+
+def test_apply_drops_the_blocks_in_one_transaction(run):
+    seeded(run, 2500)
+    assert run("apply", "dropped") == "ok"
+    assert run("blocks", "base", NOTE) == 0
+    same_rows(run, "dropped")
+
+
+@pytest.mark.parametrize("stage", ["renamed", "kinds"])
+def test_a_renamed_or_retyped_field_keeps_its_blocks(run, stage):
+    seeded(run, 30)
+    assert run("migrate", stage)[2] == []
+    assert run("blocks", "base", NOTE) == 1
 
 
 def test_a_stored_path_edge_fills_over_column_tables(run):
