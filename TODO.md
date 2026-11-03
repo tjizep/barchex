@@ -37,16 +37,15 @@ and privacy policies are built.
   `binary` rate. With an overlay of changed bytes, lent can restore the text
   append it dropped, which gains only 5% over a rewrite today. Text blocks
   already keep the slots in use for it.
-- **Vector folds over number blocks.** A column scan folds each block in a
+- **Vector kernels for column scans.** A column scan folds each block in a
   Luau loop. On 409,600 rows in a transaction, a sum reads 53 million rows/s,
   a sum under one filter 35 million and a sum grouped by a short `string`
-  field 15 million. A hand-written Luau sum over the same blocks, outside a
-  transaction, reaches about 90 million. Functions that run in native code
-  would lift these limits: one that compares each f64 of a buffer with a
-  value and answers the matching slots, and one that sums, counts, or takes
-  the min or max of an f64 buffer over given slots, by group ids from
-  another buffer. Each block read in a transaction also logs the read,
-  which adds about 1.5 ms to the sum's 6.3 ms.
+  field 15 million. [docs/barch-vec.md](docs/barch-vec.md) asks barch for
+  `barch.vec`: native filter, dictionary filter, fold, grouper, mask and
+  offset kernels over `i8`, `i32`, `i64`, `f64` and `str` elements, in
+  column blocks or fixed-width rows. `lent/vec.luau` is the reference, and
+  `tests/test_vec.py` checks both. Each block read in a transaction also
+  logs the read, which adds about 1.5 ms to the sum's 6.3 ms.
 
 ## Planned work
 
@@ -64,6 +63,14 @@ and privacy policies are built.
   barch needs a count with no lock and no phantom log; lent then calls it in
   `plan_keys`, and the cost note under Index choice in
   `docs/lent/queries.md` goes away.
+- **Typed and dictionary column blocks.** Column blocks hold every number as
+  an f64 and every string as bytes. Store `int` fields that fit as `i8` or
+  `i32` blocks, and short repeated strings as `i8` or `i32` codes into a
+  per-table dictionary, so scans read a half to an eighth of the bytes
+  and filter, group and fold codes with `barch.vec`. Equality, `in` and
+  groups work on codes directly; other string conditions mark the passing
+  codes once and call `filterIn`. Decide how a block widens when its values
+  outgrow `i8`, and how the dictionary stays bounded.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.
