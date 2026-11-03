@@ -159,6 +159,29 @@ These rules apply to a column table:
   with a `drop Table.field blocks` step. Writes to the table continue while
   the step runs.
 
+### Compressed column blocks
+
+Turn on barch's zstd compression with `CONFIG SET compression zstd` to
+compress column blocks. barch's maintenance thread compresses keys that
+nobody has read or written for a while, so blocks compress after a load
+finishes. A write to a block stores that block uncompressed again until the
+thread finds it cold. lent needs no setting for this. The setting covers the
+row-format tables too. A space either compresses or evicts its cold keys, so
+compression stays off while an eviction policy is set.
+
+Measured on 40,960 generated trips of 10 fields, on one machine:
+
+| block | uncompressed bytes | saved |
+|---|---|---|
+| number | 2,686,976 | 74% |
+| presence | 42,148 | 97% |
+| text, 2 distinct values | 332,104 | 97% |
+| text, 260 distinct values | 437,656 | 89% |
+
+Scans, `groupBy` and filtered `count` ran at the same speed compressed and
+uncompressed. `get` ran about a third slower and `update` about an eighth
+slower, since each decompresses one block per field it reads or writes.
+
 `lent.COLUMNS` runs the module's self-check and answers `ok`. Install it with
 CLIENT and MIGRATE, which both require it.
 

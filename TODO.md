@@ -58,10 +58,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   on another with fewer keys, because only equal matches are compared.
   Comparing every candidate needs the cheap count above or stored statistics
   such as row counts per index. Keep the plan predictable.
-- **Compress column blocks.** A block written in place stays uncompressed,
-  because barch never compresses a value after an in-place write (barch TODO
-  51). A sealed block could be packed once it fills; the reads then need a
-  decompress step, so measure the space against the cost first.
 - **Analytics queries.** `aggregate` and `groupBy` take `avg`, `distinct`,
   `having`, group order and paging, and `aggregatePage` runs them across
   calls over tables too large for one. A state grows with its groups and
