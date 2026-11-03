@@ -37,6 +37,16 @@ and privacy policies are built.
   `binary` rate. With an overlay of changed bytes, lent can restore the text
   append it dropped, which gains only 5% over a rewrite today. Text blocks
   already keep the slots in use for it.
+- **Vector folds over number blocks.** A column scan folds each block in a
+  Luau loop. On 409,600 rows in a transaction, a sum reads 53 million rows/s,
+  a sum under one filter 35 million and a sum grouped by a short `string`
+  field 15 million. A hand-written Luau sum over the same blocks, outside a
+  transaction, reaches about 90 million. Functions that run in native code
+  would lift these limits: one that compares each f64 of a buffer with a
+  value and answers the matching slots, and one that sums, counts, or takes
+  the min or max of an f64 buffer over given slots, by group ids from
+  another buffer. Each block read in a transaction also logs the read,
+  which adds about 1.5 ms to the sum's 6.3 ms.
 
 ## Planned work
 

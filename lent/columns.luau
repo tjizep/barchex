@@ -295,19 +295,23 @@ local function load(c: any, block: number)
         c.base = block * SIZE
         return
     end
-    local stored = barch.store.get(block_key(c.prefix, block))
-    local b = if stored then buffer.fromstring(stored) else nil
-    c.b = b
-    if b and c.text then
-        local starts, at = c.starts, TEXT_VALUES
-        for s = 0, SIZE - 1 do
-            starts[s + 1] = at
-            local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
-            if len > 0 then
-                at += len - 1
-            end
+    -- a key removed in this transaction reads as barch.tomb
+    local stored = barch.store.getBufferAt(block_key(c.prefix, block), 0)
+    local b = if type(stored) == "buffer" then stored else nil
+    c.b, c.located = b, false
+end
+
+-- Finds where each slot's value starts in text source c's loaded block.
+local function locate(c: any)
+    local b: buffer, starts, at = c.b, c.starts, TEXT_VALUES
+    for s = 0, SIZE - 1 do
+        starts[s + 1] = at
+        local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
+        if len > 0 then
+            at += len - 1
         end
     end
+    c.located = true
 end
 
 -- The value of `slot` in source c's loaded block.
@@ -323,6 +327,9 @@ local function value_at(c: any, s: number): any
         local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
         if len == 0 then
             return c.default
+        end
+        if not c.located then
+            locate(c)
         end
         return buffer.readstring(b, c.starts[s + 1], len - 1)
     end
@@ -355,8 +362,8 @@ local function holds(op: string, v: any, w: any): boolean
 end
 
 -- Keeps the slots of sel[1..n] whose value of source c passes `op w`, and
--- answers how many it kept.
-local function filter(c: any, op: string, w: any, sel: { number }, n: number): number
+-- answers how many it kept. `full` says sel holds every slot in order.
+local function filter(c: any, op: string, w: any, sel: { number }, n: number, full: boolean): number
     if c.b == nil and not c.id then
         return if holds(op, c.default, w) then n else 0
     end
@@ -366,7 +373,7 @@ local function filter(c: any, op: string, w: any, sel: { number }, n: number): n
         local b: buffer = c.b
         if op == "<" then
             for i = 1, n do
-                local s = sel[i]
+                local s = if full then i - 1 else sel[i]
                 if buffer.readf64(b, s * 8) < w then
                     m += 1
                     sel[m] = s
@@ -374,7 +381,7 @@ local function filter(c: any, op: string, w: any, sel: { number }, n: number): n
             end
         elseif op == "<=" then
             for i = 1, n do
-                local s = sel[i]
+                local s = if full then i - 1 else sel[i]
                 if buffer.readf64(b, s * 8) <= w then
                     m += 1
                     sel[m] = s
@@ -382,7 +389,7 @@ local function filter(c: any, op: string, w: any, sel: { number }, n: number): n
             end
         elseif op == ">" then
             for i = 1, n do
-                local s = sel[i]
+                local s = if full then i - 1 else sel[i]
                 if buffer.readf64(b, s * 8) > w then
                     m += 1
                     sel[m] = s
@@ -390,7 +397,7 @@ local function filter(c: any, op: string, w: any, sel: { number }, n: number): n
             end
         elseif op == ">=" then
             for i = 1, n do
-                local s = sel[i]
+                local s = if full then i - 1 else sel[i]
                 if buffer.readf64(b, s * 8) >= w then
                     m += 1
                     sel[m] = s
@@ -399,7 +406,7 @@ local function filter(c: any, op: string, w: any, sel: { number }, n: number): n
         else
             local want = op == "="
             for i = 1, n do
-                local s = sel[i]
+                local s = if full then i - 1 else sel[i]
                 local x = buffer.readf64(b, s * 8)
                 if (if w == nil then x ~= x else x == w) == want then
                     m += 1
@@ -484,11 +491,16 @@ local function less(a: any, b: any): boolean
     return a < b
 end
 
--- Adds the slots sel[1..n], in groups gids[1..n], to aggregate a.
-local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number })
+-- Adds the slots sel[1..n], in groups gids[1..n], to aggregate a. `full`
+-- says sel holds every slot in order.
+local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number }, full: boolean)
     local vals, fn, c = a.vals, a.fn, a.source
     if c == nil then
         -- count with no field counts rows
+        if a.single then
+            vals[1] = (vals[1] or 0) + n
+            return
+        end
         for i = 1, n do
             local gi = gids[i]
             vals[gi] = (vals[gi] or 0) + 1
@@ -503,7 +515,7 @@ local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number
         end
         local sum, any = vals[1] or 0, false
         for i = 1, n do
-            local x = buffer.readf64(b, sel[i] * 8)
+            local x = buffer.readf64(b, (if full then i - 1 else sel[i]) * 8)
             if x == x then
                 sum += x
                 any = true
@@ -519,26 +531,36 @@ local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number
         if b == nil then
             return
         end
-        if fn == "sum" or fn == "avg" or fn == "count" then
-            local ns = a.ns
+        local ns = a.ns
+        if fn == "count" then
             for i = 1, n do
-                local x = buffer.readf64(b, sel[i] * 8)
+                local x = buffer.readf64(b, (if full then i - 1 else sel[i]) * 8)
                 if x == x then
                     local gi = gids[i]
-                    if fn == "count" then
-                        vals[gi] = (vals[gi] or 0) + 1
-                    else
-                        vals[gi] = (vals[gi] or 0) + x
-                        if ns then
-                            ns[gi] = (ns[gi] or 0) + 1
-                        end
-                    end
+                    vals[gi] = (vals[gi] or 0) + 1
+                end
+            end
+        elseif fn == "sum" then
+            for i = 1, n do
+                local x = buffer.readf64(b, (if full then i - 1 else sel[i]) * 8)
+                if x == x then
+                    local gi = gids[i]
+                    vals[gi] = (vals[gi] or 0) + x
+                end
+            end
+        elseif fn == "avg" then
+            for i = 1, n do
+                local x = buffer.readf64(b, (if full then i - 1 else sel[i]) * 8)
+                if x == x then
+                    local gi = gids[i]
+                    vals[gi] = (vals[gi] or 0) + x
+                    ns[gi] = (ns[gi] or 0) + 1
                 end
             end
         else
             local min = fn == "min"
             for i = 1, n do
-                local x = buffer.readf64(b, sel[i] * 8)
+                local x = buffer.readf64(b, (if full then i - 1 else sel[i]) * 8)
                 if x == x then
                     local gi = gids[i]
                     local acc = vals[gi]
@@ -587,6 +609,12 @@ local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number
     end
 end
 
+-- Whether source c holds plain numbers: f64 values, NaN for nil, and no
+-- default to read in its place.
+local function plain(c: any): boolean
+    return c ~= nil and not (c.id or c.text or c.bool) and c.default == nil
+end
+
 -- A fold over the rows of table t: the conditions they must pass, the
 -- fields they group by and the aggregates to add them to. `spec` holds
 --
@@ -631,9 +659,129 @@ function start_fold(t: any, fields: any, spec: any): any
     for _, c in sources do
         list[#list + 1] = c
     end
+    -- one number range filter and one plain sum fold in one pass
+    local fuse
+    local a1, c1 = aggs[1], conds[1]
+    if #conds == 1 and #keys == 0 and #aggs == 1 and a1.fn == "sum" and plain(a1.source)
+        and not a1.distinct and a1.scale == nil and plain(c1.source) and type(c1.value) == "number"
+        and (c1.op == "<" or c1.op == "<=" or c1.op == ">" or c1.op == ">=") then
+        fuse = c1
+    end
     return { sources = list, conds = conds, keys = keys, aggs = aggs, group = spec.group,
-             budget = spec.budget, seen = 0, records = {}, tree = {},
+             budget = spec.budget, seen = 0, records = {}, tree = {}, short = {}, fuse = fuse,
              sel = table.create(SIZE, 0), gids = table.create(SIZE, 1) }
+end
+
+-- The bits of the first 4 and the next 2 bytes that a text value of 0 to 6
+-- bytes holds, read as little-endian numbers
+local LO_MASK, HI_MASK = {}, {}
+for len = 0, 6 do
+    LO_MASK[len] = 2 ^ (8 * math.min(len, 4)) - 1
+    HI_MASK[len] = 2 ^ (8 * math.max(len - 4, 0)) - 1
+end
+
+-- Sets gids[1..n] to the groups of the slots in sel[1..n] by text key c.
+local function text_gids(job: any, c: any, sel: { number }, n: number, gids: { number }, full: boolean)
+    -- a value of up to 6 bytes, with its length, makes a number below 2^53
+    -- that names its group without making a string
+    local b: buffer, starts, tree, short = c.b, c.starts, job.tree, job.short
+    local blen = buffer.len(b)
+    if not (full or c.located) then
+        locate(c)
+    end
+    -- a full block's values follow each other in slot order
+    local at = TEXT_VALUES
+    for i = 1, n do
+        local s = if full then i - 1 else sel[i]
+        local len = buffer.readu32(b, TEXT_SLOTS + s * 4) - 1
+        if not full then
+            at = starts[s + 1]
+        end
+        local gi
+        if len < 0 then
+            gi = group_index(job, s)
+        elseif len <= 6 and at + 6 <= blen then
+            local code = len * 2 ^ 48 + bit32.band(buffer.readu16(b, at + 4), HI_MASK[len]) * 2 ^ 32
+                + bit32.band(buffer.readu32(b, at), LO_MASK[len])
+            gi = short[code]
+            if gi == nil then
+                gi = group_index(job, s)
+                short[code] = gi
+            end
+        else
+            gi = tree[buffer.readstring(b, at, len)] or group_index(job, s)
+        end
+        gids[i] = gi
+        if len > 0 then
+            at += len
+        end
+    end
+end
+
+-- Sets gids[1..n] to the groups of the slots in sel[1..n] by number key c.
+local function number_gids(job: any, c: any, sel: { number }, n: number, gids: { number }, full: boolean)
+    local b: buffer, tree = c.b, job.tree
+    for i = 1, n do
+        local s = if full then i - 1 else sel[i]
+        local x = buffer.readf64(b, s * 8)
+        gids[i] = (x == x and tree[x]) or group_index(job, s)
+    end
+end
+
+-- Adds the full block's rows whose value of source c passes `op w` to the
+-- one-group sum a, in one pass. Answers false when the job doesn't have
+-- that shape.
+local function filtered_sum(job: any, c: any, op: string, w: any, a: any): boolean
+    local v: buffer?, b: buffer? = a.source.b, c.b
+    if v == nil or b == nil then
+        return false
+    end
+    local sum, any = a.vals[1] or 0, false
+    if op == "<" then
+        for s = 0, SIZE - 1 do
+            if buffer.readf64(b, s * 8) < w then
+                local x = buffer.readf64(v, s * 8)
+                if x == x then
+                    sum += x
+                    any = true
+                end
+            end
+        end
+    elseif op == "<=" then
+        for s = 0, SIZE - 1 do
+            if buffer.readf64(b, s * 8) <= w then
+                local x = buffer.readf64(v, s * 8)
+                if x == x then
+                    sum += x
+                    any = true
+                end
+            end
+        end
+    elseif op == ">" then
+        for s = 0, SIZE - 1 do
+            if buffer.readf64(b, s * 8) > w then
+                local x = buffer.readf64(v, s * 8)
+                if x == x then
+                    sum += x
+                    any = true
+                end
+            end
+        end
+    else
+        for s = 0, SIZE - 1 do
+            if buffer.readf64(b, s * 8) >= w then
+                local x = buffer.readf64(v, s * 8)
+                if x == x then
+                    sum += x
+                    any = true
+                end
+            end
+        end
+    end
+    if any then
+        a.vals[1] = sum
+    end
+    return true
 end
 
 -- Adds the slots from `a` to `z` of a block to the job's groups. Answers
@@ -641,12 +789,12 @@ end
 local function fold_block(job: any, block: number, presence: string, a: number, z: number): boolean
     local sel: { number }, n = job.sel, 0
     local budget, seen = job.budget, job.seen
-    local more = false
+    local more, full = false, false
     if a == 0 and z == SIZE - 1 and live(presence) == SIZE
         and (budget == nil or budget - seen >= SIZE) then
         -- a full block reads every slot
         table.move(ALL_SLOTS, 1, SIZE, 1, sel)
-        n, seen = SIZE, seen + SIZE
+        n, seen, full = SIZE, seen + SIZE, true
     else
         for s = a, z do
             if string.byte(presence, s + 1) == 1 then
@@ -670,32 +818,29 @@ local function fold_block(job: any, block: number, presence: string, a: number, 
     for _, c in job.sources do
         load(c, block)
     end
+    local fuse = job.fuse
+    if full and fuse then
+        if #job.records == 0 then
+            new_group(job, {})
+        end
+        if filtered_sum(job, fuse.source, fuse.op, fuse.value, job.aggs[1]) then
+            return more
+        end
+    end
     for _, c in job.conds do
-        n = filter(c.source, c.op, c.value, sel, n)
+        n = filter(c.source, c.op, c.value, sel, n, full)
         if n == 0 then
             return more
         end
+        full = full and n == SIZE
     end
     local gids = job.gids
     local ks = job.keys
     if #ks == 1 and ks[1].text and ks[1].b then
-        -- one text key: look its value up in the groups found so far
-        local c = ks[1]
-        local b: buffer, starts, tree = c.b, c.starts, job.tree
-        for i = 1, n do
-            local s = sel[i]
-            local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
-            local gi = if len > 0 then tree[buffer.readstring(b, starts[s + 1], len - 1)] else nil
-            gids[i] = gi or group_index(job, s)
-        end
+        text_gids(job, ks[1], sel, n, gids, full)
     elseif #ks == 1 and not (ks[1].text or ks[1].id or ks[1].bool) and ks[1].b
         and ks[1].default == nil then
-        local b: buffer, tree = ks[1].b, job.tree
-        for i = 1, n do
-            local s = sel[i]
-            local x = buffer.readf64(b, s * 8)
-            gids[i] = (x == x and tree[x]) or group_index(job, s)
-        end
+        number_gids(job, ks[1], sel, n, gids, full)
     elseif #ks > 0 then
         for i = 1, n do
             gids[i] = group_index(job, sel[i])
@@ -704,7 +849,7 @@ local function fold_block(job: any, block: number, presence: string, a: number, 
         new_group(job, {})
     end
     for _, ag in job.aggs do
-        fold_aggregate(ag, sel, n, gids)
+        fold_aggregate(ag, sel, n, gids, full)
     end
     return more
 end

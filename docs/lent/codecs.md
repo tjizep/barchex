@@ -112,9 +112,9 @@ Measured on 40,960 trips of 10 fields, on one machine:
 
 | work | `column` | `binary` |
 |---|---|---|
-| `aggregatePage` sum of one field, pages of 10,240 rows | 13,000,000 rows/s | 130,000 rows/s |
-| `groupBy` and sum, pages of 10,240 rows | 6,000,000 rows/s | 125,000 rows/s |
-| `count` with a filter | 24,000,000 rows/s | 167,000 rows/s |
+| `aggregatePage` sum of one field, pages of 10,240 rows | 18,000,000 rows/s | 140,000 rows/s |
+| `groupBy` and sum, pages of 10,240 rows | 9,000,000 rows/s | 128,000 rows/s |
+| `count` with a filter | 26,000,000 rows/s | 160,000 rows/s |
 | `createMany`, 1,024 rows per transaction | 13,000 rows/s | 25,000 rows/s |
 | `get`, one per transaction | 3,800 rows/s | 5,200 rows/s |
 | `update` of one field, one per transaction | 2,200 rows/s | 4,100 rows/s |
@@ -165,8 +165,8 @@ These rules apply to a column table:
 of 1,024 rows in one loop inside barch. The loop tests the filters on a
 block's field values, then adds the rows that pass to their groups, and
 creates no row tables. On 409,600 rows, on one machine, one `aggregate` call
-summed a `float` field at 41 million rows/s, summed it under a filter at 27
-million rows/s, and summed it grouped by a `string` field at 11 million
+summed a `float` field at 53 million rows/s, summed it under a filter at 35
+million rows/s, and summed it grouped by a `string` field at 15 million
 rows/s. Each call also costs about 0.3 ms, so small tables and small pages
 gain less.
 

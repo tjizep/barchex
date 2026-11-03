@@ -155,6 +155,17 @@ function cases.byQty(t)
         :aggregate(MORE))
 end
 function cases.byRaw(t) return rows_text(t:query():groupBy("raw"):aggregate(MORE)) end
+function cases.cheap(t) return t:query():where("at", ">=", 3e8):sum("score") end
+function cases.early(t) return t:query():where("at", "<", 5e8):sum("score") end
+function cases.byBytes(t)
+    return rows_text(t:query():groupBy("raw")
+        :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" } }))
+end
+function cases.byRegion(t)
+    return rows_text(t:query():where("score", ">", 1):groupBy("region")
+        :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" },
+                     hi = { fn = "max", field = "at" }, mean = { fn = "avg", field = "qty" } }))
+end
 function cases.byId(t)
     return rows_text(t:query():where("id", ">", 9):where("id", "<", 2049):groupBy("id")
         :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" } }))
@@ -208,6 +219,27 @@ end
 
 function steps.delete_all(c, tname)
     return c[tname]:query():where("region", "=", "n"):delete()
+end
+
+-- rows from..to with values that vary by id, some of them nil
+function steps.fill(c, tname, from, to)
+    local rows = {}
+    local regions = { "n", "s", "e" }
+    for i = tonumber(from), tonumber(to) do
+        rows[#rows + 1] = {
+            id = i, region = regions[i % 3 + 1], qty = i % 8,
+            score = if i % 5 == 0 then nil else i % 40 / 4,
+            amount = if i % 2 == 0 then i % 1000 / 4 else nil,
+            paid = if i % 3 == 0 then nil else i % 2 == 0,
+            at = if i % 4 == 0 then nil else i * 7919 % 1e9,
+            state = if i % 7 == 0 then nil elseif i % 2 == 0 then "new" else "done",
+            -- values of 0 to 8 bytes, some repeating
+            raw = if i % 6 == 0 then nil else string.sub("bytes" .. i, 1, i % 9),
+            note = if i % 4 == 1 then nil else "note" .. i,
+        }
+    end
+    c[tname]:createMany(rows)
+    return #rows
 end
 
 function steps.bulk(c, n, from)
@@ -327,7 +359,7 @@ def same(run, step, *args):
 CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "region", "qty",
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
          "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
-         "byQty", "byRaw", "byId"]
+         "byQty", "byRaw", "byId", "cheap", "early", "byBytes", "byRegion"]
 
 
 def seed_row(rng, pk):
@@ -399,6 +431,21 @@ def test_column_answers_what_binary_answers(run, seed):
     same(run, "ask", "all")
     same(run, "delete_all")
     same(run, "ask", "all")
+
+
+def test_full_blocks_answer_what_binary_answers(run):
+    # ids 1024 to 3071 fill two blocks, which a fold reads slot by slot
+    for lo in range(1, 3101, 500):
+        hi = str(min(lo + 499, 3100))
+        assert run("fill", "Sale", str(lo), hi) == run("fill", "Plain", str(lo), hi)
+    for case in CASES[13:]:
+        same(run, "ask", case)
+    for size in ("1000", "2000", "5000"):
+        same(run, "paged", size)
+        same(run, "paged_groups", size)
+    write_both(run, "delete", 1500, {})
+    for case in ("count", "cheap", "byBytes", "byRegion"):
+        same(run, "ask", case)
 
 
 def test_rows_use_blocks_and_leave_with_their_last_row(run):
