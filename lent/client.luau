@@ -2436,18 +2436,10 @@ local function first_time(seen: any, v: any): boolean
     return true
 end
 
--- Adds row r to aggregate a's running value acc. Rows without a value for
--- the field, or whose value function answers nil, are skipped, and so are
--- values already in `seen` for a distinct aggregate. An avg runs as
--- { sum, n }.
-local function fold(a: any, acc: any, r: any, seen: any): any
-    if a.fn == "count" and a.field == nil and a.value == nil then
-        return (acc or 0) + 1
-    end
-    local v = fold_value(a, acc, r)
-    if v == nil or (seen and not first_time(seen, v)) then
-        return acc
-    elseif a.fn == "count" then
+-- Adds value v, which is not nil, to aggregate a's running value acc. An
+-- avg runs as { sum, n }.
+local function add(a: any, acc: any, v: any): any
+    if a.fn == "count" then
         return (acc or 0) + 1
     elseif a.fn == "sum" or a.fn == "avg" then
         if a.scale then
@@ -2468,6 +2460,39 @@ local function fold(a: any, acc: any, r: any, seen: any): any
     end
     if less(acc, v) then return v end
     return acc
+end
+
+-- Adds row r to aggregate a's running value acc. Rows without a value for
+-- the field, or whose value function answers nil, are skipped, and so are
+-- values already in `seen` for a distinct aggregate.
+local function fold(a: any, acc: any, r: any, seen: any): any
+    if a.fn == "count" and a.field == nil and a.value == nil then
+        return (acc or 0) + 1
+    end
+    local v = fold_value(a, acc, r)
+    if v == nil or (seen and not first_time(seen, v)) then
+        return acc
+    end
+    return add(a, acc, v)
+end
+
+-- The running value of aggregate a over the rows of two running values x
+-- and y, for an aggregate without distinct.
+local function combine(a: any, x: any, y: any): any
+    if x == nil then
+        return y
+    elseif y == nil then
+        return x
+    elseif a.fn == "count" or a.fn == "sum" then
+        return x + y
+    elseif a.fn == "avg" then
+        return { sum = x.sum + y.sum, n = x.n + y.n }
+    elseif type(x) ~= type(y) then
+        fail(a.at .. " value answered a " .. type(y) .. " after a " .. type(x))
+    elseif a.fn == "min" then
+        return if less(y, x) then y else x
+    end
+    return if less(x, y) then y else x
 end
 
 -- Aggregate a's answer from its running value acc.
@@ -2605,10 +2630,9 @@ local function group_test(tbl: any, keys: { any }, aggs: { any }, h: any): (any)
     end
 end
 
--- Group rows `out` in the order of the order(name, dir) calls in `orders`,
--- with ties in the order they come.
-local function order_groups(tbl: any, keys: { any }, aggs: { any }, orders: { any },
-                            out: { any })
+-- Raises an error for an order(name, dir) call in `orders` that names no
+-- group key or aggregate of keys and aggs.
+local function check_orders(tbl: any, keys: { any }, aggs: { any }, orders: { any })
     local known = {}
     for _, k in keys do
         known[k.name] = true
@@ -2622,6 +2646,13 @@ local function order_groups(tbl: any, keys: { any }, aggs: { any }, orders: { an
                 .. tostring(o.name))
         end
     end
+end
+
+-- Group rows `out` in the order of the order(name, dir) calls in `orders`,
+-- with ties in the order they come.
+local function order_groups(tbl: any, keys: { any }, aggs: { any }, orders: { any },
+                            out: { any })
+    check_orders(tbl, keys, aggs, orders)
     local at = {}
     for i, row in out do
         at[row] = i
@@ -2729,6 +2760,29 @@ local function fold_rows(agg: any, list: { any })
     end
 end
 
+-- The row of a group of agg with key values `values` and running values
+-- `acc`.
+local function group_row(agg: any, values: { any }, acc: any): any
+    local row = {}
+    for j, k in agg.keys do
+        row[k.name] = values[j]
+    end
+    for _, a in agg.aggs do
+        row[a.name] = result(a, acc[a.name])
+    end
+    return row
+end
+
+-- Whether group row `row` passes the having calls of agg's shape.
+local function keep_group(agg: any, row: any): boolean
+    for _, test in agg.tests do
+        if not test(row) then
+            return false
+        end
+    end
+    return true
+end
+
 -- One row per group of agg, with the keys' values and each aggregate. The
 -- having, order, offset and limit calls of agg's shape apply; without order
 -- calls, groups come in the order of their keys.
@@ -2742,21 +2796,8 @@ local function group_rows(agg: any): { any }
     end)
     local out = {}
     for _, g in list do
-        local row = {}
-        for j, k in keys do
-            row[k.name] = g.values[j]
-        end
-        for _, a in aggs do
-            row[a.name] = result(a, g.acc[a.name])
-        end
-        local keep = true
-        for _, test in agg.tests do
-            if not test(row) then
-                keep = false
-                break
-            end
-        end
-        if keep then
+        local row = group_row(agg, g.values, g.acc)
+        if keep_group(agg, row) then
             out[#out + 1] = row
         end
     end
@@ -2785,13 +2826,32 @@ end
 
 -- paged aggregates -------------------------------------------------------------
 
--- A paged aggregate's state is hex text of values in key encoding: STATE,
--- the query's mark, the last key or linked id read, the number of groups,
--- and for each group its key text and each aggregate's running value. An
--- avg runs as its sum and count, and a distinct aggregate adds the number
--- of values it has seen, then each value's Luau type and key.
-local STATE = "lent.aggregate.1"
+-- A paged aggregate keeps its groups in its state until they hold more than
+-- the client's pageGroups groups and distinct values. The run then moves
+-- them into scratch keys under lay.scratch(run), and the state names it:
+--
+--   <scratch>g<group key>                    the group's record
+--   <scratch>d<group key><name><type><key>   "1" for each value that the
+--                                            distinct aggregate `name` read
+--   <scratch>o<order><group key>             the record, in the order of
+--                                            the order calls
+--   <scratch>s                               the number of the run's page
+--
+-- A record holds the group key text, then each aggregate's running value; an
+-- avg runs as its sum and count. After the scan, the run removes the read
+-- values, puts the groups in order keys when the shape orders them, and
+-- answers the group rows a page at a time as it removes their keys.
+--
+-- A state is hex text of values in key encoding. STATE holds the query's
+-- mark, the last key or linked id read, the number of groups, and for each
+-- group its key text and each aggregate's running value; a distinct
+-- aggregate adds the number of values it has read, then each value's Luau
+-- type and key. SPILLED holds the mark, the run, its page number, its phase,
+-- the last key or linked id read and the number of groups kept so far.
+local STATE, SPILLED = "lent.aggregate.1", "lent.aggregate.2"
+local PHASES = { scan = true, seen = true, order = true, rows = true }
 local PAGE_SIZE, PAGE_MAX = 10000, 1000000
+local PAGE_GROUPS = 1000
 
 -- The key text of a state value: a number, string, boolean or nil, with
 -- "n" for NaN, which key encoding refuses.
@@ -2810,6 +2870,24 @@ local function state_value(v: any): string
     return "-"
 end
 
+-- A reader of the state values in `raw`: each call of the first function
+-- answers the next value, and the second answers how many bytes are left.
+local function state_reader(raw: string): (() -> any, () -> number)
+    local pos = 1
+    local function value(): any
+        if string.sub(raw, pos, pos) == "n" then
+            pos += 1
+            return 0 / 0
+        end
+        local v
+        v, pos = kc.decode(raw, pos)
+        return v
+    end
+    return value, function()
+        return #raw + 1 - pos
+    end
+end
+
 local function mark_value(v: any): string
     if type(v) == "table" then
         return VALUES.json(v)
@@ -2818,7 +2896,8 @@ local function mark_value(v: any): string
 end
 
 -- What a state must match to continue: the table and schema version, the
--- plan, the group keys, the aggregates and the conditions' values.
+-- plan, the group keys, the aggregates, the conditions' values and the
+-- groupBy's having, order, offset and limit calls.
 local function page_mark(q: any, p: any, agg: any): string
     local parts = { q.tbl.where, tostring(q.tbl.version), p.name }
     for _, k in agg.keys do
@@ -2831,7 +2910,45 @@ local function page_mark(q: any, p: any, agg: any): string
     for _, c in q.conds do
         parts[#parts + 1] = c.field .. " " .. c.op .. " " .. mark_value(c.value)
     end
+    local shape = agg.shape
+    if shape then
+        for _, h in shape.tests do
+            parts[#parts + 1] = "having " .. (if type(h.cond) == "string"
+                then h.cond .. " " .. mark_value(h.params) else "(function)")
+        end
+        for _, o in shape.orders do
+            parts[#parts + 1] = "order " .. tostring(o.name) .. (if o.desc then " desc" else " asc")
+        end
+        parts[#parts + 1] = "offset " .. shape.skip .. " limit " .. tostring(shape.lim)
+    end
     return table.concat(parts, "\n")
+end
+
+-- The state values of the running values `acc` of agg's aggregates.
+local function acc_values(agg: any, acc: any, parts: { string })
+    for _, a in agg.aggs do
+        local v = acc[a.name]
+        if a.fn == "avg" then
+            parts[#parts + 1] = state_value(v and v.sum)
+            parts[#parts + 1] = state_value(v and v.n)
+        else
+            parts[#parts + 1] = state_value(v)
+        end
+    end
+end
+
+-- Reads the running values of agg's aggregates with `value`.
+local function read_acc(agg: any, value: () -> any): any
+    local acc = {}
+    for _, a in agg.aggs do
+        if a.fn == "avg" then
+            local sum, n = value(), value()
+            acc[a.name] = if n == nil then nil else { sum = sum, n = n }
+        else
+            acc[a.name] = value()
+        end
+    end
+    return acc
 end
 
 -- The state text of agg after a page that read up to `last`.
@@ -2840,14 +2957,8 @@ local function encode_state(agg: any, mark: string, last: any): string
                     state_value(#agg.list) }
     for _, g in agg.list do
         parts[#parts + 1] = state_value(g.key)
+        acc_values(agg, g.acc, parts)
         for _, a in agg.aggs do
-            local acc = g.acc[a.name]
-            if a.fn == "avg" then
-                parts[#parts + 1] = state_value(acc and acc.sum)
-                parts[#parts + 1] = state_value(acc and acc.n)
-            else
-                parts[#parts + 1] = state_value(acc)
-            end
             if a.distinct then
                 local at, n = #parts + 1, 0
                 parts[at] = ""
@@ -2865,44 +2976,44 @@ local function encode_state(agg: any, mark: string, last: any): string
     return to_hex(table.concat(parts))
 end
 
--- Restores agg's groups from state text and answers the last key or linked
--- id read. Raises an error for text that is no state, or a state whose mark
--- differs.
+-- The state text of spilled run `run`.
+local function encode_spilled(mark: string, run: any): string
+    return to_hex(table.concat({ state_value(SPILLED), state_value(mark), state_value(run.id),
+                                 state_value(run.page), state_value(run.phase),
+                                 state_value(run.last), state_value(run.kept) }))
+end
+
+-- Reads state text: for STATE it restores agg's groups and answers { last },
+-- and for SPILLED it answers the run { id, page, phase, last, kept }. Raises
+-- an error for text that is no state, or a state whose mark differs.
 local function decode_state(agg: any, text: any, mark: string, at: string): any
     local ok, found = pcall(function()
-        local raw = from_hex(text) :: string
-        local pos = 1
-        local function value(): any
-            if string.sub(raw, pos, pos) == "n" then
-                pos += 1
-                return 0 / 0
-            end
-            local v
-            v, pos = kc.decode(raw, pos)
-            return v
-        end
+        local value, left = state_reader(from_hex(text) :: string)
         local function count(): number
             local n = value()
             assert(type(n) == "number" and n >= 0 and n == math.floor(n))
             return n
         end
-        assert(value() == STATE)
-        local m, last = value(), value()
+        local version = value()
+        assert(version == STATE or version == SPILLED)
+        local m = value()
         if m ~= mark then
             -- another query's groups may not fit this one's aggregates
             return { mark = m }
         end
+        if version == SPILLED then
+            local run = { mark = m, id = value(), page = count(), phase = value(), last = value(),
+                          kept = count() }
+            assert(type(run.id) == "string" and PHASES[run.phase] and left() == 0)
+            return run
+        end
+        local last = value()
         for _ = 1, count() do
             local key = value()
             assert(type(key) == "string")
             local g = group_of(agg, key, (kc.unpack(key, #agg.keys)))
+            g.acc = read_acc(agg, value)
             for _, a in agg.aggs do
-                if a.fn == "avg" then
-                    local sum, n = value(), value()
-                    g.acc[a.name] = if n == nil then nil else { sum = sum, n = n }
-                else
-                    g.acc[a.name] = value()
-                end
                 if a.distinct then
                     local seen = {}
                     for _ = 1, count() do
@@ -2914,7 +3025,7 @@ local function decode_state(agg: any, text: any, mark: string, at: string): any
                 end
             end
         end
-        assert(pos == #raw + 1)
+        assert(left() == 0)
         return { mark = m, last = last }
     end)
     if not ok then
@@ -2924,11 +3035,205 @@ local function decode_state(agg: any, text: any, mark: string, at: string): any
         fail(at .. " state comes from another query, aggregate or schema version; start again"
             .. " without a state")
     end
-    return found.last
+    return found
+end
+
+-- The run that a spilled state names, or nil for a state that keeps its
+-- groups.
+local function state_run(text: any, at: string): string?
+    local ok, id = pcall(function()
+        local value = state_reader(from_hex(text) :: string)
+        local version = value()
+        if version == STATE then
+            return false
+        end
+        assert(version == SPILLED)
+        value()
+        local id = value()
+        assert(type(id) == "string")
+        return id
+    end)
+    if not ok then
+        fail(at .. " takes a state that an earlier aggregatePage answered")
+    end
+    return id or nil
+end
+
+-- How many groups and distinct values agg holds.
+local function state_size(agg: any): number
+    local n = #agg.list
+    for _, g in agg.list do
+        for _, seen in g.seen do
+            for _, set in seen do
+                for _ in set do
+                    n += 1
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- The value that distinct key `key` of Luau type t stands for.
+local function seen_value(t: string, key: any): any
+    if t == "number" and key == "nan" then
+        return 0 / 0
+    end
+    return key
+end
+
+-- Adds the groups of agg, which one page read, to the scratch keys under
+-- `prefix`. A distinct aggregate adds only the values the scratch lacks.
+local function spill_groups(agg: any, prefix: string)
+    for _, g in agg.list do
+        local gk = prefix .. "g" .. g.key
+        local stored = barch.store.get(gk)
+        local acc = g.acc
+        if stored ~= nil then
+            local value = state_reader(stored)
+            value()
+            acc = read_acc(agg, value)
+            for _, a in agg.aggs do
+                if not a.distinct then
+                    acc[a.name] = combine(a, acc[a.name], g.acc[a.name])
+                end
+            end
+        end
+        for _, a in agg.aggs do
+            local name = state_value(a.name)
+            for t, set in if a.distinct then g.seen[a.name] or {} else {} do
+                for key in set do
+                    local dk = prefix .. "d" .. g.key .. name .. state_value(t) .. state_value(key)
+                    -- a group new to the scratch has read no value yet
+                    if stored == nil then
+                        barch.store.set(dk, "1")
+                    elseif not barch.store.exists(dk) then
+                        barch.store.set(dk, "1")
+                        acc[a.name] = add(a, acc[a.name], seen_value(t, key))
+                    end
+                end
+            end
+        end
+        local parts = { state_value(g.key) }
+        acc_values(agg, acc, parts)
+        barch.store.set(gk, table.concat(parts))
+    end
+end
+
+-- The group key text and the row of a scratch record.
+local function record_row(agg: any, record: string): (string, any)
+    local value = state_reader(record)
+    local key = value()
+    return key, group_row(agg, (kc.unpack(key, #agg.keys)), read_acc(agg, value))
+end
+
+-- The order key text of group row `row` for the order calls in `orders`.
+-- Each value is in key encoding; a "desc" value turns each byte b into
+-- 255 - b, written as two hexadecimal digits, which reverses its order.
+local function order_key(orders: { any }, row: any): string
+    local parts = {}
+    for i, o in orders do
+        local v = state_value(row[o.name])
+        if o.desc then
+            v = string.gsub(v, ".", function(c)
+                return string.format("%02x", 255 - string.byte(c))
+            end)
+        end
+        parts[i] = v
+    end
+    return table.concat(parts)
+end
+
+-- Calls each(key, value) for up to `budget` keys from lo up to hi and
+-- removes each key after its call. Answers how many keys it took and
+-- whether more remain.
+local function take(lo: string, hi: string, budget: number,
+                    each: (string, string) -> ()): (number, boolean)
+    local n = 0
+    while true do
+        local want = math.min(budget - n + 1, 1000)
+        local keys, values = barch.store.rangeValues(lo, hi, want)
+        for i, k in keys do
+            if n == budget then
+                return n, true
+            end
+            each(k, values[i])
+            barch.store.remove(k)
+            n += 1
+        end
+        if #keys < want then
+            return n, false
+        end
+        lo = keys[#keys] .. "\2"
+    end
+end
+
+-- Runs the phases after the scan of spilled run `run` over up to `budget`
+-- scratch keys. Answers the group rows it found, how many keys it took and
+-- whether the run is done, which removes the last scratch key.
+local function finish_page(agg: any, run: any, budget: number): ({ any }, number, boolean)
+    local prefix = lay.scratch(run.id)
+    local shape = agg.shape
+    local orders = shape and shape.orders or {}
+    local skip, lim = shape and shape.skip or 0, shape and shape.lim
+    local out, used = {}, 0
+    while true do
+        local lo, each
+        if run.phase == "seen" then
+            lo, each = prefix .. "d", function() end
+        elseif run.phase == "order" then
+            lo, each = prefix .. "g", function(_, record)
+                local key, row = record_row(agg, record)
+                if keep_group(agg, row) then
+                    barch.store.set(prefix .. "o" .. order_key(orders, row) .. key, record)
+                end
+            end
+        else
+            lo, each = prefix .. (if #orders > 0 then "o" else "g"), function(_, record)
+                if lim ~= nil and run.kept >= skip + lim then
+                    return
+                end
+                local _, row = record_row(agg, record)
+                -- the order phase kept only the groups that pass having
+                if #orders == 0 and not keep_group(agg, row) then
+                    return
+                end
+                run.kept += 1
+                if run.kept > skip then
+                    out[#out + 1] = row
+                end
+            end
+        end
+        local n, more = take(lo, kc.after(lo), budget - used, each)
+        used += n
+        if more then
+            return out, used, false
+        elseif run.phase == "seen" then
+            run.phase = if #orders > 0 then "order" else "rows"
+        elseif run.phase == "order" then
+            run.phase = "rows"
+        else
+            barch.store.remove(prefix .. "s")
+            return out, used, true
+        end
+    end
+end
+
+-- Checks that the scratch of run `run` is at the page its state names.
+local function check_run(run: any, at: string)
+    local page = barch.store.get(lay.scratch(run.id) .. "s")
+    if page == nil then
+        fail(at .. " state belongs to a run that finished or was cancelled; start again"
+            .. " without a state")
+    elseif tonumber(page) ~= run.page then
+        fail(at .. " state is older than the latest page of its run; pass the state that the"
+            .. " latest page answered")
+    end
 end
 
 -- One page of aggregate(q, keys, spec, shape): it reads up to pageSize keys
--- or linked ids after those that `state` has read, and answers a report.
+-- or linked ids after those that `state` has read, or once a spilled run has
+-- read them all, up to pageSize scratch keys, and answers a report.
 local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, state: any,
                               pageSize: any): any
     local tbl = q.tbl
@@ -2948,17 +3253,69 @@ local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, sta
     local pq = setmetatable(table.clone(q), Query)
     pq.sortField, pq.desc, pq.fixedPlan = nil, nil, true
     local agg = aggregation(pq, keys, spec, shape)
+    if shape then
+        check_orders(tbl, keys, agg.aggs, shape.orders)
+    end
     local p = plan(pq)
     local mark = page_mark(pq, p, agg)
-    local last = if state == nil then nil else decode_state(agg, state, mark, at)
-    local page = { plan = p, budget = pageSize or PAGE_SIZE, from = last, seen = 0 }
-    fold_rows(agg, rows(pq, false, page, aggregate_needs(agg)))
-    if page.more then
-        return { done = false, processed = page.seen,
-                 state = encode_state(agg, mark, page.last) }
+    local found = if state == nil then {} else decode_state(agg, state, mark, at)
+    local budget = pageSize or PAGE_SIZE
+    local run = if found.id then found else nil
+    if run then
+        check_run(run, at)
     end
-    local out = group_rows(agg)
-    return { done = true, processed = page.seen, result = if shape then out else out[1] }
+    local out, processed, done
+    if run == nil or run.phase == "scan" then
+        local page = { plan = p, budget = budget, from = found.last, seen = 0 }
+        fold_rows(agg, rows(pq, false, page, aggregate_needs(agg)))
+        processed = page.seen
+        if run == nil then
+            if not page.more then
+                local all = group_rows(agg)
+                return { done = true, processed = processed, result = if shape then all else all[1] }
+            elseif state_size(agg) <= (tbl.pageGroups or PAGE_GROUPS) then
+                return { done = false, processed = processed,
+                         state = encode_state(agg, mark, page.last) }
+            end
+            run = { id = barch.uuid(), page = 0, phase = "scan", kept = 0 }
+        end
+        spill_groups(agg, lay.scratch(run.id))
+        run.last = if page.more then page.last else nil
+        run.phase = if page.more then "scan" else "seen"
+        out, done = {}, false
+    else
+        out, processed, done = finish_page(agg, run, budget)
+    end
+    local report = { done = done, processed = processed, result = if shape then out else out[1] }
+    if not done then
+        run.page += 1
+        barch.store.set(lay.scratch(run.id) .. "s", tostring(run.page))
+        report.state = encode_spilled(mark, run)
+    end
+    return report
+end
+
+-- Removes up to pageSize scratch keys of the run that `state` names, for a
+-- run that will not continue, and answers { done, processed }, with the
+-- state to pass again while done is false. A state that keeps its groups
+-- has no scratch keys, so it answers done at once.
+local function cancel_page(tbl: any, state: any, pageSize: any): any
+    local at = tbl.where .. " cancelAggregate"
+    pageSize = num(pageSize)
+    if pageSize ~= nil and (type(pageSize) ~= "number" or pageSize ~= math.floor(pageSize)
+            or pageSize < 1 or pageSize > PAGE_MAX) then
+        fail(at .. " page size must be a whole number from 1 to " .. PAGE_MAX .. ", got "
+            .. tostring(pageSize))
+    end
+    local id = state_run(state, at)
+    if id == nil then
+        return { done = true, processed = 0 }
+    end
+    local prefix = lay.scratch(id)
+    -- a later page of the run then fails instead of reading part of it
+    barch.store.remove(prefix .. "s")
+    local n, more = take(prefix, kc.after(prefix), pageSize or PAGE_SIZE, function() end)
+    return { done = not more, processed = n, state = if more then state else nil }
 end
 
 -- One row with each aggregate of spec over the matching rows, such as
@@ -2974,6 +3331,13 @@ end
 -- each state to the next call, in a later transaction if needed.
 function Query:aggregatePage(spec: { [string]: any }, state: string?, pageSize: number?): any
     return aggregate_page(self, {}, spec, nil, state, pageSize)
+end
+
+-- Removes the scratch keys of an aggregatePage run that will not continue,
+-- up to pageSize keys a call, and answers { done, processed, state }; pass
+-- the state again until done is true.
+function Table:cancelAggregate(state: string, pageSize: number?): any
+    return cancel_page(self, state, pageSize)
 end
 
 -- The sum of `field` over the matching rows, 0 when none has a value.
@@ -3053,8 +3417,9 @@ function Grouped:aggregate(spec: { [string]: any }?): { any }
     return aggregate(self.q, self.keys, spec or {}, self)
 end
 
--- One page of aggregate(spec), as Query:aggregatePage; the last page's
--- result holds the group rows.
+-- One page of aggregate(spec), as Query:aggregatePage. A page's result
+-- holds group rows: the last page's holds them all, and after a run spills
+-- its groups into scratch keys, each page holds the next ones.
 function Grouped:aggregatePage(spec: { [string]: any }?, state: string?, pageSize: number?): any
     return aggregate_page(self.q, self.keys, spec or {}, self, state, pageSize)
 end
@@ -3270,9 +3635,10 @@ end
 
 -- The tables of this space's schema, by name, for a transaction the caller
 -- runs. Reading the catalog makes the transaction conflict with a migration
--- that commits before it does.
+-- that commits before it does. `options` holds the hookDepth and pageGroups
+-- that open checked.
 function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
-                hookDepth: number?): any
+                options: any?): any
     local compiled = mig.load()
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
@@ -3332,11 +3698,13 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
     -- whose hooks count toward the same depth
     local rules
     local hookStack = {}
+    local hookDepth = options and options.hookDepth or HOOK_DEPTH
+    local pageGroups = options and options.pageGroups or PAGE_GROUPS
     local function rulesClient(): any
         if rules == nil then
-            rules = client(pessimistic, app, nil, true)
+            rules = client(pessimistic, app, nil, true, options)
             for _, b in rules do
-                b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH
+                b.hookStack, b.hookDepth = hookStack, hookDepth
             end
         end
         return rules
@@ -3349,7 +3717,8 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
         b.indexUses = indexUses
         b.viewer = viewer
         b.rulesClient = rulesClient
-        b.hookStack, b.hookDepth = hookStack, hookDepth or HOOK_DEPTH
+        b.hookStack, b.hookDepth = hookStack, hookDepth
+        b.pageGroups = pageGroups
     end
     local what = "table "
     for name, v in app and app.views or {} do
@@ -3384,9 +3753,9 @@ Query.delete = atomic(Query.delete)
 
 -- Runs fn(c) in a transaction and answers what it answers.
 function tx(fn: (any) -> any, pessimistic: boolean?, app: any?, viewer: any?,
-            hookDepth: number?): any
+            options: any?): any
     return barch.tx.run(function()
-        return fn(client(pessimistic, app, viewer, nil, hookDepth))
+        return fn(client(pessimistic, app, viewer, nil, options))
     end, pessimistic == true)
 end
 
@@ -3394,7 +3763,9 @@ end
 -- function defaults, validate functions, hooks and policy rules run:
 -- db.tx(fn, pessimistic, viewer) and db.client(pessimistic, viewer) work as
 -- tx and client do, and the rules get `viewer`. options.hookDepth sets how
--- deep hooks may nest, 16 when left out.
+-- deep hooks may nest, 16 when left out, and options.pageGroups how many
+-- groups and distinct values an aggregatePage state holds before the run
+-- moves them into scratch keys, 1000 when left out.
 function open(app: any, options: any?): any
     if type(app) ~= "table" or type(app.tables) ~= "table" then
         fail("open takes the graph from lent.graph")
@@ -3402,21 +3773,23 @@ function open(app: any, options: any?): any
     if options ~= nil and type(options) ~= "table" then
         fail("open takes a table of options, got " .. type(options))
     end
-    local hookDepth
+    local checked = {}
     for k, v in options or {} do
-        if k ~= "hookDepth" then
-            fail("open has no option " .. tostring(k) .. "; it takes hookDepth")
-        elseif type(v) ~= "number" or v < 1 or v ~= math.floor(v) then
-            fail("open option hookDepth takes a whole number of at least 1, got " .. tostring(v))
+        local least = if k == "hookDepth" then 1 elseif k == "pageGroups" then 0 else nil
+        if least == nil then
+            fail("open has no option " .. tostring(k) .. "; it takes hookDepth or pageGroups")
+        elseif type(v) ~= "number" or v < least or v ~= math.floor(v) then
+            fail("open option " .. k .. " takes a whole number of at least " .. least .. ", got "
+                .. tostring(v))
         end
-        hookDepth = v
+        checked[k] = v
     end
     return {
         tx = function(fn: (any) -> any, pessimistic: boolean?, viewer: any?): any
-            return tx(fn, pessimistic, app, viewer, hookDepth)
+            return tx(fn, pessimistic, app, viewer, checked)
         end,
         client = function(pessimistic: boolean?, viewer: any?): any
-            return client(pessimistic, app, viewer, nil, hookDepth)
+            return client(pessimistic, app, viewer, nil, checked)
         end,
     }
 end

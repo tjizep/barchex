@@ -86,9 +86,13 @@ beside a development server.
   when the narrower index changes between calls.
 - `test_aggregate_pages.py` runs `aggregatePage` over totals, groups,
   shaped groups, ranges, equal filters, paths, `follow` and `has` in pages
-  of several sizes and checks each answer against one `aggregate` call. It
-  checks rows read per page, writes between pages, and the errors for a
-  paged query, page size and state.
+  of several sizes and checks each answer against one `aggregate` call,
+  with the groups kept in the state, spilled into scratch keys after the
+  first page, and spilled after 5 groups and values. It checks rows read per
+  page, writes between pages, group rows across spilled pages,
+  `cancelAggregate`, an older state of a spilled run, that finished runs
+  leave no scratch keys, and the errors for a paged query, page size, state
+  and `pageGroups`.
 - `test_views.py` reads a view's rows through `where`, `order`, `limit`,
   `offset`, `first`, `count`, `groupBy`, `having` and the aggregates, passes
   parameters to its function, keeps only the declared fields of each row,

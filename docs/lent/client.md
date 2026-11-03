@@ -49,6 +49,7 @@ row. The policy rules receive it, and they receive `nil` when it is left out.
 | option | default | valid values | effect |
 |---|---|---|---|
 | `hookDepth` | `16` | a whole number of at least `1` | how deep hooks may nest before a write raises the depth error; see [hooks](schema.md#hooks) |
+| `pageGroups` | `1000` | a whole number of at least `0` | how many groups and distinct values an `aggregatePage` state holds before the run moves them into scratch keys; see [many groups](queries.md#many-groups) |
 
 An unknown option or an invalid value raises an error when `lent.open` is
 called.

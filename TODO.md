@@ -4,9 +4,10 @@ This page lists the work that remains on lent, the ORM described in
 [docs/lent-design.md](docs/lent-design.md). The schema language, migrations
 with paged index builds, row reads and writes with index upkeep, bulk create
 and upsert, query reads and writes, aggregates over fields and values,
-`groupBy` and paged aggregates, edges, path edges and computed fields (each stored or not), edge
-joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
-`bytes` fields, column tables, hooks and privacy policies are built.
+`groupBy` and paged aggregates with many groups, edges, path edges and
+computed fields (each stored or not), edge joins, edge fields, cursor pages,
+value rules, `time`, `enum`, `json` and `bytes` fields, column tables, hooks
+and privacy policies are built.
 
 ## Limits of what is built
 
@@ -58,11 +59,6 @@ joins, edge fields, cursor pages, value rules, `time`, `enum`, `json` and
   on another with fewer keys, because only equal matches are compared.
   Comparing every candidate needs the cheap count above or stored statistics
   such as row counts per index. Keep the plan predictable.
-- **Analytics queries.** `aggregate` and `groupBy` take `avg`, `distinct`,
-  `having`, group order and paging, and `aggregatePage` runs them across
-  calls over tables too large for one. A state grows with its groups and
-  distinct values, so many groups need a stored partial result, such as a
-  scratch table.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.

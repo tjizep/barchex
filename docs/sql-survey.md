@@ -165,6 +165,8 @@ item it belongs to.
    answers. The taxi test runs Q4 in pages of 64 trips. Done too: a
    `column` table reads only the fields a query adds up, 4 to 7 times faster
    per row; see [Column tables](lent/codecs.md#column-tables-with-columns).
+   A run with many groups, such as TPC-H Q18 per order, moves them into
+   scratch keys; see [Many groups](lent/queries.md#many-groups).
 2. **`count()` reads rows.** Done: `count()` counts keys when `=` filters
    on an index's leading fields and ranges on the next one cover the query,
    or when it has no filters, so its cost stays flat with table size. Other

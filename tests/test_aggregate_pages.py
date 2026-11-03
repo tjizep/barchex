@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -7,11 +8,14 @@ from .test_client import setup
 redis = pytest.importorskip("redis")
 
 # Shops sell in regions; aggregates over the sales run in pages, each page
-# in its own call, and must answer what one aggregate call answers.
+# in its own call, and must answer what one aggregate call answers. The
+# "spill" client moves its groups into scratch keys after its first page,
+# and the "some" client after 5 groups and distinct values.
 APP = """
 local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
+local lay = require("lent.LAYOUT")
 local f = lent.field
 
 local app = lent.graph {
@@ -30,7 +34,11 @@ local app = lent.graph {
         edges = { lent.edge.from "shop" "Shop":ref "sales":unique() },
     },
 }
-local db = client.open(app)
+local dbs = {
+    keep = client.open(app),
+    spill = client.open(app, { pageGroups = 0 }),
+    some = client.open(app, { pageGroups = 5 }),
+}
 
 local function show(v)
     if v == nil then return "nil" end
@@ -129,12 +137,22 @@ function steps.whole(c, name)
     return answer(q:aggregate(spec))
 end
 
--- one page, as JSON: done, processed, state and the answer
+-- one page, as JSON: done, processed, state and the page's group rows
 function steps.page(c, name, state, size)
     local q, spec = cases[name](c)
     local r = q:aggregatePage(spec, if state == "" then nil else state, tonumber(size))
     return simdjson.encode({ done = r.done, processed = r.processed, state = r.state or "",
-                             result = if r.done then answer(r.result) else {} })
+                             result = answer(r.result) })
+end
+
+function steps.cancel(c, state, size)
+    local r = c.Sale:cancelAggregate(state, tonumber(size))
+    return simdjson.encode({ done = r.done, processed = r.processed, state = r.state or "" })
+end
+
+-- how many scratch keys the space holds
+function steps.scratch()
+    return lay.walk("lent.a", function() end)
 end
 
 function steps.change(c)
@@ -168,15 +186,20 @@ function steps.errors(c, state)
         err(function() q():where("qty", ">=", 3):groupBy("region")
             :aggregatePage({ n = SPEC.n }, state) end),
         err(function() q():aggregatePage({ n = { fn = "median" } }) end),
+        err(function() q():groupBy("region"):order("nothing"):aggregatePage(SPEC, nil, 2) end),
+        err(function() c.Sale:cancelAggregate("zz") end),
+        err(function() client.open(app, { pageGroups = -1 }) end),
+        err(function() client.open(app, { pageGroups = 1.5 }) end),
     }
 end
 
-function call(step, ...)
-    if step == "migrate" then
+-- call(client, step, ...) runs a step with dbs[client]
+function call(which, step, ...)
+    if which == "migrate" then
         return m.migrate(app).version
     end
     local args = { ... }
-    return db.tx(function(c) return steps[step](c, table.unpack(args)) end)
+    return dbs[which].tx(function(c) return steps[step](c, table.unpack(args)) end)
 end
 """
 
@@ -184,23 +207,24 @@ end
 @pytest.fixture
 def run(client, request):
     setup(client)
-    client.execute_command("USE", "aggp_" + request.node.name.replace("[", "_").rstrip("]"))
+    client.execute_command("USE", "aggp_" + re.sub(r"\W", "_", request.node.name))
     client.execute_command("SETF", "AGGP", APP)
     assert client.execute_command("CALLF", "AGGP", "migrate") == 1
-    assert client.execute_command("CALLF", "AGGP", "seed") == "ok"
+    assert client.execute_command("CALLF", "AGGP", "keep", "seed") == "ok"
     return lambda *a: client.execute_command("CALLF", "AGGP", *a)
 
 
-def pages(run, case, size, state=""):
-    """Calls aggregatePage until it is done; answers the result and the
-    processed count of each call."""
-    processed = []
+def pages(run, case, size, state="", db="keep"):
+    """Calls aggregatePage until it is done; answers the group rows of every
+    page and the processed count of each call."""
+    processed, result = [], []
     while True:
-        r = json.loads(run("page", case, state, str(size)))
+        r = json.loads(run(db, "page", case, state, str(size)))
         processed.append(r["processed"])
+        result += r["result"] or []
         if r["done"]:
             assert r["state"] == ""
-            return r["result"], processed
+            return result, processed
         assert r["state"] != ""
         state = r["state"]
 
@@ -209,13 +233,56 @@ CASES = ["totals", "ordered", "regions", "shaped", "range", "spans", "equal", "p
          "follow", "has", "none", "keys"]
 
 
+@pytest.mark.parametrize("db", ["keep", "spill", "some"])
 @pytest.mark.parametrize("size", [1, 3, 8, 100])
-def test_pages_answer_what_one_call_answers(run, size):
+def test_pages_answer_what_one_call_answers(run, size, db):
     for case in CASES:
-        whole = run("whole", case)
+        whole = run("keep", "whole", case)
         assert whole, case
-        got, _ = pages(run, case, size)
+        got, _ = pages(run, case, size, db=db)
         assert got == whole, case
+    # each finished run removed its scratch keys
+    assert run("keep", "scratch") == 0
+
+
+def test_spilled_pages_answer_group_rows_as_they_go(run):
+    # 3 regions: 40 rows in pages of 10 spill after the first, then the
+    # run removes the read values and answers one group a page
+    state, pages_rows = "", []
+    while True:
+        r = json.loads(run("spill", "page", "regions", state, "10"))
+        pages_rows.append((r["processed"], len(r["result"] or [])))
+        if r["done"]:
+            break
+        state = r["state"]
+    assert pages_rows[:4] == [(10, 0), (10, 0), (10, 0), (10, 0)]
+    assert sum(n for _, n in pages_rows) == 3
+    assert run("keep", "scratch") == 0
+
+
+def test_cancel_removes_a_spilled_run(run):
+    first = json.loads(run("spill", "page", "regions", "", "10"))
+    second = json.loads(run("spill", "page", "regions", first["state"], "10"))
+    assert run("keep", "scratch") > 0
+    # a page that continues from an older state would count rows twice
+    with pytest.raises(redis.ResponseError, match="older than the latest page of its run"):
+        run("spill", "page", "regions", first["state"], "10")
+    state, removed = second["state"], 0
+    while True:
+        r = json.loads(run("spill", "cancel", state, "4"))
+        removed += r["processed"]
+        if r["done"]:
+            assert r["state"] == ""
+            break
+        assert r["processed"] == 4
+        state = r["state"]
+    assert removed > 0 and run("keep", "scratch") == 0
+    with pytest.raises(redis.ResponseError, match="run that finished or was cancelled"):
+        run("spill", "page", "regions", second["state"], "10")
+    # a state that keeps its groups has nothing to remove
+    kept = json.loads(run("keep", "page", "regions", "", "10"))["state"]
+    assert json.loads(run("keep", "cancel", kept, "")) == {
+        "done": True, "processed": 0, "state": ""}
 
 
 def test_pages_read_page_size_rows(run):
@@ -225,27 +292,27 @@ def test_pages_read_page_size_rows(run):
     assert pages(run, "totals", 8)[1] == [8, 8, 8, 8, 8]
     assert pages(run, "none", 5)[1] == [0]
     # the default page reads all 40 in one call
-    r = json.loads(run("page", "totals", "", ""))
+    r = json.loads(run("keep", "page", "totals", "", ""))
     assert r["done"] and r["processed"] == 40
 
 
 def test_pages_see_writes_after_their_position(run):
-    first = json.loads(run("page", "totals", "", "10"))
+    first = json.loads(run("keep", "page", "totals", "", "10"))
     assert not first["done"]
     # the first row was read before the delete, and the new row lies ahead
-    assert run("change") == "ok"
+    assert run("keep", "change") == "ok"
     got, _ = pages(run, "totals", 10, first["state"])
     assert [p for p in got[0].split() if p.startswith("n=")] == ["n=41"]
 
 
 def test_page_errors(run):
-    state = json.loads(run("page", "range", "", "2"))["state"]
+    state = json.loads(run("keep", "page", "range", "", "2"))["state"]
     at = "LENT table Sale query aggregatePage"
     other = (at + " state comes from another query, aggregate or schema version; start"
              " again without a state")
     size = at + " page size must be a whole number from 1 to 1000000, got "
     bad = at + " takes a state that an earlier aggregatePage answered, or nil to start"
-    assert run("errors", state) == [
+    assert run("keep", "errors", state) == [
         at + " reads every matching row, so the query takes no limit, offset or after",
         at + " reads every matching row, so the query takes no limit, offset or after",
         at + " reads every matching row, so the query takes no limit, offset or after",
@@ -257,4 +324,9 @@ def test_page_errors(run):
         other, other, other,
         "LENT table Sale query aggregate n has no function median; use count, sum,"
         " avg, min or max",
+        "LENT table Sale query groupBy order has no group key or aggregate nothing",
+        "LENT table Sale cancelAggregate takes a state that an earlier aggregatePage"
+        " answered",
+        "LENT open option pageGroups takes a whole number of at least 0, got -1",
+        "LENT open option pageGroups takes a whole number of at least 0, got 1.5",
     ]

@@ -17,6 +17,8 @@
 --   lent.e<edge><from pk><to pk>        "" for each edge, read forwards
 --   lent.E<edge><to pk><from pk>        "" for each edge, read backwards
 --   lent.n<table>                       the last pk given out, for id = "int"
+--   lent.a<run><part>                   a paged aggregate's spilled groups,
+--                                       which CLIENT writes and removes
 --
 -- A pk is encoded with its table's id kind, "uuid" or "int", and takes the
 -- same number of bytes in every key of the table, so a key's pk is read
@@ -195,6 +197,11 @@ end
 -- The key that holds a table's next pk.
 function counter(t: any): string
     return "lent.n" .. name(t.key)
+end
+
+-- The prefix of the scratch keys of paged aggregate run `id`.
+function scratch(id: string): string
+    return "lent.a" .. name(id)
 end
 
 -- Counts the paths from the rows in `start`, a map of pk to count, through

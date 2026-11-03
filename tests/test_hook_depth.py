@@ -125,7 +125,7 @@ def test_open_sets_the_hook_depth(run):
 def test_open_checks_its_options(run):
     assert run("options") == [
         "LENT open takes a table of options, got number",
-        "LENT open has no option depth; it takes hookDepth",
+        "LENT open has no option depth; it takes hookDepth or pageGroups",
         "LENT open option hookDepth takes a whole number of at least 1, got 0",
         "LENT open option hookDepth takes a whole number of at least 1, got 2.5",
     ]

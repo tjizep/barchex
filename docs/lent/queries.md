@@ -396,27 +396,33 @@ selection costs what `all()` costs.
 ## Paged aggregates
 
 For a selection too large for one function call, use `aggregatePage` on a
-query or a `groupBy`. Each call reads one page of rows and answers a report.
-Pass the report's `state` to the next call, in the same function call or a
-later one, until `done` is `true`. The last report holds the answer:
+query or a `groupBy`. Each call reads one page and answers a report. Pass
+the report's `state` to the next call, in the same function call or a later
+one, until `done` is `true`. Keep the group rows of every report's `result`:
 
 ```lua
 -- state is nil for the first page, then the state the last call answered
 local r = c.Trip:query():groupBy("passengers")
     :aggregatePage({ trips = { fn = "count" } }, state)
-if r.done then
-    -- r.result holds the groups, as aggregate answers them
-else
+for _, group in r.result or {} do
+    -- keep each group row; a report holds some, all or none of them
+end
+if not r.done then
     -- answer r.state, and pass it to the next call
 end
 ```
 
 | report field | meaning |
 |---|---|
-| `done` | `true` on the call that reads the last page |
-| `processed` | the rows this call read, at most the page size |
+| `done` | `true` on the last call of the run |
+| `processed` | the rows this call read, or after a [spill](#many-groups) the scratch keys it read; at most the page size |
 | `state` | when `done` is `false`, hex text for the next call |
-| `result` | when `done` is `true`, what `aggregate` answers: the aggregate row, or the group rows after `having`, `order`, `limit` and `offset` |
+| `result` | for a `groupBy`, a list of group rows after `having`, `order`, `limit` and `offset`; without `groupBy`, the aggregate row on the last call |
+
+A `groupBy` run that keeps its groups in the state answers every group row
+on its last call. A run that spills answers them across its last calls, in
+order, as [many groups](#many-groups) describes. The loop above collects
+both.
 
 `pageSize` defaults to `10000` and takes whole numbers from `1` to
 `1000000`. Choose a page that each call finishes within the function
@@ -428,13 +434,8 @@ query's `order` does not change an aggregate, so pages ignore it. A query
 with `limit`, `offset` or `after` raises
 `reads every matching row, so the query takes no limit, offset or after`.
 Links and view queries raise their `reads table rows` error; aggregate those
-in one call.
-
-The state holds each group's running values, and each value a `distinct`
-aggregate has seen, so it grows with the number of groups and distinct
-values, and each call decodes and encodes it. Use `aggregatePage` when the
-groups are few, such as totals per region or per year. `follow` and a `has`
-that reads its matches first collect their linked ids again on every call.
+in one call. `follow` and a `has` that reads its matches first collect their
+linked ids again on every call.
 
 Calls in separate function calls read separate transactions, so writes
 between them change the answer. A row after the last page read counts as it
@@ -443,10 +444,66 @@ even after an update or delete. Keep writers away from the selection until
 the last page for an answer from one moment.
 
 A state works only with the query that answered it: the same table, schema
-version, plan, group keys, aggregates and filter values. Any other state
-raises `state comes from another query, aggregate or schema version; start
-again without a state`. A migration between pages ends a run the same way;
-start again without a state.
+version, plan, group keys, aggregates, filter values, and `having`, `order`,
+`limit` and `offset` calls. Any other state raises `state comes from another
+query, aggregate or schema version; start again without a state`. A
+migration between pages ends a run the same way; start again without a
+state.
+
+### Many groups
+
+The state holds each group's running values and each value a `distinct`
+aggregate has read, about 108 bytes per group with a `count` and a `sum`,
+and each call decodes and encodes it. When a call ends with more than 1,000 groups and distinct
+values, it moves them into scratch keys under `lent.a` in the space, and
+from then on the state names the run and stays under 400 bytes. Set
+`pageGroups` in [`lent.open`](client.md#open-a-client-with-the-graph) to change the limit;
+`0` spills on the first call that leaves rows unread.
+
+After a spill, each call adds its page's groups to the scratch keys. Once
+the rows are read, each call reads up to the page size of scratch keys and
+removes them. It first removes the values that `distinct` aggregates read.
+With `order` calls, it then sorts the groups that pass `having` into order
+keys. Last, it answers the groups in order, ties in group key order, and
+after `limit` groups it removes the rest unread. The call that removes the
+last key answers `done`.
+
+Measured on 200,000 rows of a column table, with pages of 10,000:
+
+| groups | calls | time | largest state |
+|---|---|---|---|
+| 100 | 20 | 0.5 s | 11 KB |
+| 10,000 | 21 | 5.5 s | 394 bytes |
+| 200,000 | 40 | 10 s | 394 bytes |
+
+A spilled `sum` or `avg` of `float` values adds them in another order than
+`aggregate` does, so its last digits can differ. `decimal` sums are exact.
+
+A spilled run writes to the space, so it needs a caller with write rights,
+or it fails with `FUNCTION not authorized to write there`. A function with
+`"write": false` in its `--@barch` header fails with `FUNCTION declared
+"write": false in its --@barch header, so it can't write`; give it a
+`pageGroups` above its group count. Each call's scratch writes commit or
+roll back with its transaction, so a call that fails leaves the state
+before it valid.
+
+A spilled run takes only its latest state. An older state raises `state is
+older than the latest page of its run; pass the state that the latest page
+answered`, which stops a retried call from counting a page twice. A state
+of a finished or cancelled run raises `state belongs to a run that finished
+or was cancelled; start again without a state`.
+
+A run that stops before `done` keeps its scratch keys. Remove them with
+`cancelAggregate` on any table of the space, passing the latest state until
+`done` is `true`:
+
+```lua
+local r = c.Trip:cancelAggregate(state, 10000)  -- page size, 10000 by default
+-- r.done, r.processed (keys removed) and, while r.done is false, r.state
+```
+
+A state that keeps its groups has no scratch keys, so `cancelAggregate`
+answers `done` at once.
 
 ## Joins through edges
 
