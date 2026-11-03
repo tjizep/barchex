@@ -2313,11 +2313,15 @@ local function key_count(q: any): number?
     return if lo < hi then keys_within(q.tbl, p.ix, lo, hi) else 0
 end
 
+-- How many rows q matches before offset and limit, by COLUMNS' block loop,
+-- or nil when q needs the row path.
+local count_blocks: (q: any) -> number?
+
 -- How many rows the query matches. When the query's filters are `=` on the
 -- leading fields of an index and ranges on the next one, it counts the
 -- index's keys and reads no row.
 function Query:count(): number
-    local n = key_count(self)
+    local n = key_count(self) or count_blocks(self)
     if n == nil then
         return #rows(self, false, nil, needed(self))
     end
@@ -2815,12 +2819,94 @@ local function group_rows(agg: any): { any }
     return out
 end
 
+-- Adds q's rows to agg's groups in COLUMNS' block loop, and answers
+-- whether it could. It can when q reads a column table through its ids and
+-- filters with field conditions, and agg's keys and aggregates name the
+-- table's fields; json fields take no part. With `page`, it reads one page
+-- of rows as rows() does. The rows come in id order, so q must not sort.
+local function fold_blocks(agg: any, page: any?): boolean
+    local q, tbl = agg.q, agg.tbl
+    if tbl.linksOf or tbl.viewOf or tbl.memory or not is_column(tbl) or q.idset or q.edgeOf
+        or q.cur
+        or #q.preds > 0 or #q.checks > 0 or aggregate_needs(agg) == nil then
+        return false
+    end
+    local function stored(name: string): boolean
+        return name == "id" or (tbl.byName[name] ~= nil and kind_of(tbl, name) ~= "json")
+    end
+    local conds, names, aggs = {}, {}, {}
+    for i, c in q.conds do
+        if not stored(c.field) then
+            return false
+        end
+        conds[i] = c
+    end
+    for i, k in agg.keys do
+        if k.hops or not stored(k.name) then
+            return false
+        end
+        names[i] = k.name
+    end
+    for i, a in agg.aggs do
+        if a.value or (a.field and not stored(a.field)) then
+            return false
+        end
+        aggs[i] = a
+    end
+    local p = page and page.plan or plan(q)
+    if p.ix == nil or not p.ix.primary or p.via or p.within then
+        return false
+    end
+    if page and page.from then
+        local lo = kc.after(page.from) :: string
+        if lo > p.lo then
+            p.lo = lo
+        end
+    end
+    local job = col.start_fold(tbl.t, tbl.fields, {
+        conds = conds, keys = names, aggs = aggs, budget = page and page.budget,
+        group = function(values)
+            return group_of(agg, kc.pack(agg.kinds, values), values)
+        end,
+    })
+    local more = false
+    for _, s in p.spans or { p } do
+        local lo = if s.lo > p.lo then s.lo else p.lo
+        local hi = if s.hi < p.hi then s.hi else p.hi
+        if lo < hi and col.fold(tbl.t, job, lo, hi) then
+            more = true
+            break
+        end
+    end
+    col.finish(job)
+    if page then
+        page.seen, page.more = job.seen, more
+        page.last = if job.last then lay.row(tbl.t, job.last) else nil
+    end
+    return true
+end
+
+count_blocks = function(q: any): number?
+    local tbl = q.tbl
+    if tbl.linksOf or tbl.viewOf or tbl.memory or not is_column(tbl) then
+        return nil
+    end
+    local agg = aggregation(q, {}, { n = { fn = "count" } })
+    if not fold_blocks(agg) then
+        return nil
+    end
+    local g = agg.list[1]
+    return g and g.acc.n or 0
+end
+
 -- One row per group of q's rows, with the keys' values and each aggregate
 -- of spec. `shape` holds the having, order, offset and limit calls of a
 -- groupBy.
 local function aggregate(q: any, keys: { any }, spec: any, shape: any?): { any }
     local agg = aggregation(q, keys, spec, shape)
-    fold_rows(agg, rows(q, false, nil, aggregate_needs(agg)))
+    if q.lim ~= nil or q.skip ~= 0 or q.sortField ~= nil or not fold_blocks(agg) then
+        fold_rows(agg, rows(q, false, nil, aggregate_needs(agg)))
+    end
     return group_rows(agg)
 end
 
@@ -3267,7 +3353,9 @@ local function aggregate_page(q: any, keys: { any }, spec: any, shape: any?, sta
     local out, processed, done
     if run == nil or run.phase == "scan" then
         local page = { plan = p, budget = budget, from = found.last, seen = 0 }
-        fold_rows(agg, rows(pq, false, page, aggregate_needs(agg)))
+        if not fold_blocks(agg, page) then
+            fold_rows(agg, rows(pq, false, page, aggregate_needs(agg)))
+        end
         processed = page.seen
         if run == nil then
             if not page.more then

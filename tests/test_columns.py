@@ -130,6 +130,35 @@ function cases.value(t)
     return row_text(t:query():aggregate({ v = { fn = "sum", value = function(r) return r.qty end } }))
 end
 function cases.defaults(t) return t:query():sum("rank") end
+-- filters on fields without an index, which a column table folds by block
+local MORE = {
+    amount = { fn = "sum", field = "amount" }, mean = { fn = "avg", field = "amount" },
+    late = { fn = "max", field = "at" }, least = { fn = "min", field = "score" },
+    anyPaid = { fn = "max", field = "paid" }, qtys = { fn = "sum", field = "qty", distinct = true },
+    ranks = { fn = "sum", field = "rank" }, firstRaw = { fn = "min", field = "raw" },
+    scored = { fn = "count", field = "score" }, n = { fn = "count" },
+    states = { fn = "count", field = "state", distinct = true },
+}
+function cases.scored(t) return t:query():where("score", ">", 2):count() end
+function cases.unscored(t) return t:query():where("score", "=", nil):count() end
+function cases.unpaid(t) return t:query():where("paid", "~=", true):count() end
+function cases.ranked(t) return t:query():where("rank", "=", 7):where("id", "<", 2049):count() end
+function cases.filtered(t)
+    return row_text(t:query():where("state", "=", "done"):where("at", "<", 5e8):aggregate(MORE))
+end
+function cases.byPair(t) return rows_text(t:query():groupBy("paid", "state"):aggregate(MORE)) end
+function cases.byRank(t)
+    return rows_text(t:query():where("raw", ">=", "ab"):groupBy("rank"):aggregate(MORE))
+end
+function cases.byQty(t)
+    return rows_text(t:query():groupBy("qty"):having("n > 1"):order("amount", "desc")
+        :aggregate(MORE))
+end
+function cases.byRaw(t) return rows_text(t:query():groupBy("raw"):aggregate(MORE)) end
+function cases.byId(t)
+    return rows_text(t:query():where("id", ">", 9):where("id", "<", 2049):groupBy("id")
+        :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" } }))
+end
 
 function steps.ask(c, tname, name)
     return cases[name](c[tname])
@@ -156,6 +185,19 @@ function steps.paged(c, tname, size)
         local r = c[tname]:query():aggregatePage(SPEC, state, size)
         seen += 1
         if r.done then return { row_text(r.result), seen } end
+        state = r.state
+    end
+end
+
+-- a grouped aggregate with filters read in pages, as text
+function steps.paged_groups(c, tname, size)
+    local state, seen, out = nil, 0, {}
+    while true do
+        local r = c[tname]:query():where("amount", ">", 10):groupBy("state", "paid")
+            :aggregatePage(MORE, state, size)
+        seen += 1
+        for _, g in r.result or {} do out[#out + 1] = row_text(g) end
+        if r.done then return { out, seen } end
         state = r.state
     end
 end
@@ -284,7 +326,8 @@ def same(run, step, *args):
 
 CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "region", "qty",
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
-         "defaults"]
+         "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
+         "byQty", "byRaw", "byId"]
 
 
 def seed_row(rng, pk):
@@ -351,6 +394,7 @@ def test_column_answers_what_binary_answers(run, seed):
             assert got == sorted(live, reverse=dir_ == "desc")
     for size in ("1", "4", "1000"):
         same(run, "paged", size)
+        same(run, "paged_groups", size)
     same(run, "update_all")
     same(run, "ask", "all")
     same(run, "delete_all")

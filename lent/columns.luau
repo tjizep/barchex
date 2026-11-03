@@ -1,3 +1,4 @@
+--!native
 -- Rows of a table with format = "column", stored by field in blocks.
 --
 -- Required, not called: `local col = require("lent.COLUMNS")`. A function key
@@ -261,6 +262,495 @@ function count(t: any, lo: string, hi: string): number
             return n
         end
         plo = keys[#keys] .. "\2"
+    end
+end
+
+-- folds -----------------------------------------------------------------------
+
+-- A field a fold reads: "id", which reads each row's id, or a field's
+-- blocks, with the value a slot without one reads as.
+local function source(t: any, fields: any, name: string): any
+    if name == "id" then
+        return { id = true, base = 0 }
+    end
+    local f
+    for _, g in fields.list do
+        if g.name == name then
+            f = g
+        end
+    end
+    local default
+    for _, d in t.fields do
+        if d.name == name then
+            default = d.default
+        end
+    end
+    return { prefix = lay.column(t, f.id), text = TEXT_KINDS[f.kind] == true,
+             bool = f.kind == "bool", default = default, starts = table.create(SIZE, 0) }
+end
+
+-- Reads source c's block, or notes that the block holds no value.
+local function load(c: any, block: number)
+    if c.id then
+        c.base = block * SIZE
+        return
+    end
+    local stored = barch.store.get(block_key(c.prefix, block))
+    local b = if stored then buffer.fromstring(stored) else nil
+    c.b = b
+    if b and c.text then
+        local starts, at = c.starts, TEXT_VALUES
+        for s = 0, SIZE - 1 do
+            starts[s + 1] = at
+            local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
+            if len > 0 then
+                at += len - 1
+            end
+        end
+    end
+end
+
+-- The value of `slot` in source c's loaded block.
+local function value_at(c: any, s: number): any
+    if c.id then
+        return c.base + s
+    end
+    local b = c.b
+    if b == nil then
+        return c.default
+    end
+    if c.text then
+        local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
+        if len == 0 then
+            return c.default
+        end
+        return buffer.readstring(b, c.starts[s + 1], len - 1)
+    end
+    local x = buffer.readf64(b, s * 8)
+    if x ~= x then
+        return c.default
+    end
+    if c.bool then
+        return x == 1
+    end
+    return x
+end
+
+-- Whether `v op w` holds, as a query condition compares a row's value.
+local function holds(op: string, v: any, w: any): boolean
+    if op == "=" then
+        return v == w
+    elseif op == "~=" then
+        return v ~= w
+    elseif v == nil then
+        return false
+    elseif op == "<" then
+        return v < w
+    elseif op == "<=" then
+        return v <= w
+    elseif op == ">" then
+        return v > w
+    end
+    return v >= w
+end
+
+-- Keeps the slots of sel[1..n] whose value of source c passes `op w`, and
+-- answers how many it kept.
+local function filter(c: any, op: string, w: any, sel: { number }, n: number): number
+    if c.b == nil and not c.id then
+        return if holds(op, c.default, w) then n else 0
+    end
+    local m = 0
+    if not (c.id or c.text or c.bool) and c.default == nil then
+        -- NaN, a slot without a value, fails every comparison but ~=
+        local b: buffer = c.b
+        if op == "<" then
+            for i = 1, n do
+                local s = sel[i]
+                if buffer.readf64(b, s * 8) < w then
+                    m += 1
+                    sel[m] = s
+                end
+            end
+        elseif op == "<=" then
+            for i = 1, n do
+                local s = sel[i]
+                if buffer.readf64(b, s * 8) <= w then
+                    m += 1
+                    sel[m] = s
+                end
+            end
+        elseif op == ">" then
+            for i = 1, n do
+                local s = sel[i]
+                if buffer.readf64(b, s * 8) > w then
+                    m += 1
+                    sel[m] = s
+                end
+            end
+        elseif op == ">=" then
+            for i = 1, n do
+                local s = sel[i]
+                if buffer.readf64(b, s * 8) >= w then
+                    m += 1
+                    sel[m] = s
+                end
+            end
+        else
+            local want = op == "="
+            for i = 1, n do
+                local s = sel[i]
+                local x = buffer.readf64(b, s * 8)
+                if (if w == nil then x ~= x else x == w) == want then
+                    m += 1
+                    sel[m] = s
+                end
+            end
+        end
+        return m
+    end
+    for i = 1, n do
+        local s = sel[i]
+        if holds(op, value_at(c, s), w) then
+            m += 1
+            sel[m] = s
+        end
+    end
+    return m
+end
+
+local NIL_KEY = {}
+local ALL_SLOTS = table.create(SIZE, 0)
+for s = 1, SIZE do
+    ALL_SLOTS[s] = s - 1
+end
+
+-- Adds a group with key values `values` to the job: job.group answers its
+-- record, and the group's running values start from the record's. Answers
+-- the group's index.
+local function new_group(job: any, values: { any }): number
+    local g = job.group(values)
+    local gi = #job.records + 1
+    job.records[gi] = g
+    for _, a in job.aggs do
+        local acc = g.acc[a.name]
+        if a.fn == "avg" then
+            a.vals[gi], a.ns[gi] = acc and acc.sum, acc and acc.n
+        else
+            a.vals[gi] = acc
+        end
+        if a.distinct then
+            local seen = g.seen[a.name] or {}
+            g.seen[a.name] = seen
+            a.seen[gi] = seen
+        end
+    end
+    return gi
+end
+
+-- The group index of the row at `slot`, by the values of the job's key
+-- sources.
+local function group_index(job: any, s: number): number
+    local node = job.tree
+    local ks = job.keys
+    local nk = #ks
+    for i = 1, nk do
+        local v = value_at(ks[i], s)
+        if v == nil then
+            v = NIL_KEY
+        end
+        local next = node[v]
+        if next == nil then
+            if i == nk then
+                local values = table.create(nk)
+                for j = 1, nk do
+                    values[j] = value_at(ks[j], s)
+                end
+                next = new_group(job, values)
+            else
+                next = {}
+            end
+            node[v] = next
+        end
+        node = next
+    end
+    return node :: any
+end
+
+local function less(a: any, b: any): boolean
+    if type(a) == "boolean" then
+        return not a and b
+    end
+    return a < b
+end
+
+-- Adds the slots sel[1..n], in groups gids[1..n], to aggregate a.
+local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number })
+    local vals, fn, c = a.vals, a.fn, a.source
+    if c == nil then
+        -- count with no field counts rows
+        for i = 1, n do
+            local gi = gids[i]
+            vals[gi] = (vals[gi] or 0) + 1
+        end
+        return
+    end
+    if a.single and fn == "sum" and a.scale == nil and not a.distinct
+        and not (c.id or c.text or c.bool) and c.default == nil then
+        local b: buffer? = c.b
+        if b == nil then
+            return
+        end
+        local sum, any = vals[1] or 0, false
+        for i = 1, n do
+            local x = buffer.readf64(b, sel[i] * 8)
+            if x == x then
+                sum += x
+                any = true
+            end
+        end
+        if any then
+            vals[1] = sum
+        end
+        return
+    end
+    if not (a.distinct or a.scale or c.id or c.text or c.bool) and c.default == nil then
+        local b: buffer? = c.b
+        if b == nil then
+            return
+        end
+        if fn == "sum" or fn == "avg" or fn == "count" then
+            local ns = a.ns
+            for i = 1, n do
+                local x = buffer.readf64(b, sel[i] * 8)
+                if x == x then
+                    local gi = gids[i]
+                    if fn == "count" then
+                        vals[gi] = (vals[gi] or 0) + 1
+                    else
+                        vals[gi] = (vals[gi] or 0) + x
+                        if ns then
+                            ns[gi] = (ns[gi] or 0) + 1
+                        end
+                    end
+                end
+            end
+        else
+            local min = fn == "min"
+            for i = 1, n do
+                local x = buffer.readf64(b, sel[i] * 8)
+                if x == x then
+                    local gi = gids[i]
+                    local acc = vals[gi]
+                    if acc == nil or (if min then x < acc else acc < x) then
+                        vals[gi] = x
+                    end
+                end
+            end
+        end
+        return
+    end
+    local ns, seens, scale = a.ns, a.seen, a.scale
+    for i = 1, n do
+        local v = value_at(c, sel[i])
+        if v ~= nil then
+            local gi = gids[i]
+            local fresh = true
+            if seens then
+                local seen = seens[gi]
+                local t = type(v)
+                local set = seen[t]
+                if set == nil then
+                    set = {}
+                    seen[t] = set
+                end
+                fresh = not set[v]
+                set[v] = true
+            end
+            if fresh then
+                if scale then
+                    v = math.round(v * 10 ^ scale)
+                end
+                local acc = vals[gi]
+                if fn == "count" then
+                    vals[gi] = (acc or 0) + 1
+                elseif fn == "sum" then
+                    vals[gi] = (acc or 0) + v
+                elseif fn == "avg" then
+                    vals[gi] = (acc or 0) + v
+                    ns[gi] = (ns[gi] or 0) + 1
+                elseif acc == nil or (if fn == "min" then less(v, acc) else less(acc, v)) then
+                    vals[gi] = v
+                end
+            end
+        end
+    end
+end
+
+-- A fold over the rows of table t: the conditions they must pass, the
+-- fields they group by and the aggregates to add them to. `spec` holds
+--
+--   conds    { field, op, value } with op one of = ~= < <= > >=
+--   keys     the field names to group by, or none for one group
+--   aggs     { name, fn, field?, distinct?, scale? }, fn one of count, sum,
+--            avg, min and max; a decimal sum or avg passes its scale
+--   group    a function of a group's key values that answers its record,
+--            { acc, seen }, with the running values by aggregate name as
+--            the client's fold keeps them
+--   budget   the most rows to read, or nil for all of them
+--
+-- Fields may be "id". json fields have no order or key, so a fold takes
+-- none.
+function start_fold(t: any, fields: any, spec: any): any
+    local sources = {}
+    local function get(name: string): any
+        local c = sources[name]
+        if c == nil then
+            c = source(t, fields, name)
+            sources[name] = c
+        end
+        return c
+    end
+    local conds = {}
+    for i, c in spec.conds do
+        local w = c.value
+        conds[i] = { source = get(c.field), op = c.op, value = w }
+    end
+    local keys = {}
+    for i, name in spec.keys do
+        keys[i] = get(name)
+    end
+    local aggs = {}
+    for i, a in spec.aggs do
+        aggs[i] = { name = a.name, fn = a.fn, source = a.field and get(a.field),
+                    scale = a.scale, distinct = a.distinct, single = #keys == 0, vals = {},
+                    ns = if a.fn == "avg" then {} else nil,
+                    seen = if a.distinct then {} else nil }
+    end
+    local list = {}
+    for _, c in sources do
+        list[#list + 1] = c
+    end
+    return { sources = list, conds = conds, keys = keys, aggs = aggs, group = spec.group,
+             budget = spec.budget, seen = 0, records = {}, tree = {},
+             sel = table.create(SIZE, 0), gids = table.create(SIZE, 1) }
+end
+
+-- Adds the slots from `a` to `z` of a block to the job's groups. Answers
+-- true when the job's budget ran out before the block's last row.
+local function fold_block(job: any, block: number, presence: string, a: number, z: number): boolean
+    local sel: { number }, n = job.sel, 0
+    local budget, seen = job.budget, job.seen
+    local more = false
+    if a == 0 and z == SIZE - 1 and live(presence) == SIZE
+        and (budget == nil or budget - seen >= SIZE) then
+        -- a full block reads every slot
+        table.move(ALL_SLOTS, 1, SIZE, 1, sel)
+        n, seen = SIZE, seen + SIZE
+    else
+        for s = a, z do
+            if string.byte(presence, s + 1) == 1 then
+                if seen == budget then
+                    more = true
+                    break
+                end
+                seen += 1
+                n += 1
+                sel[n] = s
+            end
+        end
+    end
+    job.seen = seen
+    if n > 0 then
+        job.last = block * SIZE + sel[n]
+    end
+    if n == 0 then
+        return more
+    end
+    for _, c in job.sources do
+        load(c, block)
+    end
+    for _, c in job.conds do
+        n = filter(c.source, c.op, c.value, sel, n)
+        if n == 0 then
+            return more
+        end
+    end
+    local gids = job.gids
+    local ks = job.keys
+    if #ks == 1 and ks[1].text and ks[1].b then
+        -- one text key: look its value up in the groups found so far
+        local c = ks[1]
+        local b: buffer, starts, tree = c.b, c.starts, job.tree
+        for i = 1, n do
+            local s = sel[i]
+            local len = buffer.readu32(b, TEXT_SLOTS + s * 4)
+            local gi = if len > 0 then tree[buffer.readstring(b, starts[s + 1], len - 1)] else nil
+            gids[i] = gi or group_index(job, s)
+        end
+    elseif #ks == 1 and not (ks[1].text or ks[1].id or ks[1].bool) and ks[1].b
+        and ks[1].default == nil then
+        local b: buffer, tree = ks[1].b, job.tree
+        for i = 1, n do
+            local s = sel[i]
+            local x = buffer.readf64(b, s * 8)
+            gids[i] = (x == x and tree[x]) or group_index(job, s)
+        end
+    elseif #ks > 0 then
+        for i = 1, n do
+            gids[i] = group_index(job, sel[i])
+        end
+    elseif #job.records == 0 then
+        new_group(job, {})
+    end
+    for _, ag in job.aggs do
+        fold_aggregate(ag, sel, n, gids)
+    end
+    return more
+end
+
+-- Adds the rows of the job's table from `lo` up to `hi`, row keys or key
+-- bounds, in id order, to its groups. Answers true when the budget ran out
+-- first; job.last is then the last id read, and job.seen counts the rows
+-- read.
+function fold(t: any, job: any, lo: string, hi: string): boolean
+    local from, last, plo, phi = span(t, lo, hi)
+    if from > last then
+        return false
+    end
+    while true do
+        local keys, values = barch.store.rangeValues(plo, phi, 16)
+        for i, k in keys do
+            local block = lay.present_block(k)
+            local base = block * SIZE
+            local a, z = math.max(from - base, 0), math.min(last - base, SIZE - 1)
+            if a <= z and fold_block(job, block, values[i], a, z) then
+                return true
+            end
+        end
+        if #keys < 16 then
+            return false
+        end
+        plo = keys[#keys] .. "\2"
+    end
+end
+
+-- Writes the job's running values into the group records it read.
+function finish(job: any)
+    for gi, g in job.records do
+        for _, a in job.aggs do
+            local v = a.vals[gi]
+            if a.fn == "avg" then
+                local acc = g.acc[a.name]
+                if acc then
+                    acc.sum, acc.n = v, a.ns[gi]
+                elseif v ~= nil then
+                    g.acc[a.name] = { sum = v, n = a.ns[gi] }
+                end
+            else
+                g.acc[a.name] = v
+            end
+        end
     end
 end
 

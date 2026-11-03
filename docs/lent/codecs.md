@@ -112,9 +112,9 @@ Measured on 40,960 trips of 10 fields, on one machine:
 
 | work | `column` | `binary` |
 |---|---|---|
-| `aggregatePage` sum of one field | 610,000 rows/s | 130,000 rows/s |
-| `groupBy` and sum | 375,000 rows/s | 112,000 rows/s |
-| `count` with a filter | 1,110,000 rows/s | 153,000 rows/s |
+| `aggregatePage` sum of one field, pages of 10,240 rows | 13,000,000 rows/s | 130,000 rows/s |
+| `groupBy` and sum, pages of 10,240 rows | 6,000,000 rows/s | 125,000 rows/s |
+| `count` with a filter | 24,000,000 rows/s | 167,000 rows/s |
 | `createMany`, 1,024 rows per transaction | 13,000 rows/s | 25,000 rows/s |
 | `get`, one per transaction | 3,800 rows/s | 5,200 rows/s |
 | `update` of one field, one per transaction | 2,200 rows/s | 4,100 rows/s |
@@ -158,6 +158,33 @@ These rules apply to a column table:
 - **Dropped fields.** `migrate` removes a dropped field's blocks in pages,
   with a `drop Table.field blocks` step. Writes to the table continue while
   the step runs.
+
+### Scans in barch's block loop
+
+`count`, `aggregate` and `aggregatePage` on a column table fold each block
+of 1,024 rows in one loop inside barch. The loop tests the filters on a
+block's field values, then adds the rows that pass to their groups, and
+creates no row tables. On 409,600 rows, on one machine, one `aggregate` call
+summed a `float` field at 41 million rows/s, summed it under a filter at 27
+million rows/s, and summed it grouped by a `string` field at 11 million
+rows/s. Each call also costs about 0.3 ms, so small tables and small pages
+gain less.
+
+A call uses the block loop when all of these hold:
+
+- Each filter compares a stored field or `id` with a value, through
+  `where(field, op, value)` or a `where` expression part such as
+  `fare > 120`.
+- The plan reads the table by id. A condition on an indexed field makes the
+  query read rows through that index; `explain` shows the plan.
+- Each `groupBy` key and aggregate field is a field of the table other than
+  a `json` field, with no edge in its path.
+- `aggregate` has no `order`, `limit` or `offset` on the query.
+
+Any other call reads its rows one at a time, at a million rows/s or less.
+That includes a filter function, an expression part such as `qty + 1 > 3`,
+`has`, `follow`, `after`, a query policy, computed fields, and an aggregate
+with a `value` function.
 
 ### Compressed column blocks
 
