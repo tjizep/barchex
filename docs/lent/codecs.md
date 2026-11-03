@@ -220,7 +220,9 @@ table's pk counter, a column table's presence blocks
 (`lay.present(t, block)`) and field blocks (`lay.column(t, field)` is the
 prefix), and the scratch keys of a spilled paged aggregate
 (`lay.scratch(run)` is the prefix; see
-[many groups](queries.md#many-groups)). `lay.walk(prefix, each)` calls
+[many groups](queries.md#many-groups)), and a table's planner statistics
+(`lay.stats(t)`; see [planner statistics](migrate.md#planner-statistics)).
+`lay.walk(prefix, each)` calls
 `each(key)` for every key under a prefix, a page at a time, and `each` may
 remove the key it is given. `lay.scan(lo, hi, each)` and `lay.scan_back(lo, hi, each)` call `each(key)`
 for the keys in `[lo, hi)`, in key order or highest first, and stop when

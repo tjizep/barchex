@@ -1600,6 +1600,77 @@ local function plan_keys(q: any, p: any): number
     return n
 end
 
+-- How many of the sorted keys in `list` are less than `key`.
+local function below(list: { string }, key: string): number
+    local lo, hi = 1, #list + 1
+    while lo < hi do
+        local mid = (lo + hi) // 2
+        if list[mid] < key then
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    return lo - 1
+end
+
+-- How many keys plan p reads, estimated from its index's statistics s: each
+-- sample within its spans stands for an equal share of the keys. Spans that
+-- hold no sample hold less than a share, and at most as many keys as one
+-- value of the =-matched fields has on average.
+local function estimate(s: any, p: any): number
+    local n, samples = s.keys, s.samples
+    if n == 0 or #samples == 0 then
+        return 0
+    end
+    local share, found = n / #samples, 0
+    for _, sp in p.spans or { p } do
+        if sp.lo < sp.hi then
+            found += below(samples, sp.hi) - below(samples, sp.lo)
+        end
+    end
+    if found > 0 then
+        return math.min(found * share, n)
+    end
+    local d = s.distinct[#p.values]
+    return math.min(share / 2, if d and d > 0 then n / d else n)
+end
+
+local function shown(keys: number): string
+    return "~" .. string.format("%d", math.ceil(keys))
+end
+
+-- The candidate among `list` that reads the fewest keys by the statistics
+-- `stats`, with its name noting the estimates. A query with a limit stops
+-- early on a candidate whose keys come in its order: it reads about as many
+-- keys as the limit takes from the candidate with the fewest. Equal
+-- estimates go to the candidate that matches more fields.
+local function estimated(q: any, list: { any }, stats: any, finish: (any) -> any): any
+    local least = math.huge
+    for _, c in list do
+        finish(c).keys = estimate(stats[c.ix.name], c)
+        least = math.min(least, c.keys)
+    end
+    local reach = q.lim and q.lim + q.skip
+    local best
+    for _, c in list do
+        if reach and c.ordered and least > 0 then
+            c.keys = math.min(c.keys, reach * c.keys / least)
+        end
+        if best == nil or c.keys < best.keys or (c.keys == best.keys and c.score > best.score) then
+            best = c
+        end
+    end
+    local beaten = {}
+    for _, c in list do
+        if c ~= best then
+            beaten[#beaten + 1] = c.ix.name .. " " .. shown(c.keys)
+        end
+    end
+    best.name ..= " [" .. shown(best.keys) .. " keys over " .. table.concat(beaten, ", ") .. "]"
+    return best
+end
+
 -- The key spans of `list`, value ranges of the next value after `prefix`,
 -- within lo..hi, in key order with overlapping spans merged.
 local function spans_of(kind: string, prefix: string, list: { any }, lo: string,
@@ -1661,7 +1732,7 @@ local function index_plan(q: any, keys: boolean?): any
     for _, o in q.ors do
         within[o.field] = within[o.field] or o.ranges
     end
-    local best, bestScore, tied = nil, -1, {}
+    local best, bestScore, tied, narrowing = nil, -1, {}, {}
     local sources = { PRIMARY }
     for _, ix in t.indexes do
         sources[#sources + 1] = ix
@@ -1695,8 +1766,15 @@ local function index_plan(q: any, keys: boolean?): any
                         .. " needs = on each of its fields, or on each before the last and a"
                         .. " range on the last")
                 end
-            elseif score >= bestScore then
-                local candidate = { ix = ix, values = values, next = next, ordered = ordered }
+            else
+                local candidate = { ix = ix, values = values, next = next, ordered = ordered,
+                                    score = score }
+                if score >= 2 and score < 1000 then
+                    narrowing[#narrowing + 1] = candidate
+                end
+                if score < bestScore then
+                    continue
+                end
                 if score > bestScore then
                     best, bestScore, tied = candidate, score, {}
                 end
@@ -1765,8 +1843,20 @@ local function index_plan(q: any, keys: boolean?): any
     end
     -- A full read or a single row has nothing to compare, a named index is
     -- the caller's choice, and `with` would count once per row.
-    if #tied == 1 or q.use or keys or q.fixedPlan or tbl.memory or bestScore < 2
-        or bestScore >= 1000 then
+    if q.use or keys or q.fixedPlan or tbl.memory or bestScore < 2 or bestScore >= 1000 then
+        return finish(best)
+    end
+    if #narrowing > 1 then
+        local stats = mig.planner_stats(t)
+        local known = stats ~= nil
+        for _, c in narrowing do
+            known = known and stats[c.ix.name] ~= nil
+        end
+        if known then
+            return estimated(q, narrowing, stats, finish)
+        end
+    end
+    if #tied == 1 then
         return finish(best)
     end
     for _, c in tied do

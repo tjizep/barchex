@@ -19,6 +19,8 @@
 --   lent.n<table>                       the last pk given out, for id = "int"
 --   lent.a<run><part>                   a paged aggregate's spilled groups,
 --                                       which CLIENT writes and removes
+--   lent.s<table>                       the planner statistics that MIGRATE's
+--                                       analyze() writes
 --
 -- A pk is encoded with its table's id kind, "uuid" or "int", and takes the
 -- same number of bytes in every key of the table, so a key's pk is read
@@ -202,6 +204,11 @@ end
 -- The prefix of the scratch keys of paged aggregate run `id`.
 function scratch(id: string): string
     return "lent.a" .. name(id)
+end
+
+-- The key that holds table `t`'s planner statistics.
+function stats(t: any): string
+    return "lent.s" .. name(t.key)
 end
 
 -- Counts the paths from the rows in `start`, a map of pk to count, through

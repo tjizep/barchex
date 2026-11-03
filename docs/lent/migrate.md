@@ -87,6 +87,62 @@ Adding enum choices preserves stored rows and their indexes. Byte and JSON
 defaults are preserved in the catalog, including binary bytes, JSON null
 and empty arrays; `m.load()` returns their Luau values.
 
+## Planner statistics
+
+`analyze` reads a table's rows and ready indexes and stores statistics that
+queries use to choose an index; see
+[planner statistics](queries.md#planner-statistics). Call it from the
+application's space, outside an open transaction, and pass the answered
+`state` to the next call until `done` is `true`:
+
+```lua
+local m = require("lent.MIGRATE")
+local r = m.analyze("Order")             -- table name, state, page size
+while not r.done do
+    r = m.analyze("Order", r.state)
+end
+```
+
+Each call reads up to the page size in keys, runs in one `barch.tx.run`
+transaction and commits. Pass the state to a later stored-function call to
+give each page its own function deadline. The page size defaults to `10000`
+and accepts whole numbers from `1` to `1000000`. A `column` table's rows
+count one key per block of 1,024 rows. On one machine, `analyze` read
+200,000 rows and 4 indexes, 1,000,000 keys, at about 860,000 keys/s, with
+pages of 50,000 keys taking at most 91 ms.
+
+| answer field | meaning |
+|---|---|
+| `done` | `true` when the table's rows and every ready index are read |
+| `processed` | keys read in this call, at most the page size |
+| `state` | present while `done` is `false`; pass it to the next call |
+
+`analyze` saves each index's statistics when it finishes reading that index,
+so an error or timeout keeps the indexes earlier pages finished. It skips an
+index that is still building. A state belongs to one table and schema
+version; after a migration, start again without a state.
+
+`statistics(name)` answers what `analyze` stored, or `nil` before the
+table's first `analyze`. Its keys are `id` for the table's rows and the index
+names. An index added or changed since the last `analyze` has no entry.
+
+| field | meaning |
+|---|---|
+| `keys` | the rows or index keys read |
+| `distinct` | for each count of leading index fields, the distinct values seen; empty for `id` |
+| `analyzed` | the time `analyze` saved the entry, in Unix milliseconds |
+
+`analyze` raises an error that starts with `MIGRATE`:
+
+- `analyze has no table X; migrate a schema with it first`;
+- `analyze page size must be a whole number from 1 to 1000000`;
+- `analyze needs its own transaction; call it outside a transaction`;
+- `analyze takes a state that an earlier analyze answered, or nil to start`;
+- `analyze state comes from another table or schema version; start again
+  without a state`.
+
+## Low-level calls
+
 `plan(previous, app)` describes a migration. The low-level `apply(plan)`
 runs a whole plan inside a caller-opened transaction and refuses a pending
 paged migration; use `migrate` for paged work. `lent.MIGRATE` runs the

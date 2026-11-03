@@ -831,6 +831,390 @@ function migrate(app: any, pageSize: number?): any
     end)
 end
 
+-- Planner statistics ----------------------------------------------------------
+--
+-- analyze() reads one table's sources in pages: its row keys, or a column
+-- table's presence blocks, then each ready index's keys. For each source it
+-- stores under lay.stats(t) the number of keys, the number of distinct
+-- values of each leading run of an index's values, and up to SAMPLES keys
+-- spread evenly through the source, cut to SAMPLE_BYTES after its prefix.
+-- CLIENT estimates how many keys a key span holds from them.
+--
+-- The record is key-encoded values: STATS, the number of sources, and for
+-- each its name, signature, key count, the time it was read, the number of
+-- distinct counts and each count, then the number of samples and each
+-- sample's text after the prefix. A state is hex text of key-encoded values:
+-- ANALYZE, the mark, the source's place in the list, the last key read, the
+-- keys the source held when the run reached it, the keys read, the next
+-- sample's number, the last index key read, the distinct counts and the
+-- samples.
+
+local STATS, ANALYZE = "lent.stats.1", "lent.analyze.1"
+local SAMPLES, SAMPLE_BYTES = 100, 48
+local ANALYZE_PAGE, ANALYZE_MAX = 10000, 1000000
+-- the most keys one barch.store.range call answers
+local RANGE_MAX = 10000
+local PRIMARY = { name = "id", on = { "id" }, unique = true, primary = true }
+
+local function value_text(v: any): string
+    if type(v) == "number" then
+        return kc.encode("float", v)
+    elseif type(v) == "string" then
+        return kc.encode("string", v)
+    end
+    return "-"
+end
+
+-- A reader of the key-encoded values in `raw`: each call of the first
+-- function answers the next value, and the second answers how many bytes
+-- are left.
+local function reader(raw: string): (() -> any, () -> number)
+    local pos = 1
+    local function value(): any
+        local v
+        v, pos = kc.decode(raw, pos)
+        return v
+    end
+    return value, function()
+        return #raw + 1 - pos
+    end
+end
+
+-- The text that tells whether stored statistics still describe index ix:
+-- whether it is unique, its fields and its edges.
+function index_sig(ix: any): string
+    if ix.primary then
+        return "id"
+    end
+    return (ix.unique and "unique " or "") .. table.concat(ix.on, ",") .. " "
+        .. table.concat(ix.edges or {}, ",")
+end
+
+-- The sources analyze() reads in table t: the rows, then each index.
+local function stat_sources(t: any): { any }
+    local list = { PRIMARY }
+    for _, ix in t.indexes do
+        list[#list + 1] = ix
+    end
+    return list
+end
+
+local function source_prefix(t: any, ix: any): string
+    return if ix.primary then lay.row(t) else lay.index(t, ix)
+end
+
+-- The records stored for table t, in the stored order, or {}.
+local function read_records(t: any): { any }
+    local raw = barch.store.get(lay.stats(t))
+    if type(raw) ~= "string" then
+        return {}
+    end
+    local value = reader(raw)
+    assert(value() == STATS)
+    local out = {}
+    for i = 1, value() do
+        local r = { name = value(), sig = value(), keys = value(), at = value(),
+                    distinct = {}, samples = {} }
+        for j = 1, value() do
+            r.distinct[j] = value()
+        end
+        for j = 1, value() do
+            r.samples[j] = value()
+        end
+        out[i] = r
+    end
+    return out
+end
+
+local function write_records(t: any, records: { any })
+    local parts = { value_text(STATS), value_text(#records) }
+    for _, r in records do
+        for _, v in { r.name, r.sig, r.keys, r.at, #r.distinct } do
+            parts[#parts + 1] = value_text(v)
+        end
+        for _, d in r.distinct do
+            parts[#parts + 1] = value_text(d)
+        end
+        parts[#parts + 1] = value_text(#r.samples)
+        for _, s in r.samples do
+            parts[#parts + 1] = value_text(s)
+        end
+    end
+    barch.store.set(lay.stats(t), table.concat(parts))
+end
+
+-- Each current source of t whose stored record still describes it, keyed
+-- by name.
+local function current(t: any, records: { any }): { [string]: any }
+    local sigs = {}
+    for _, ix in stat_sources(t) do
+        if ix.state ~= "building" then
+            sigs[ix.name] = { ix = ix, sig = index_sig(ix) }
+        end
+    end
+    local out = {}
+    for _, r in records do
+        local s = sigs[r.name]
+        if s and s.sig == r.sig then
+            out[r.name] = { ix = s.ix, record = r }
+        end
+    end
+    return out
+end
+
+-- The planner statistics of table t, as { [source name] = { keys, distinct,
+-- samples, at } } with each sample a whole key, or nil when t has none. The
+-- decoded statistics are kept while the record and t's sources stay the
+-- same.
+local decoded = {}
+function planner_stats(t: any): any
+    local raw = barch.store.get(lay.stats(t))
+    if type(raw) ~= "string" then
+        return nil
+    end
+    local shape = {}
+    for _, ix in stat_sources(t) do
+        shape[#shape + 1] = ix.name .. " " .. index_sig(ix) .. " " .. tostring(ix.state)
+    end
+    local sources = table.concat(shape, "\n")
+    local hit = decoded[t.key]
+    if hit and hit.raw == raw and hit.sources == sources then
+        return hit.stats
+    end
+    local stats = {}
+    for name, s in current(t, read_records(t)) do
+        local prefix, r = source_prefix(t, s.ix), s.record
+        local samples = table.create(#r.samples)
+        for i, text in r.samples do
+            samples[i] = prefix .. text
+        end
+        stats[name] = { keys = r.keys, distinct = r.distinct, samples = samples, at = r.at }
+    end
+    decoded[t.key] = { raw = raw, sources = sources, stats = stats }
+    return stats
+end
+
+-- The place, counted from 0, of sample k among n keys: every key when n
+-- is SAMPLES or fewer, else the middle of each of SAMPLES equal runs.
+local function sample_at(k: number, n: number): number
+    if n <= SAMPLES then
+        return k - 1
+    end
+    return math.floor((k - 0.5) * n / SAMPLES)
+end
+
+local function take_sample(run: any, prefix: string, key: string)
+    run.samples[#run.samples + 1] = string.sub(key, #prefix + 1, #prefix + SAMPLE_BYTES)
+    run.next += 1
+end
+
+-- Counts the value runs that index key k starts: from the first of its w
+-- values, read from `start`, that differs from the last key's, each longer
+-- run is new too.
+local function count_distinct(run: any, k: string, start: number, w: number)
+    local prev, pos = run.prev, start
+    for i = 1, w do
+        local _, after = kc.decode(k, pos)
+        if prev == nil or string.sub(prev, 1, after - 1) ~= string.sub(k, 1, after - 1) then
+            for j = i, w do
+                run.distinct[j] += 1
+            end
+            break
+        end
+        pos = after
+    end
+    run.prev = k
+end
+
+-- Reads up to `limit` keys of source ix of table t into run, at most
+-- RANGE_MAX, and answers how many keys it read and whether the source has
+-- no more. A column table's rows are read a presence block at a time, each
+-- one key.
+local function analyze_page(t: any, ix: any, run: any, limit: number): (number, boolean)
+    limit = math.min(limit, RANGE_MAX)
+    local prefix = source_prefix(t, ix)
+    local hi = kc.after(prefix) :: string
+    local column = ix.primary and t.format == "column"
+    if run.last == nil and run.pos == 0 then
+        run.total = if column then col.count(t, prefix, hi) else barch.store.count(prefix, hi)
+        local w = if ix.primary then 0 else #ix.on + (ix.links and #ix.links or 0)
+        for i = 1, w do
+            run.distinct[i] = 0
+        end
+    end
+    local wanted = math.min(SAMPLES, run.total)
+    if column then
+        local all = lay.present(t)
+        local keys, values = barch.store.rangeValues(run.last and run.last .. "\2" or all,
+                                                     kc.after(all), limit)
+        for i, k in keys do
+            local rows = col.rows_in(values[i])
+            while run.next <= wanted do
+                local at = sample_at(run.next, run.total)
+                if at >= run.pos + rows then
+                    break
+                end
+                local id = col.nth_id(lay.present_block(k), values[i], at - run.pos)
+                if id ~= nil then
+                    take_sample(run, prefix, lay.row(t, id))
+                else
+                    run.next += 1
+                end
+            end
+            run.pos += rows
+        end
+        run.last = keys[#keys] or run.last
+        return #keys, #keys < limit
+    end
+    local keys = barch.store.range(run.last and run.last .. "\2" or prefix, hi, limit)
+    local w, start = #run.distinct, #prefix + 1
+    for _, k in keys do
+        if run.next <= wanted and sample_at(run.next, run.total) == run.pos then
+            take_sample(run, prefix, k)
+        end
+        if w > 0 then
+            count_distinct(run, k, start, w)
+        end
+        run.pos += 1
+    end
+    run.last = keys[#keys] or run.last
+    return #keys, #keys < limit
+end
+
+local function new_run(): any
+    return { at = 1, pos = 0, total = 0, next = 1, distinct = {}, samples = {} }
+end
+
+local function encode_run(mark: string, run: any): string
+    local parts = { value_text(ANALYZE), value_text(mark), value_text(run.at),
+                    value_text(run.last), value_text(run.total), value_text(run.pos),
+                    value_text(run.next), value_text(run.prev), value_text(#run.distinct) }
+    for _, d in run.distinct do
+        parts[#parts + 1] = value_text(d)
+    end
+    parts[#parts + 1] = value_text(#run.samples)
+    for _, s in run.samples do
+        parts[#parts + 1] = value_text(s)
+    end
+    return VALUES.hex(table.concat(parts))
+end
+
+local function decode_run(text: any, mark: string): any
+    local ok, run = pcall(function()
+        assert(type(text) == "string" and #text % 2 == 0 and not string.find(text, "[^0-9a-f]"))
+        local value, left = reader(VALUES.unhex(text))
+        assert(value() == ANALYZE)
+        local m = value()
+        if m ~= mark then
+            return { mark = m }
+        end
+        local run = { mark = m, at = value(), last = value(), total = value(), pos = value(),
+                      next = value(), prev = value(), distinct = {}, samples = {} }
+        for i = 1, value() do
+            run.distinct[i] = value()
+        end
+        for i = 1, value() do
+            run.samples[i] = value()
+        end
+        assert(left() == 0)
+        return run
+    end)
+    if not ok then
+        fail("analyze takes a state that an earlier analyze answered, or nil to start")
+    end
+    if run.mark ~= mark then
+        fail("analyze state comes from another table or schema version; start again without"
+            .. " a state")
+    end
+    return run
+end
+
+-- Stores what run read of source ix in t's statistics, and drops the
+-- records of sources t no longer has.
+local function save_source(t: any, ix: any, run: any)
+    local records = {}
+    for name, s in current(t, read_records(t)) do
+        if name ~= ix.name then
+            records[#records + 1] = s.record
+        end
+    end
+    records[#records + 1] = { name = ix.name, sig = index_sig(ix), keys = run.pos,
+                              at = barch.time(), distinct = run.distinct,
+                              samples = run.samples }
+    table.sort(records, function(a, b) return a.name < b.name end)
+    write_records(t, records)
+end
+
+-- The catalog table named `name`.
+local function stat_table(name: any): any
+    local c = load()
+    for _, t in (c and c.tables) or {} do
+        if t.name == name then
+            return t, c
+        end
+    end
+    fail("analyze has no table " .. tostring(name) .. "; migrate a schema with it first")
+    return nil
+end
+
+-- One committed page of the statistics of table `name`, which reads up to
+-- pageSize keys. Answers { done, processed, state }; pass the state to the
+-- next call until done is true.
+function analyze(name: string, state: string?, pageSize: number?): any
+    pageSize = pageSize == nil and ANALYZE_PAGE or pageSize
+    if type(pageSize) ~= "number" or pageSize < 1 or pageSize > ANALYZE_MAX
+        or pageSize ~= math.floor(pageSize) then
+        fail("analyze page size must be a whole number from 1 to " .. ANALYZE_MAX)
+    end
+    if barch.tx.open() then
+        fail("analyze needs its own transaction; call it outside a transaction")
+    end
+    return barch.tx.run(function()
+        local t, c = stat_table(name)
+        local mark = tostring(c.version) .. " " .. t.key
+        local run = if state == nil then new_run() else decode_run(state, mark)
+        local list = stat_sources(t)
+        local processed = 0
+        while run.at <= #list and processed < pageSize do
+            local ix = list[run.at]
+            local done = true
+            if ix.state ~= "building" then
+                local n
+                n, done = analyze_page(t, ix, run, pageSize - processed)
+                processed += n
+                if done then
+                    save_source(t, ix, run)
+                end
+            end
+            if done then
+                local at = run.at
+                run = new_run()
+                run.at = at + 1
+            end
+        end
+        if run.at > #list then
+            return { done = true, processed = processed }
+        end
+        return { done = false, processed = processed, state = encode_run(mark, run) }
+    end)
+end
+
+-- What analyze() stored for table `name`: { [source name] = { keys,
+-- distinct, analyzed } } for each source it still describes, or nil when
+-- the table has no statistics.
+function statistics(name: string): any
+    local t = stat_table(name)
+    if barch.store.get(lay.stats(t)) == nil then
+        return nil
+    end
+    local out = {}
+    for source, s in current(t, read_records(t)) do
+        out[source] = { keys = s.record.keys, distinct = table.clone(s.record.distinct),
+                        analyzed = s.record.at }
+    end
+    return out
+end
+
 local function raises(fn: () -> (), want: string): boolean
     local ok, why = pcall(fn)
     return not ok and string.find(tostring(why), want, 1, true) ~= nil

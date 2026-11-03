@@ -265,6 +265,25 @@ function count(t: any, lo: string, hi: string): number
     end
 end
 
+-- How many rows presence block value `presence` holds.
+function rows_in(presence: string): number
+    return live(presence)
+end
+
+-- The id of row n, counted from 0, of block `block`, whose presence block
+-- value is `presence`, or nil when the block holds n rows or fewer.
+function nth_id(block: number, presence: string, n: number): number?
+    for s = 0, SIZE - 1 do
+        if string.byte(presence, s + 1) == 1 then
+            if n == 0 then
+                return block * SIZE + s
+            end
+            n -= 1
+        end
+    end
+    return nil
+end
+
 -- folds -----------------------------------------------------------------------
 
 -- A field a fold reads: "id", which reads each row's id, or a field's

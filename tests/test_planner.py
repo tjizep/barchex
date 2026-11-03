@@ -32,6 +32,12 @@ local app = lent.graph {
                     lent.index("weight") },
         edges = { lent.edge.from "shop" "Shop":ref "orders":unique() },
     },
+    lent.schema "Reading" {
+        id = "int",
+        format = "column",
+        fields = { f.int "sensor", f.float "value" },
+        indexes = { lent.index("sensor") },
+    },
 }
 local db = client.open(app)
 
@@ -61,6 +67,12 @@ function cases.named(c, q)
 end
 function cases.rangeOnly(c, q) return q:where("size", ">", 2) end
 function cases.paged(c, q) return q:where("status", "=", "open"):where("customer", "=", 1) end
+function cases.equalOrRange(c, q) return q:where("status", "=", "open"):where("size", ">", 38) end
+function cases.sortedRange(c, q)
+    return q:where("status", "=", "open"):where("size", ">", 2):order("size")
+end
+function cases.sortedLimit(c, q) return cases.sortedRange(c, q):limit(2) end
+function cases.closedLate(c, q) return q:where("status", "=", "closed"):where("size", ">", 900) end
 
 local steps = {}
 
@@ -68,6 +80,7 @@ function steps.seed(c)
     local shops = { c.Shop:create { name = "a" }, c.Shop:create { name = "b" },
                      c.Shop:create { name = "c" } }
     for i = 1, 40 do
+        c.Reading:create { id = i, sensor = i % 2, value = i }
         c.Order:create {
             status = if i == 7 then "rare" elseif i == 8 then "rare" else "open",
             customer = if i == 7 or i == 9 then 7 elseif i == 8 then 9 else 1,
@@ -76,6 +89,35 @@ function steps.seed(c)
         }
     end
     return "ok"
+end
+
+-- 960 more orders, a quarter of them closed, for 1,000 in all.
+function steps.many(c)
+    local rows = {}
+    for i = 41, 1000 do
+        rows[#rows + 1] = { status = if i % 4 == 0 then "closed" else "open", customer = i % 50,
+                            size = i, weight = i, code = "c" .. i }
+    end
+    c.Order:createMany(rows)
+    return "ok"
+end
+
+-- 12,000 more shops, past what one store range answers.
+function steps.manyShops(c)
+    local rows = {}
+    for i = 1, 12000 do
+        rows[i] = { name = "s" .. i }
+    end
+    c.Shop:createMany(rows)
+    return "ok"
+end
+
+function steps.readingExplain(c)
+    return c.Reading:query():where("id", ">=", 35):where("sensor", "=", 1):explain()
+end
+
+function steps.analyzeInside(c)
+    return m.analyze("Order")
 end
 
 function steps.explain(c, name)
@@ -159,6 +201,27 @@ function call(step, mode, ...)
         return m.migrate(app).version
     end
     local args = { ... }
+    if step == "analyze" then
+        -- answers how many calls the run took
+        local state, calls = nil, 0
+        repeat
+            local r = m.analyze(args[1], state, tonumber(args[2]))
+            state, calls = r.state, calls + 1
+        until r.done or args[3] == "once"
+        return if args[3] == "once" then state else calls
+    end
+    if step == "analyzeWith" then
+        return m.analyze(args[1], args[2], tonumber(args[3])).processed
+    end
+    if step == "statistics" then
+        local out = {}
+        for name, s in m.statistics(args[1]) or {} do
+            out[#out + 1] = name .. " " .. s.keys .. " " .. table.concat(s.distinct, ",")
+                .. (if s.analyzed > 0 then "" else " never")
+        end
+        table.sort(out)
+        return out
+    end
     return db.tx(function(c) return steps[step](c, table.unpack(args)) end, mode == "pessimistic")
 end
 """
@@ -250,3 +313,85 @@ def test_cursor_pages_survive_a_tie_changing(run):
     assert plan == "by_customer range customer then sort [3 keys over by_status 13], after cursor"
     assert rows == [8]
     assert run("cursorPage", cursor)[2:] == []
+
+
+def test_statistics_compare_every_index(run):
+    assert run("explain", "equalOrRange") == "by_status = status"
+    assert run("analyze", "Order") == 1
+    assert run("explain", "equalOrRange") == "by_size range size [~3 keys over by_status ~38]"
+    assert run("explain", "eitherIndex") == "by_customer = customer [~2 keys over by_status ~38]"
+    assert run("explain", "spans") == "by_size 2 ranges size [~2 keys over by_weight ~36]"
+    assert run("rows", "equalOrRange") == [39, 40]
+    assert run("count", "equalOrRange") == 2
+
+
+def test_statistics_report_keys_and_distinct_values(run):
+    assert run("statistics", "Order") == []
+    assert run("analyze", "Order") == 1
+    assert run("statistics", "Order") == [
+        "by_code 40 40", "by_customer 40 3", "by_size 40 40", "by_status 40 2",
+        "by_weight 40 40", "id 40 "]
+
+
+def test_a_limit_favours_an_index_in_the_query_order(run):
+    assert run("analyze", "Order") == 1
+    assert run("explain", "sortedRange") == ("by_status = status then sort"
+                                             " [~38 keys over by_size ~39]")
+    assert run("explain", "sortedLimit") == ("by_size range size"
+                                             " [~3 keys over by_status ~38]")
+    assert run("rows", "sortedLimit") == [3, 4]
+
+
+def test_plans_keep_their_statistics_until_the_next_analyze(run):
+    assert run("analyze", "Order") == 1
+    assert run("closeSome") == "ok"
+    assert run("explain", "eitherIndex") == "by_customer = customer [~2 keys over by_status ~38]"
+    assert run("analyze", "Order") == 1
+    assert run("explain", "eitherIndex") == "by_customer = customer [~2 keys over by_status ~35]"
+
+
+def test_statistics_sample_large_indexes(run):
+    assert run("many") == "ok"
+    # each call reads 1,000 keys of the 6,000 in the rows and 5 indexes
+    assert run("analyze", "Order", "1000") == 7
+    plan = run("explain", "closedLate")
+    found = re.fullmatch(r"by_size range size \[~(\d+) keys over by_status ~(\d+)\]", plan)
+    assert found, plan
+    # 101 sizes from 900 and 240 closed orders, give or take a sample's share
+    assert 90 <= int(found[1]) <= 111 and 230 <= int(found[2]) <= 250
+    assert len(run("rows", "closedLate")) == 25
+
+
+def test_column_tables_estimate_id_ranges(run):
+    assert run("readingExplain") == "by_sensor = sensor"
+    # a presence block counts as one key, so one page of 42 reads the 40
+    # rows' block, the 40 sensor keys, and finds no more
+    assert run("analyze", "Reading", "42") == 1
+    assert run("readingExplain") == "id range id [~6 keys over by_sensor ~20]"
+
+
+def test_an_index_without_statistics_keeps_the_key_counts(run):
+    # one page reads the 40 ids and stops inside the first index
+    assert run("analyze", "Order", "41", "once") != ""
+    assert run("statistics", "Order") == ["id 40 "]
+    assert run("explain", "eitherIndex") == "by_customer = customer [2 keys over by_status 38]"
+
+
+def test_analyze_refuses_bad_calls(run):
+    state = run("analyze", "Order", "41", "once")
+    for args, want in [
+        (("analyze", "Nope"), "analyze has no table Nope; migrate a schema with it first"),
+        (("analyze", "Order", "0"), "analyze page size must be a whole number from 1 to 1000000"),
+        (("analyzeWith", "Order", "zz"), "analyze takes a state that an earlier analyze answered"),
+        (("analyzeWith", "Reading", state), "analyze state comes from another table or schema"),
+        (("analyzeInside",), "analyze needs its own transaction; call it outside a transaction"),
+    ]:
+        with pytest.raises(redis.ResponseError, match=re.escape(want)):
+            run(*args)
+    assert run("analyzeWith", "Order", state) == 199
+
+
+def test_one_page_reads_past_a_store_range(run):
+    assert run("manyShops") == "ok"
+    assert run("analyze", "Shop", "1000000") == 1
+    assert run("statistics", "Shop") == ["id 12003 "]

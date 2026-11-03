@@ -194,15 +194,61 @@ avoid this on a busy table, call `using(name)`, which reads the named index
 with no count.
 
 Key counts decide only between equal matches, so an index with one more `=`
-field wins even when another index holds fewer keys. Paged aggregates keep the
-index declared first with no count, because their state holds a place in that
-index. Queries from `follow`, `with` and `query<Edge>()` also read with no
-count. A cursor records the order's field and the row's id, so it keeps working
-when a later page reads a different index.
+field wins even when another index holds fewer keys. Store statistics with
+`analyze` to compare every index, as the next section describes. Paged
+aggregates keep the index declared first with no count or estimate, because
+their state holds a place in that index. Queries from `follow`, `with` and
+`query<Edge>()` also read with no count or estimate. A cursor records the
+order's field and the row's id, so it keeps working when a later page reads a
+different index.
+
+### Planner statistics
+
+Call `analyze` from MIGRATE to store statistics for a table's rows and
+indexes; [planner statistics](migrate.md#planner-statistics) describes the
+call. When every index that narrows a query has statistics, the query
+estimates the keys each one would read and uses the smallest estimate. A
+range on one field can then win over an `=` on another, and the comparison
+reads no index, so it takes no range lock. Equal estimates keep the better
+match. `explain` marks estimates with `~`:
+
+```
+by_size range size [~3 keys over by_status ~38]
+```
+
+The estimate comes from up to 100 sample keys per index, so it is close for
+a wide range and rough for a narrow one. When no sample falls in the range,
+the estimate uses the index's count of distinct values.
+
+With a `limit`, an index that already returns rows in the query's order
+stops reading at the limit, so its estimate shrinks to the part of its range
+the limit and offset reach. Without the limit, the same query sorts the rows
+of the index with fewer keys:
+
+```
+by_status = status then sort [~38 keys over by_size ~39]
+by_size range size [~3 keys over by_status ~38]            -- with limit(2)
+```
+
+Plans change only when `analyze` saves new statistics, so writes between
+runs leave a query's plan as it was. Run `analyze` again after a load or a
+large delete changes how values spread. An index that a migration adds or
+replaces has no statistics until the next `analyze`, and until then the
+query compares equal matches by key counts, as above. A unique index with an
+`=` on every field reads at most one key, so the query uses it with no
+comparison.
+
+A query that compares estimates reads the table's statistics key. Saving new
+statistics writes that key, so it conflicts with open transactions that read
+it, as a write to any key they read does.
+
+### Large values
 
 Index keys hold `int` and `time` values up to +-2^53. A filter past that
 limit, such as `where("size", "<", 1e300)`, compares as usual, and the query
 reads every row of the table or chosen range to check it.
+
+### Linked rows
 
 A query from `follow` or `query<Edge>()`, or the query `with` runs for each
 row, starts from the linked ids. When its filters narrow an index, or its

@@ -64,11 +64,6 @@ and privacy policies are built.
   barch needs a count with no lock and no phantom log; lent then calls it in
   `plan_keys`, and the cost note under Index choice in
   `docs/lent/queries.md` goes away.
-- **Statistics for a better planner.** Key counts break ties between
-  indexes, and `explain` shows them. An `=` on one field still beats a range
-  on another with fewer keys, because only equal matches are compared.
-  Comparing every candidate needs the cheap count above or stored statistics
-  such as row counts per index. Keep the plan predictable.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.
