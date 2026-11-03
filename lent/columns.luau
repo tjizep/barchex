@@ -32,6 +32,15 @@
 --              key, so a stored length past CAP marks it. Without `block`:
 --              the bytes and slots in use, the lengths and the values, and
 --              every value whole.
+--   dictionary a text block of a table with `block` while its values repeat:
+--              a 24-byte header (1, "d", 0, the rows, the values in its
+--              dictionary, and three 0s), an int8 code per slot, then the
+--              dictionary: a uint32 length per value and the values, sorted
+--              by byte. Code i - 128 is the i-th value and -128 is nil, so
+--              codes follow the order of the values. A new text block starts
+--              as a dictionary, and becomes plain text for good when it
+--              would hold more than dict_most() values or a value longer
+--              than CAP.
 --
 -- A field with no key has no value in that block, so a new field costs
 -- nothing to add. A number field changes in place. A text field rewrites
@@ -208,6 +217,92 @@ local function check_rows(t: any, what: string, block: number, got: number, rows
     end
 end
 
+-- dictionary blocks ------------------------------------------------------------
+
+local DTAG = string.byte("d")
+-- where a dictionary block's codes start
+local DHEAD = 24
+-- the code of nil; the i-th value, counting from 1, has code i - 128
+local NIL_CODE = -128
+
+local function is_dict(b: buffer): boolean
+    return buffer.readu8(b, 1) == DTAG
+end
+
+-- The most values a dictionary block of `rows` slots holds. Past half the
+-- rows, a code and a dictionary entry cost more than a plain length.
+local function dict_most(rows: number): number
+    return math.min(255, rows // 2)
+end
+
+-- The sorted values of dictionary block b of `rows` slots.
+local function dict_of(b: buffer, rows: number): { string }
+    local k = buffer.readu32(b, 8)
+    local out = table.create(k)
+    local lens = DHEAD + rows
+    local at = lens + k * 4
+    for i = 1, k do
+        local len = buffer.readu32(b, lens + (i - 1) * 4)
+        out[i] = buffer.readstring(b, at, len)
+        at += len
+    end
+    return out
+end
+
+-- The i-th value of dictionary block b of `rows` slots.
+local function dict_value(b: buffer, rows: number, i: number): string
+    local lens = DHEAD + rows
+    local at = lens + buffer.readu32(b, 8) * 4
+    for j = 0, i - 2 do
+        at += buffer.readu32(b, lens + j * 4)
+    end
+    return buffer.readstring(b, at, buffer.readu32(b, lens + (i - 1) * 4))
+end
+
+-- A dictionary block of `rows` slots with `codes` and the sorted values `dict`.
+local function dict_block(rows: number, codes: buffer, dict: { string }): string
+    local lens = DHEAD + rows
+    local size = lens + #dict * 4
+    for _, v in dict do
+        size += #v
+    end
+    local b = header(size, "d", rows)
+    buffer.writeu32(b, 8, #dict)
+    buffer.copy(b, DHEAD, codes, 0, rows)
+    local at = lens + #dict * 4
+    for i, v in dict do
+        buffer.writeu32(b, lens + (i - 1) * 4, #v)
+        buffer.writestring(b, at, v)
+        at += #v
+    end
+    return buffer.tostring(b)
+end
+
+-- The index of the first of the sorted values `dict` at or past w, from 1
+-- to #dict + 1.
+local function lower(dict: { string }, w: string): number
+    local lo, hi = 1, #dict + 1
+    while lo < hi do
+        local mid = (lo + hi) // 2
+        if dict[mid] < w then
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    return lo
+end
+
+-- Adds d to each code in `codes` from `from` up.
+local function shift(codes: buffer, rows: number, from: number, d: number)
+    for s = 0, rows - 1 do
+        local c = buffer.readi8(codes, s)
+        if c ~= NIL_CODE and c >= from then
+            buffer.writei8(codes, s, c + d)
+        end
+    end
+end
+
 -- blocks -----------------------------------------------------------------------
 
 local function place(rows: number, pk: number): (number, number)
@@ -345,15 +440,27 @@ local function read_block(t: any, g: any, cols: { any }, block: number, presence
                     if b and sp.head then
                         check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
                     end
+                    c.dict = nil
                     if b and c.text then
-                        starts_of(sp, b, c.starts)
+                        if sp.head and is_dict(b) then
+                            c.dict = dict_of(b, rows)
+                        else
+                            starts_of(sp, b, c.starts)
+                        end
                     end
                     c.fb, c.b = fb, b
                 end
                 local b = c.b
                 if b then
                     local fs = pk - fb * rows
-                    if c.text then
+                    local dict = c.dict
+                    if dict then
+                        local code = buffer.readi8(b, DHEAD + fs)
+                        if code ~= NIL_CODE then
+                            local v = dict[code + 128]
+                            r[c.name] = if c.json then VALUES.parse_json(v) else v
+                        end
+                    elseif c.text then
                         local len = buffer.readu32(b, sp.lens + fs * 4)
                         if len > 0 then
                             local v = if len - 1 > sp.cap then long_value(t, c.name, c.okey, pk)
@@ -540,14 +647,23 @@ local function load(t: any, c: any, first: number)
             check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
         end
         c.b, c.fb, c.located, c.elements = b, fb, false, false
+        c.coded, c.gmap = c.text and b ~= nil and c.spec.head == true and is_dict(b), nil
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
 end
 
--- Finds where each slot's value starts in text source c's loaded block.
+-- Finds where each slot's value starts in text source c's loaded block, or
+-- reads its dictionary and the bytes that hold it.
 local function locate(c: any)
-    starts_of(c.spec, c.b, c.starts)
+    local b: buffer = c.b
+    if c.coded then
+        local at = DHEAD + c.rows
+        c.dict = dict_of(b, c.rows)
+        c.dictkey = buffer.readstring(b, at, buffer.len(b) - at)
+    else
+        starts_of(c.spec, b, c.starts)
+    end
     c.located = true
 end
 
@@ -559,6 +675,16 @@ local function value_at(c: any, s: number): any
     local b = c.b
     if b == nil then
         return c.default
+    end
+    if c.coded then
+        local code = buffer.readi8(b, DHEAD + c.off + s)
+        if code == NIL_CODE then
+            return c.default
+        end
+        if not c.located then
+            locate(c)
+        end
+        return c.dict[code + 128]
     end
     if c.text then
         local sp = c.spec
@@ -727,6 +853,22 @@ local function less(a: any, b: any): boolean
         return not a and b
     end
     return a < b
+end
+
+-- Sets the records from `from` to `to` - 1 to no values: a count and sum of
+-- 0, a least of inf and a greatest of -inf.
+local function clear_records(r: buffer, from: number, to: number)
+    buffer.fill(r, from * 32, 0, (to - from) * 32)
+    for i = from, to - 1 do
+        buffer.writef64(r, i * 32 + 16, math.huge)
+        buffer.writef64(r, i * 32 + 24, -math.huge)
+    end
+end
+
+local function new_records(n: number): buffer
+    local r = buffer.create(n * 32)
+    clear_records(r, 0, n)
+    return r
 end
 
 -- Adds the slots sel[1..n], in groups gids[1..n], to aggregate a. `full`
@@ -953,6 +1095,13 @@ function start_fold(t: any, fields: any, spec: any): any
             if keys[1].text and keys[1].spec.over then
                 texts[#texts + 1] = keys[1]
             end
+            if keys[1].text and keys[1].spec.head then
+                -- dictionary blocks fold into records by code; see flush_codes
+                job.csize = 0
+                for _, a in aggs do
+                    a.crecs = new_records(256)
+                end
+            end
         end
         job.texts = texts
         return job
@@ -975,8 +1124,33 @@ for len = 0, 6 do
     HI_MASK[len] = 2 ^ (8 * math.max(len - 4, 0)) - 1
 end
 
+-- Sets gids[1..n] to the groups of the slots in sel[1..n] by text key c,
+-- whose loaded block is a dictionary block, one lookup per code.
+local function dict_gids(job: any, c: any, sel: { number }, n: number, gids: { number }, full: boolean)
+    local b: buffer, at = c.b, DHEAD + c.off
+    local map = c.gmap
+    if map == nil then
+        map = {}
+        c.gmap = map
+    end
+    for i = 1, n do
+        local s = if full then i - 1 else sel[i]
+        local code = buffer.readi8(b, at + s)
+        local gi = map[code]
+        if gi == nil then
+            gi = group_index(job, s)
+            map[code] = gi
+        end
+        gids[i] = gi
+    end
+end
+
 -- Sets gids[1..n] to the groups of the slots in sel[1..n] by text key c.
 local function text_gids(job: any, c: any, sel: { number }, n: number, gids: { number }, full: boolean)
+    if c.coded then
+        dict_gids(job, c, sel, n, gids, full)
+        return
+    end
     -- a value of up to 6 bytes, with its length, makes a number below 2^53
     -- that names its group without making a string
     local b: buffer, starts, tree, short = c.b, c.starts, job.tree, job.short
@@ -1102,9 +1276,7 @@ local function elements(v: any, c: any): buffer
     return w
 end
 
--- Makes room in each aggregate's records for `size` grouper ids, each
--- record starting as no values: a count and sum of 0, a least of inf and a
--- greatest of -inf.
+-- Makes room in each aggregate's records for `size` grouper ids.
 local function grow(job: any, size: number)
     local was = job.capacity
     if size <= was then
@@ -1112,13 +1284,9 @@ local function grow(job: any, size: number)
     end
     local cap = math.max(size, was * 2, 16)
     for _, a in job.aggs do
-        local r = buffer.create(cap * 32)
+        local r = new_records(cap)
         if a.recs then
             buffer.copy(r, 0, a.recs, 0, was * 32)
-        end
-        for i = was, cap - 1 do
-            buffer.writef64(r, i * 32 + 16, math.huge)
-            buffer.writef64(r, i * 32 + 24, -math.huge)
         end
         a.recs = r
     end
@@ -1195,6 +1363,91 @@ local function load_sources(job: any, first: number)
     end
 end
 
+-- The test on codes of text source c's dictionary block that matches
+-- `op w` on its values: an op and a code for vec.filter, "none" when no
+-- value passes, or "all" when every slot passes.
+local function code_bound(c: any, op: string, w: string): (string, number)
+    if not c.located then
+        locate(c)
+    end
+    local dict = c.dict
+    local k = #dict
+    -- lt values sort before w, and le are at most w
+    local lt = lower(dict, w) - 1
+    local le = if dict[lt + 1] == w then lt + 1 else lt
+    if op == "=" then
+        return if le > lt then "=" else "none", lt - 127
+    elseif op == "~=" then
+        return if le > lt then "~=" else "all", lt - 127
+    elseif op == "<" then
+        return if lt > 0 then "<" else "none", lt - 127
+    elseif op == "<=" then
+        return if le > 0 then "<" else "none", le - 127
+    elseif op == ">" then
+        return if le < k then ">=" else "none", le - 127
+    end
+    return if lt < k then ">=" else "none", lt - 127
+end
+
+-- Adds record `at` of buffer r, which ran on barch.vec, to group gi's
+-- running values of aggregate a.
+local function add_record(a: any, r: buffer, at: number, gi: number)
+    local count = buffer.readf64(r, at)
+    if count == 0 then
+        return
+    end
+    local vals, fn = a.vals, a.fn
+    local acc = vals[gi]
+    if fn == "count" then
+        vals[gi] = (acc or 0) + count
+    elseif fn == "sum" then
+        vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
+    elseif fn == "avg" then
+        vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
+        a.ns[gi] = (a.ns[gi] or 0) + count
+    elseif fn == "min" then
+        local x = buffer.readf64(r, at + 16)
+        if acc == nil or x < acc then
+            vals[gi] = x
+        end
+    else
+        local x = buffer.readf64(r, at + 24)
+        if acc == nil or x > acc then
+            vals[gi] = x
+        end
+    end
+end
+
+-- Adds the records that dictionary blocks folded by code to the job's
+-- groups, by the values the codes stood for, and clears them. Blocks with
+-- the same dictionary share one set of records, so this runs when the
+-- dictionary changes and when the fold ends.
+local function flush_codes(job: any)
+    local size = job.csize
+    if not size or size == 0 then
+        return
+    end
+    local g, dict, tree = job.codes, job.cmap, job.tree
+    job.cdict = nil
+    for id = 0, size - 1 do
+        local code = g:key(id)
+        local value = if code == nil then nil else dict[code + 128]
+        local k = if value == nil then NIL_KEY else value
+        local gi = tree[k]
+        if gi == nil then
+            gi = new_group(job, { value })
+            tree[k] = gi
+        end
+        for _, a in job.aggs do
+            add_record(a, a.crecs, id * 32, gi)
+        end
+    end
+    for _, a in job.aggs do
+        clear_records(a.crecs, 0, size)
+    end
+    job.csize = 0
+end
+
 -- fold_chunk with barch.vec: the selection, group ids and running values
 -- stay in buffers, and each step is one kernel call over the chunk. A text
 -- block with a value it keeps only the start of runs luau_rows.
@@ -1247,6 +1500,17 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
             if cd.op ~= "~=" then
                 return more
             end
+        elseif c.coded then
+            local op, code = code_bound(c, cd.op, cd.value)
+            if op == "none" then
+                return more
+            elseif op ~= "all" then
+                n = v.filter("i8", c.b, DHEAD + c.off, 1, op, code, NIL_CODE, sel, n, selb)
+                sel = selb
+                if n == 0 then
+                    return more
+                end
+            end
         else
             local kind, b, at = "f64", c.b, c.at
             if c.text then
@@ -1261,7 +1525,19 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     end
     local gids: buffer? = nil
     local k = job.keys[1]
-    if k then
+    local coded = k and k.coded
+    if coded then
+        if not k.located then
+            locate(k)
+        end
+        if job.cdict ~= k.dictkey then
+            -- codes stand for other values from here
+            flush_codes(job)
+            job.cdict, job.cmap, job.codes = k.dictkey, k.dict, v.grouper("i8")
+        end
+        gids = job.gidb
+        job.csize = job.codes:ids(k.b, DHEAD + k.off, 1, NIL_CODE, sel, n, gids)
+    elseif k then
         local b, at = k.b, k.at
         if b == nil then
             b, at = if k.text then NIL_TEXTS else NIL_NUMBERS, 0
@@ -1282,10 +1558,11 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     end
     for _, ag in job.aggs do
         local c = ag.source
+        local recs = if coded then ag.crecs else ag.recs
         if c == nil then
-            v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, ag.recs)
+            v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
         elseif c.b ~= nil then
-            v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, ag.recs)
+            v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
     end
     return more
@@ -1391,35 +1668,14 @@ end
 -- Adds the records of a job that ran on barch.vec to its groups' running
 -- values.
 local function add_records(job: any)
+    flush_codes(job)
     for _, a in job.aggs do
-        local r: buffer, vals, ns, fn = a.recs, a.vals, a.ns, a.fn
+        local r: buffer? = a.recs
         if r == nil then
             continue
         end
         for id, gi in job.gis do
-            local at = (id - 1) * 32
-            local count = buffer.readf64(r, at)
-            if count > 0 then
-                local acc = vals[gi]
-                if fn == "count" then
-                    vals[gi] = (acc or 0) + count
-                elseif fn == "sum" then
-                    vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
-                elseif fn == "avg" then
-                    vals[gi] = (acc or 0) + buffer.readf64(r, at + 8)
-                    ns[gi] = (ns[gi] or 0) + count
-                elseif fn == "min" then
-                    local x = buffer.readf64(r, at + 16)
-                    if acc == nil or x < acc then
-                        vals[gi] = x
-                    end
-                else
-                    local x = buffer.readf64(r, at + 24)
-                    if acc == nil or x > acc then
-                        vals[gi] = x
-                    end
-                end
-            end
+            add_record(a, r, (id - 1) * 32, gi)
         end
     end
 end
@@ -1479,6 +1735,10 @@ end
 -- The value at `slot` of a text block, as far as the block keeps it.
 local function text_at(sp: any, stored: string, slot: number): string?
     local b = buffer.fromstring(stored)
+    if sp.head and is_dict(b) then
+        local code = buffer.readi8(b, DHEAD + slot)
+        return if code == NIL_CODE then nil else dict_value(b, sp.rows, code + 128)
+    end
     local len = buffer.readu32(b, sp.lens + slot * 4)
     if len == 0 then
         return nil
@@ -1577,6 +1837,92 @@ local function replace_text(sp: any, stored: string, slot: number, text: string?
     return buffer.tostring(b)
 end
 
+-- A plain text block holding vals[s + 1] at each slot s, with `over`
+-- values kept whole elsewhere.
+local function plain_block(sp: any, vals: { [number]: string }, over: number): string
+    local used, slots = 0, 0
+    for s = 0, sp.rows - 1 do
+        local v = vals[s + 1]
+        if v then
+            used += #v
+            slots = s + 1
+        end
+    end
+    local b = header(sp.vals + used, "t", sp.rows)
+    buffer.writeu32(b, sp.used, used)
+    buffer.writeu32(b, sp.slots, slots)
+    buffer.writeu32(b, sp.over, over)
+    local at = sp.vals
+    for s = 0, slots - 1 do
+        local v = vals[s + 1]
+        if v then
+            buffer.writeu32(b, sp.lens + s * 4, #v + 1)
+            buffer.writestring(b, at, v)
+            at += #v
+        end
+    end
+    return buffer.tostring(b)
+end
+
+-- Dictionary block `stored` with `text` at slot, or nil at slot for text
+-- nil. A dictionary holds only whole values, so a `long` text, the start
+-- of a longer value, or a value past dict_most() makes a plain block.
+local function dict_put(sp: any, stored: string, slot: number, text: string?,
+                        long: boolean): string
+    local rows = sp.rows
+    local old = buffer.fromstring(stored)
+    local dict = dict_of(old, rows)
+    local codes = buffer.create(rows)
+    buffer.copy(codes, 0, old, DHEAD, rows)
+    local was = buffer.readi8(codes, slot)
+    buffer.writei8(codes, slot, NIL_CODE)
+    if was ~= NIL_CODE and not string.find(buffer.tostring(codes), string.char(was % 256), 1, true) then
+        -- no other slot holds the value slot held
+        table.remove(dict, was + 128)
+        shift(codes, rows, was + 1, -1)
+    end
+    local p = if text then lower(dict, text) else 0
+    if long or (text and dict[p] ~= text and #dict >= dict_most(rows)) then
+        local vals = {}
+        for s = 0, rows - 1 do
+            local code = buffer.readi8(codes, s)
+            if code ~= NIL_CODE then
+                vals[s + 1] = dict[code + 128]
+            end
+        end
+        vals[slot + 1] = text
+        return plain_block(sp, vals, if long then 1 else 0)
+    end
+    if text then
+        if dict[p] ~= text then
+            table.insert(dict, p, text)
+            shift(codes, rows, p - 128, 1)
+        end
+        buffer.writei8(codes, slot, p - 128)
+    end
+    return dict_block(rows, codes, dict)
+end
+
+-- Text block `stored`, or a new block for stored nil, with `text` at slot,
+-- or nil at slot for text nil. `long` says text is the start of a longer
+-- value, and `dover` how the values kept whole elsewhere change.
+local function text_put(sp: any, stored: string?, slot: number, text: string?, long: boolean,
+                        dover: number): string
+    if stored == nil then
+        if sp.head and not long then
+            local codes = buffer.create(sp.rows)
+            buffer.fill(codes, 0, 0x80, sp.rows)
+            buffer.writei8(codes, slot, 1 - 128)
+            return dict_block(sp.rows, codes, { text :: string })
+        end
+        return new_text(sp, slot, text :: string, dover)
+    end
+    if sp.head and string.byte(stored, 2) == DTAG then
+        return dict_put(sp, stored, slot, text, long)
+    end
+    return replace_text(sp, stored, slot, text, dover)
+end
+
 -- The write that stores `text` at slot of text block k, nil for a nil value,
 -- or nil when none is needed. A value longer than the block keeps goes
 -- whole to overflow key `okey`. Checks the sizes without writing.
@@ -1593,25 +1939,16 @@ local function plan_text(t: any, f: any, sp: any, block: number, k: string, okey
         inline, long = string.sub(text, 1, sp.cap + 1), true
     end
     local stored = barch.store.get(k)
-    if stored == nil then
-        if text == nil then
-            return nil
-        end
-        local value = new_text(sp, slot, inline :: string, if long then 1 else 0)
-        if #value > room then
-            too_large(t, f, block, #value)
-        end
-        return function()
-            barch.store.set(k, value)
-            if long then
-                barch.store.set(okey, text)
-            end
-        end
+    if stored == nil and text == nil then
+        return nil
     end
-    local was = string.unpack("<I4", stored, sp.lens + slot * 4 + 1) :: number
-    local was_long = was - 1 > sp.cap
+    -- a dictionary block holds no long values
+    local was_long = false
+    if stored and not (sp.head and string.byte(stored, 2) == DTAG) then
+        was_long = (string.unpack("<I4", stored, sp.lens + slot * 4 + 1) :: number) - 1 > sp.cap
+    end
     local dover = (if long then 1 else 0) - (if was_long then 1 else 0)
-    local value = replace_text(sp, stored, slot, inline, dover)
+    local value = text_put(sp, stored, slot, inline, long, dover)
     if #value > room then
         too_large(t, f, block, #value)
     end
@@ -1776,6 +2113,42 @@ function selftest(): (boolean, string?)
         if text_at(sp, b, 0) ~= "x" or text_at(sp, b, 2) ~= nil or #b ~= sp.vals + 1 then
             return false, "text block removal"
         end
+    end
+    -- a dictionary block keeps its values sorted, drops one no slot holds,
+    -- and turns plain for a long value or too many values
+    local sp = new_spec(64, true)
+    local b = text_put(sp, nil, 2, "m", false, 0)
+    b = text_put(sp, b, 0, "z", false, 0)
+    b = text_put(sp, b, 1, "a", false, 0)
+    local function codes(): (number, number, number)
+        return string.unpack("<i1i1i1", b, DHEAD + 1)
+    end
+    local c0, c1, c2 = codes()
+    if string.byte(b, 2) ~= DTAG or text_at(sp, b, 0) ~= "z" or text_at(sp, b, 1) ~= "a"
+        or text_at(sp, b, 2) ~= "m" or text_at(sp, b, 3) ~= nil or not (c1 < c2 and c2 < c0) then
+        return false, "dictionary block slots"
+    end
+    b = text_put(sp, b, 2, nil, false, 0)
+    b = text_put(sp, b, 1, "z", false, 0)
+    c0, c1, c2 = codes()
+    if string.unpack("<I4", b, 9) ~= 1 or c0 ~= c1 or c2 ~= NIL_CODE
+        or text_at(sp, b, 1) ~= "z" then
+        return false, "dictionary block removal"
+    end
+    local long = text_put(sp, b, 3, string.rep("q", CAP + 1), true, 1)
+    if string.byte(long, 2) ~= string.byte("t") or text_at(sp, long, 0) ~= "z"
+        or text_at(sp, long, 3) ~= string.rep("q", CAP + 1)
+        or string.unpack("<I4", long, sp.over + 1) ~= 1 then
+        return false, "dictionary block with a long value"
+    end
+    for s = 0, dict_most(64) - 1 do
+        b = text_put(sp, b, s, "v" .. s, false, 0)
+    end
+    local full = string.byte(b, 2) == DTAG
+    b = text_put(sp, b, dict_most(64), "w", false, 0)
+    if not full or string.byte(b, 2) ~= string.byte("t") or text_at(sp, b, 5) ~= "v5"
+        or text_at(sp, b, dict_most(64)) ~= "w" then
+        return false, "dictionary block past its values"
     end
     local sizes = {
         block_rows(4096) == 4096, block_rows(4096, { kind = "int" }) == 512,

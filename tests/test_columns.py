@@ -223,6 +223,21 @@ function cases.vPaged(t)
     return out
 end
 
+-- region conditions with values stored, absent, and before and after them
+function cases.regionOps(t)
+    local out = {}
+    for _, op in { "=", "~=", "<", "<=", ">", ">=" } do
+        for _, w in { "", "a", "e", "f", "n", "s", "t", "z" } do
+            out[#out + 1] = t:query():where("region", op, w):count()
+        end
+    end
+    return out
+end
+function cases.vRegion(t)
+    return rows_text(t:query():where("region", ">", "e"):where("region", "<=", "s")
+        :groupBy("region"):aggregate(STATS))
+end
+
 function steps.ask(c, tname, name)
     return cases[name](c[tname])
 end
@@ -386,6 +401,35 @@ end
 
 function steps.huge_update(c, id, size)
     return err(function() c.Sale:update(id, { raw = string.rep("y", size) }) end)
+end
+
+-- how region's and note's blocks are stored: "d" for dictionary blocks,
+-- "t" for plain text
+function steps.kinds()
+    local lay = require("lent.LAYOUT")
+    local kc = require("lent.KEYCODEC")
+    local t = m.load().tables.sale
+    local out = {}
+    for _, name in { "region", "note" } do
+        for _, f in t.fields do
+            if f.name == name then
+                local p = lay.column(t, f.id)
+                local keys, values = barch.store.rangeValues(p, kc.after(p) :: string, 1000)
+                local tags = {}
+                for i, v in values do
+                    -- block keys, past the overflow keys of long values
+                    if string.sub(keys[i], #p + 1, #p + 1) == "i" then
+                        tags[string.sub(v, 2, 2)] = true
+                    end
+                end
+                local list = {}
+                for tag in tags do list[#list + 1] = tag end
+                table.sort(list)
+                out[#out + 1] = name .. "=" .. table.concat(list)
+            end
+        end
+    end
+    return table.concat(out, " ")
 end
 
 -- the rows the catalog keeps for Sale and some of its fields
@@ -565,7 +609,8 @@ def test_column_answers_what_binary_answers(run, seed):
 
 
 VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
-                "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged"]
+                "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged",
+                "vRegion", "regionOps"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -736,3 +781,28 @@ def test_a_long_value_past_the_value_limit_fails_clearly(run):
     got = run("huge_update", "1", "600000")
     assert "would hold a value of 600000 bytes" in got
     assert len(run("get", "Sale", "1")) > 50000
+
+
+def test_repeated_text_uses_dictionary_blocks(run):
+    if run.block == "fixed":
+        pytest.skip("a fixed table keeps its text blocks plain")
+    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
+    # three regions repeat; notes differ in nearly every row
+    assert run("kinds") == "region=d note=t"
+    cases = ("regionOps", "vRegion", "byRegion", "grouped", "region")
+    for case in cases:
+        same(run, "ask", case)
+    # values before, between and after the stored ones, then a long one,
+    # which turns its block plain
+    for pk, region in ((5, "a"), (6, "m"), (7, "z"), (8, ""), (70, "x" * 40)):
+        write_both(run, "update", pk, {"region": region})
+        for case in cases:
+            same(run, "ask", case)
+    assert run("kinds") == "region=dt note=t"
+    # the last row holding "m" leaves the dictionary with it
+    write_both(run, "update", 6, {"region": "n"})
+    write_both(run, "delete", 7, {})
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)

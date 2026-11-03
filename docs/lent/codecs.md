@@ -171,15 +171,16 @@ one row per transaction ran at these rates on one machine:
 | `block` | sum | filtered sum | `groupBy` and sum | `update` | `createMany` |
 |---|---:|---:|---:|---:|---:|
 | none, 1,024 rows | 79 million rows/s | 43 million rows/s | 36 million rows/s | 370 µs | 25,000 rows/s |
-| `1024` | 23 million rows/s | 11 million rows/s | 8 million rows/s | 300 µs | 31,000 rows/s |
-| `"htap"` | 63 million rows/s | 28 million rows/s | 20 million rows/s | 350 µs | 29,000 rows/s |
-| `"balanced"` | 80 million rows/s | 54 million rows/s | 27 million rows/s | 440 µs | 26,000 rows/s |
-| `"scan"` | 143 million rows/s | 70 million rows/s | 90 million rows/s | 1,090 µs | 9,300 rows/s |
+| `1024` | 23 million rows/s | 11 million rows/s | 7 million rows/s | 290 µs | 32,000 rows/s |
+| `"htap"` | 63 million rows/s | 28 million rows/s | 25 million rows/s | 350 µs | 31,000 rows/s |
+| `"balanced"` | 80 million rows/s | 54 million rows/s | 38 million rows/s | 440 µs | 29,000 rows/s |
+| `"scan"` | 143 million rows/s | 70 million rows/s | 148 million rows/s | 1,090 µs | 14,000 rows/s |
 
 The sum reads a `float` field, the filter compares an `int` field, and the
-group key is a `string` field with 10 values. An `update` copies each block
-it writes, so its cost grows with the block, and so does a concurrent
-writer's chance of a conflict on that block.
+group key is a `string` field with 10 values, which tables with `block`
+store in dictionary blocks; see [Stored blocks](#stored-blocks). An
+`update` copies each block it writes, so its cost grows with the block, and
+so does a concurrent writer's chance of a conflict on that block.
 
 ### Stored blocks
 
@@ -195,6 +196,16 @@ schema`.
 | presence | a 16-byte header, then 1 byte per slot, 1 for a slot that holds a row; without `block`, the 1,024 bytes, then the row count as an int32 | every table |
 | number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
 | text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
+| dictionary | with `block` only: a 24-byte header with the count of distinct values, an int8 code per slot, then the distinct values sorted by byte, each with its length | `string`, `enum`, `json`, `bytes` |
+
+With `block`, a text block whose values repeat is stored as a dictionary
+block. Each slot holds a 1-byte code, and the codes follow the sorted order
+of the values, so a filter compares codes and a `groupBy` groups them,
+without reading the strings of each row. A new text block starts as a
+dictionary block. It becomes a plain text block, and stays one, when a
+write would give it more distinct values than half its rows, more than
+255, or a value longer than 32 bytes. Reads and query answers are the same
+for both kinds.
 
 With `block`, a text block keeps the first 33 bytes of a value longer than
 32 bytes, and the whole value is stored under its own key. Reads, filters
