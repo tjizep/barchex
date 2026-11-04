@@ -81,13 +81,12 @@ and privacy policies are built.
     savings justify a third width.
 - **Dictionary text blocks.** Tables with `block` store a text block whose
   values repeat as a dictionary block: its distinct values sorted by byte,
-  then an `i8` code per slot. A `groupBy` on the field groups the codes,
-  and a comparison filters them, which raised `groupBy` with 10 values by
-  25% on `"htap"` blocks and 65% on `"scan"` blocks. The rest:
-  - `i16` codes, so a block with more than 255 distinct values stays a
-    dictionary block while at most half its rows are distinct. Today it
-    becomes a plain text block. A text block holds at most 8,192 rows, so
-    `i16` codes cover every dictionary block.
+  then an `i8` code per slot, or an `i16` code past 255 values. A
+  `groupBy` on the field groups the codes, and a comparison filters them,
+  which raised `groupBy` with 10 values by 25% on `"htap"` blocks and 65%
+  on `"scan"` blocks. With 1,000 values on `"scan"` blocks, `i16` codes
+  cut the field from 4.9 MB to 2.0 MB and raised `groupBy` by 30% to 80%.
+  The rest:
   - A plain text block returns to a dictionary block when its distinct
     values fall below the limit. Today it stays plain.
   - The rows sizing takes the code width plus the dictionary's share of the

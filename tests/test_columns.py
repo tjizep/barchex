@@ -233,6 +233,19 @@ function cases.regionOps(t)
     end
     return out
 end
+-- regions r000 to r299, with values before, among and after them
+function cases.manyRegions(t)
+    local out = {}
+    for _, op in { "=", "~=", "<", "<=", ">", ">=" } do
+        for _, w in { "", "r", "r000", "r150", "r1500", "r299", "s" } do
+            out[#out + 1] = t:query():where("region", op, w):count()
+        end
+    end
+    return out
+end
+function cases.byManyRegions(t)
+    return rows_text(t:query():where("region", ">", "r100"):groupBy("region"):aggregate(STATS))
+end
 function cases.vRegion(t)
     return rows_text(t:query():where("region", ">", "e"):where("region", "<=", "s")
         :groupBy("region"):aggregate(STATS))
@@ -330,6 +343,17 @@ function steps.fill(c, tname, from, to)
     return #rows
 end
 
+-- rows from..to of table tname, whose regions repeat every `regions` rows
+function steps.spread(c, tname, from, to, regions)
+    local rows = {}
+    for i = from, to do
+        rows[#rows + 1] = { id = i, region = string.format("r%03d", i % regions), qty = i % 8,
+                            score = i % 40 / 4, at = i * 7919 % 1e9 }
+    end
+    c[tname]:createMany(rows)
+    return #rows
+end
+
 function steps.bulk(c, n, from)
     for i = 1, n do
         c.Sale:create { id = from + i, region = "r" .. i % 3, qty = i }
@@ -403,8 +427,8 @@ function steps.huge_update(c, id, size)
 end
 
 -- how fields' blocks are stored, region's and note's by default: "d" for
--- dictionary blocks, "t" for plain text, "h" for short and "n" for f64
--- numbers
+-- dictionary blocks with int8 codes, "D" with int16 codes, "t" for plain
+-- text, "h" for short and "n" for f64 numbers
 function steps.kinds(_, ...)
     local lay = require("lent.LAYOUT")
     local kc = require("lent.KEYCODEC")
@@ -421,7 +445,11 @@ function steps.kinds(_, ...)
                 for i, v in values do
                     -- block keys, past the overflow keys of long values
                     if string.sub(keys[i], #p + 1, #p + 1) == "i" then
-                        tags[string.sub(v, 2, 2)] = true
+                        local tag = string.sub(v, 2, 2)
+                        if tag == "d" and string.unpack("<I4", v, 9) > 255 then
+                            tag = "D"
+                        end
+                        tags[tag] = true
                     end
                 end
                 local list = {}
@@ -498,17 +526,27 @@ end
 
 
 # Sale with blocks of 1024 rows and no header, and with the smallest blocks
-# a `block` option asks for, whose field blocks hold 64 or 128 rows
-BLOCKS = {"fixed": "nil", "small": "1024"}
+# a `block` option asks for, whose field blocks hold 64 or 128 rows. Tests
+# of large blocks use `large`, whose text blocks hold 1024 rows.
+BLOCKS = {"fixed": "nil", "small": "1024", "large": "16384"}
+MODES = ("optimistic", "pessimistic")
 
 
-@pytest.fixture(params=[(m, b) for b in BLOCKS for m in ("optimistic", "pessimistic")],
+@pytest.fixture(params=[(m, b) for b in ("fixed", "small") for m in MODES],
                 ids=lambda p: "-".join(p))
 def run(client, request):
+    return start(client, request, *request.param)
+
+
+@pytest.fixture(params=MODES)
+def large(client, request):
+    return start(client, request, request.param, "large")
+
+
+def start(client, request, mode, block):
     setup(client)
     install(client, "lent", "VEC", "lent/vec.luau")
     client.execute_command("USE", "cols_" + re.sub(r"\W", "_", request.node.name))
-    mode, block = request.param
     client.execute_command("SETF", "COLS", APP.replace("BLOCK_OPTION", BLOCKS[block], 1))
     assert client.execute_command("CALLF", "COLS", "migrate", "") == 1
 
@@ -627,35 +665,6 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
     for pk in rng.sample(range(1, 3101), 200):
         write_both(run, "delete", pk, {})
     for case in VECTOR_CASES:
-        answers = same(run, "paths", case)
-        assert len(set(answers)) == 1, (case, answers)
-
-
-def test_small_whole_numbers_use_short_blocks(run):
-    if run.block == "fixed":
-        pytest.skip("a fixed table keeps its number blocks as f64")
-    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
-    assert run("kinds", "qty", "rank") == "qty=h rank=h"
-    cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value",
-             "defaults", "byRank", "ranked")
-    for case in cases:
-        same(run, "ask", case)
-    # nil and +-32,767 stay short; a value past them turns its block to f64
-    write_both(run, "clear", 5, "rank")
-    for pk, qty in ((6, -32767), (7, 32767), (8, 0)):
-        write_both(run, "update", pk, {"qty": qty})
-    for case in cases:
-        same(run, "ask", case)
-    assert run("kinds", "qty", "rank") == "qty=h rank=h"
-    for pk, qty in ((9, 40000), (300, -32768), (500, 2)):
-        write_both(run, "update", pk, {"qty": qty})
-        for case in cases:
-            same(run, "ask", case)
-    assert run("kinds", "qty") == "qty=hn"
-    write_both(run, "delete", 7, {})
-    write_both(run, "create", 2000, {"region": "n", "qty": 70000})
-    for case in cases:
-        same(run, "ask", case)
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
 
@@ -833,6 +842,30 @@ def test_repeated_text_uses_dictionary_blocks(run):
     # the last row holding "m" leaves the dictionary with it
     write_both(run, "update", 6, {"region": "n"})
     write_both(run, "delete", 7, {})
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+
+
+def test_dictionary_blocks_past_255_values_take_int16_codes(large):
+    run = large
+    # 300 regions in 1,024-row blocks
+    assert run("spread", "Sale", "1", "1500", "300") == run("spread", "Plain", "1", "1500", "300")
+    assert run("kinds", "region") == "region=D"
+    cases = ("manyRegions", "byManyRegions", "regionOps", "vRegion", "byRegion", "grouped")
+    for case in cases:
+        same(run, "ask", case)
+    # a value before, among and after the others moves the codes
+    for pk, region in ((5, "a"), (6, "r150x"), (7, "z")):
+        write_both(run, "update", pk, {"region": region})
+    for case in cases:
+        same(run, "ask", case)
+    # emptying regions in the second block takes it back to int8 codes
+    for pk in range(1024, 1501):
+        if pk % 300 >= 200:
+            write_both(run, "update", pk, {"region": "r000"})
+    assert run("kinds", "region") == "region=Dd"
     for case in cases:
         same(run, "ask", case)
         answers = same(run, "paths", case)

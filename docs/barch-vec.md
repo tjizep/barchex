@@ -49,7 +49,7 @@ as code 0 of a dictionary column. Pass `nil` when the column has no nil.
 `f64` ignores `none` and treats NaN as nil. `str` ignores it too.
 
 lent uses `i16` for the short blocks of `int` columns whose values fit in
-16 bits, and plans it for the codes of dictionary blocks with more than 255
+16 bits, and for the codes of dictionary blocks with more than 255
 distinct values. It follows the same rules as the other integer kinds in
 every function.
 

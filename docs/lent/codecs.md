@@ -197,16 +197,23 @@ schema`.
 | number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
 | short | with `block` only: an 8-byte header, then an int16 per slot, with -32,768 for nil | `int` |
 | text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
-| dictionary | with `block` only: a 24-byte header with the count of distinct values, an int8 code per slot, then the distinct values sorted by byte, each with its length | `string`, `enum`, `json`, `bytes` |
+| dictionary | with `block` only: a 24-byte header with the count of distinct values, a code per slot (an int8 for up to 255 values, otherwise an int16), then the distinct values sorted by byte, each with its length | `string`, `enum`, `json`, `bytes` |
 
 With `block`, a text block whose values repeat is stored as a dictionary
-block. Each slot holds a 1-byte code, and the codes follow the sorted order
+block. Each slot holds a code: 1 byte while the block holds up to 255
+distinct values, and 2 bytes past that. The codes follow the sorted order
 of the values, so a filter compares codes and a `groupBy` groups them,
 without reading the strings of each row. A new text block starts as a
 dictionary block. It becomes a plain text block, and stays one, when a
-write would give it more distinct values than half its rows, more than
-255, or a value longer than 32 bytes. Reads and query answers are the same
-for both kinds.
+write would give it more distinct values than half its rows or a value
+longer than 32 bytes. Reads and query answers are the same for both kinds.
+
+A block of up to 511 rows holds at most 255 distinct values, so 2-byte
+codes need larger blocks: a `string` field without `maxLen` has 512-row
+blocks on `"balanced"` and 4,096-row blocks on `"scan"`. On `"scan"`
+blocks of 409,600 rows with 1,000 distinct values, dictionary blocks took
+2.0 MB where plain text took 4.9 MB, and a `groupBy` on the field ran 30%
+to 80% faster.
 
 With `block`, an `int` block whose values lie within -32,767 to 32,767 is
 stored as a short block, which takes a quarter of the bytes of a number
