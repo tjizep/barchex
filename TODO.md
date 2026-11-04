@@ -63,13 +63,10 @@ and privacy policies are built.
   values fit in 16 bits as a short block of `i16` values, a quarter of the
   bytes of an f64 block. On 409,600 rows that shrank a 0 to 99 field from
   3.3 MB to 0.83 MB, and a filter or `groupBy` on it ran 15% to 60% faster.
-  The rest:
-  - The rows sizing takes 2 bytes per row for `int` fields, so a short
-    block reaches the target size with four times the rows. Decide first
-    how a block that widens to f64 then stays within the value limit:
-    split it, or size `int` blocks for f64 and accept small short blocks.
-  - `i32` blocks for wider whole numbers, and `i8` blocks if the `i16`
-    savings justify a third width.
+  The rows sizing takes 2 bytes per row for `int` fields, and a block that
+  widens to f64 past the value limit splits into parts. The rest: `i32`
+  blocks for wider whole numbers, which would split less often, and `i8`
+  blocks if the `i16` savings justify a third width.
 - **Dictionary text blocks.** Tables with `block` store a text block whose
   values repeat as a dictionary block: its distinct values sorted by byte,
   then an `i8` code per slot, or an `i16` code past 255 values. A
@@ -77,10 +74,9 @@ and privacy policies are built.
   which raised `groupBy` with 10 values by 25% on `"htap"` blocks and 65%
   on `"scan"` blocks. With 1,000 values on `"scan"` blocks, `i16` codes
   cut the field from 4.9 MB to 2.0 MB and raised `groupBy` by 30% to 80%.
-  `min`, `max` and `order` with `limit` compare codes too. The rest: the
-  rows sizing takes the code width plus the dictionary's share of the
-  block. Today it sizes every text field as plain text, so dictionary
-  blocks hold fewer bytes than the target.
+  `min`, `max` and `order` with `limit` compare codes too. The rows sizing
+  takes the code width plus the dictionary's share of the block, and a
+  plain text block past the value limit splits into parts.
 
   Each block keeps its own dictionary, so a new value re-sorts and recodes
   one block, which a write already rewrites, and writers to different

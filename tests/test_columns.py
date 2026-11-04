@@ -158,6 +158,15 @@ for _, field in { "region", "state", "score", "paid", "raw", "rank", "note", "at
         return out
     end
 end
+-- the ends of the order of notes, and the rows of one
+function cases.notes(t)
+    local out = {}
+    for _, dir in { "asc", "desc" } do
+        out[#out + 1] = table.concat(rows_text(t:query():order("note", dir):limit(3):all()), ";")
+    end
+    out[#out + 1] = t:query():where("note", "=", "short"):count()
+    return out
+end
 function cases.countIds(t) return t:query():where("id", ">", 1000):count() end
 function cases.countExpr(t) return t:query():where("qty + 1 > 3"):count() end
 function cases.aggregate(t) return row_text(t:query():aggregate(SPEC)) end
@@ -466,7 +475,8 @@ end
 
 -- how fields' blocks are stored, region's and note's by default: "d" for
 -- dictionary blocks with int8 codes, "D" with int16 codes, "t" for plain
--- text, "h" for short and "n" for f64 numbers
+-- text, "h" for short and "n" for f64 numbers, and after the letter the
+-- parts of a split block
 function steps.kinds(_, ...)
     local lay = require("lent.LAYOUT")
     local kc = require("lent.KEYCODEC")
@@ -482,12 +492,15 @@ function steps.kinds(_, ...)
                 local tags = {}
                 for i, v in values do
                     -- block keys, past the overflow keys of long values
-                    if string.sub(keys[i], #p + 1, #p + 1) == "i" then
+                    -- and before the keys of parts past the first
+                    if string.sub(keys[i], #p + 1, #p + 1) == "i"
+                        and not string.find(keys[i], "/", #p + 1, true) then
                         local tag = string.sub(v, 2, 2)
                         if tag == "d" and string.unpack("<I4", v, 9) > 255 then
                             tag = "D"
                         end
-                        tags[tag] = true
+                        local parts = string.unpack("<I2", v, 3)
+                        tags[tag .. (if parts > 0 then parts else "")] = true
                     end
                 end
                 local list = {}
@@ -498,6 +511,36 @@ function steps.kinds(_, ...)
         end
     end
     return table.concat(out, " ")
+end
+
+-- the keys of Sale's split blocks past their first part
+function steps.parts()
+    local kc = require("lent.KEYCODEC")
+    local p = "lent.c" .. kc.encode("string", "sale")
+    local n = 0
+    for _, k in barch.store.range(p, kc.after(p), 10000) do
+        if string.find(k, "/", #p + 1, true) then n += 1 end
+    end
+    return n
+end
+
+-- rows `from` to `to` with a distinct note of `width` digits each
+function steps.notes(c, tname, from, to, width)
+    local rows = {}
+    for i = tonumber(from), tonumber(to) do
+        rows[#rows + 1] = { id = i, region = "n", qty = 1,
+                            note = string.format("%0" .. width .. "d", i) }
+    end
+    c[tname]:createMany(rows)
+    return #rows
+end
+
+-- clears the notes of rows `from` to `to`
+function steps.clear_notes(c, tname, from, to)
+    for i = tonumber(from), tonumber(to) do
+        c[tname]:update(i, {}, { "note" })
+    end
+    return "ok"
 end
 
 -- the rows the catalog keeps for Sale and some of its fields
@@ -564,9 +607,9 @@ end
 
 
 # Sale with blocks of 1024 rows and no header, and with the smallest blocks
-# a `block` option asks for, whose field blocks hold 64 or 128 rows. Tests
-# of large blocks use `large`, whose text blocks hold 1024 rows.
-BLOCKS = {"fixed": "nil", "small": "1024", "large": "16384"}
+# a `block` option asks for, whose field blocks hold 128 to 512 rows. Tests
+# of large blocks use `large`, whose text blocks hold 2048 rows.
+BLOCKS = {"fixed": "nil", "small": "1024", "large": "16384", "most": "262144"}
 MODES = ("optimistic", "pessimistic")
 
 
@@ -581,6 +624,11 @@ def large(client, request):
     return start(client, request, request.param, "large")
 
 
+@pytest.fixture(params=MODES)
+def most(client, request):
+    return start(client, request, request.param, "most")
+
+
 def start(client, request, mode, block):
     setup(client)
     install(client, "lent", "VEC", "lent/vec.luau")
@@ -590,7 +638,7 @@ def start(client, request, mode, block):
 
     def call(step, *a):
         return client.execute_command("CALLF", "COLS", step, mode, *a)
-    call.block = block
+    call.block, call.mode = block, mode
     return call
 
 
@@ -802,9 +850,10 @@ def test_the_catalog_keeps_block_rows(run):
     if run.block == "fixed":
         assert got == ["nil", "nil", "region=nil", "qty=nil", "state=nil", "raw=nil"]
     else:
-        # 1024 bytes: 1024 presence bytes, 128 f64s, 64 lengths and
-        # values of up to 12 bytes, or 128 of up to 4 for the enum
-        assert got == ["1024", "1024", "region=64", "qty=128", "state=128", "raw=64"]
+        # 1024 bytes: 1024 presence bytes, 512 int16s, and dictionaries
+        # of 128 rows with half of them values of up to 12 bytes, or of
+        # 256 rows with values of up to 4 bytes for the enum
+        assert got == ["1024", "1024", "region=128", "qty=512", "state=256", "raw=128"]
 
 
 def test_block_options_refused(run):
@@ -821,12 +870,12 @@ def test_block_options_refused(run):
 def test_field_blocks_leave_with_their_last_row(run):
     if run.block == "fixed":
         pytest.skip("each field block of a fixed table spans its presence block")
-    # ids 1 and 100 share a presence block and an int block, and lie in
-    # two text blocks of 64 rows
-    for pk in (1, 100):
+    # ids 1 and 200 share a presence block and an int block of 512 rows,
+    # and lie in two text blocks of 128 rows
+    for pk in (1, 200):
         write_both(run, "create", pk, {"region": "n", "qty": 1, "note": "n%d" % pk})
     assert json.loads(run("keys")) == {"present": 1, "fields": 6, "rows": 0}
-    write_both(run, "delete", 100, {})
+    write_both(run, "delete", 200, {})
     assert json.loads(run("keys")) == {"present": 1, "fields": 4, "rows": 0}
     same(run, "ask", "all")
 
@@ -884,12 +933,12 @@ def test_repeated_text_uses_dictionary_blocks(run):
     assert run("kinds") == "region=d note=t"
     # more distinct values than half its rows turn a block plain, and
     # fewer turn it back
-    for pk in range(10, 43):
+    for pk in range(10, 80):
         write_both(run, "update", pk, {"region": "q%02d" % pk})
     assert run("kinds") == "region=dt note=t"
     for case in cases:
         same(run, "ask", case)
-    for pk in range(10, 43):
+    for pk in range(10, 80):
         write_both(run, "update", pk, {"region": "q"})
     assert run("kinds") == "region=d note=t"
     # the last row holding "m" leaves the dictionary with it
@@ -903,8 +952,12 @@ def test_repeated_text_uses_dictionary_blocks(run):
 
 def test_dictionary_blocks_past_255_values_take_int16_codes(large):
     run = large
-    # 300 regions in 1,024-row blocks
-    assert run("spread", "Sale", "1", "1500", "300") == run("spread", "Plain", "1", "1500", "300")
+    # 300 regions in 2,048-row blocks, in calls that each stay under the
+    # function deadline
+    for start in range(1, 3001, 500):
+        end = str(start + 499)
+        assert run("spread", "Sale", str(start), end, "300") == 500
+        assert run("spread", "Plain", str(start), end, "300") == 500
     assert run("kinds", "region") == "region=D"
     cases = ("manyRegions", "byManyRegions", "regionOps", "vRegion", "byRegion", "grouped",
              "vAll", "vByQty", "vByState", "o_region", "o_state")
@@ -916,14 +969,17 @@ def test_dictionary_blocks_past_255_values_take_int16_codes(large):
     for case in cases:
         same(run, "ask", case)
     # emptying regions in the second block takes it back to int8 codes
-    for pk in range(1024, 1501):
+    for pk in range(2048, 3001):
         if pk % 300 >= 200:
             write_both(run, "update", pk, {"region": "r000"})
     assert run("kinds", "region") == "region=Dd"
     for case in cases:
         same(run, "ask", case)
-        answers = same(run, "paths", case)
-        assert len(set(answers)) == 1, (case, answers)
+        # every row's state is nil here, and three runs of o_state over
+        # 3,000 rows in one call can pass the function deadline
+        if case != "o_state":
+            answers = same(run, "paths", case)
+            assert len(set(answers)) == 1, (case, answers)
 
 
 def test_small_whole_numbers_use_short_blocks(run):
@@ -967,3 +1023,75 @@ def test_small_whole_numbers_use_short_blocks(run):
         same(run, "ask", case)
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
+
+
+
+def test_int_blocks_split_past_the_value_limit(most):
+    run = most
+    # 131,072 int16s fit in one key; as f64s they take 1,048,584 bytes,
+    # which split into five parts
+    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
+    assert run("kinds", "qty") == "qty=h"
+    cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value", "all")
+    # values either side of the first part's end, and in the last part
+    write_both(run, "update", 9, {"qty": 40000})
+    for pk, qty in ((32766, 5), (32767, -70000), (131071, 3)):
+        write_both(run, "create", pk, {"region": "n", "qty": qty})
+    assert run("kinds", "qty") == "qty=n5"
+    assert run("parts") == 4
+    write_both(run, "update", 131071, {"qty": 80000})
+    for pk in (9, 32766, 32767, 131071):
+        same(run, "get", str(pk))
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+    # the block turns short and whole again when its last value past
+    # +-32767 goes
+    for pk in (9, 32767, 131071):
+        write_both(run, "update", pk, {"qty": 2})
+    assert run("kinds", "qty") == "qty=h"
+    assert run("parts") == 0
+    for case in cases:
+        same(run, "ask", case)
+    # a block that starts with a value past +-32767 starts split, and goes
+    # with its parts when its last row leaves
+    write_both(run, "create", 200000, {"region": "n", "qty": 90000})
+    assert run("kinds", "qty") == "qty=hn5"
+    assert run("parts") == 4
+    same(run, "get", "200000")
+    write_both(run, "delete", 200000, {})
+    assert run("parts") == 0
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+
+
+def test_text_blocks_split_past_the_value_limit(most):
+    run = most
+    if run.mode == "pessimistic":
+        pytest.skip("filling a block of this size takes a while; one mode covers it")
+    # 32,768-row blocks of 40-byte notes, which keep 33 bytes each and turn
+    # their block plain, pass the limit after about 11,900 rows
+    for lo in range(1, 12001, 400):
+        assert run("notes", "Sale", str(lo), str(lo + 399), "40") == 400
+        assert run("notes", "Plain", str(lo), str(lo + 399), "40") == 400
+    assert run("kinds", "note") == "note=t3"
+    assert run("parts") == 2
+    write_both(run, "update", 11000, {"note": "short"})
+    write_both(run, "update", 12, {"note": "x" * 50})
+    for pk in ("1", "12", "8000", "11000", "12000"):
+        same(run, "get", pk)
+    for case in ("notes", "aggregate", "count"):
+        same(run, "ask", case)
+    answers = same(run, "paths", "aggregate")
+    assert len(set(answers)) == 1, answers
+    # with fewer values the block fits in one key again
+    assert run("clear_notes", "Sale", "1", "100") == run("clear_notes", "Plain", "1", "100")
+    assert run("kinds", "note") == "note=t"
+    assert run("parts") == 0
+    for case in ("notes", "aggregate", "count"):
+        same(run, "ask", case)
+    answers = same(run, "paths", "aggregate")
+    assert len(set(answers)) == 1, answers
