@@ -202,8 +202,9 @@ schema`.
 With `block`, a text block whose values repeat is stored as a dictionary
 block. Each slot holds a code: 1 byte while the block holds up to 255
 distinct values, and 2 bytes past that. The codes follow the sorted order
-of the values, so a filter compares codes and a `groupBy` groups them,
-without reading the strings of each row. A new text block starts as a
+of the values, so a filter compares codes, a `groupBy` groups them, and
+`min` and `max` compare them, without reading the strings of each row.
+A new text block starts as a
 dictionary block. It becomes a plain text block when a write would give
 it more distinct values than half its rows or a value longer than 32
 bytes. It becomes a dictionary block again when an update or delete that
@@ -306,8 +307,11 @@ The loop uses `barch.vec` when the call also meets these:
   string.
 - The call has at most one `groupBy` key.
 - Each aggregate counts rows, or counts, sums, averages or finds the least
-  or greatest of an `int`, `float`, `time` or `decimal` field. A `decimal`
-  sum or average, and a `distinct` aggregate, run the Luau loops.
+  or greatest of an `int`, `float`, `time` or `decimal` field, or finds the
+  least or greatest of a `string`, `enum` or `bytes` field. A `decimal` sum
+  or average, and a `distinct` aggregate, run the Luau loops. `min` and
+  `max` of text compare codes in dictionary blocks, and run the Luau loops
+  on the rows of a plain text block.
 - No key or aggregate names `id`, and no filter, key or aggregate names a
   `bool` field or a field with a `:default()`.
 

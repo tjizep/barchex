@@ -1153,7 +1153,8 @@ end
 
 -- Whether barch.vec can run every step of a fold: conditions that compare
 -- ids or plain numbers with a number or plain text with a string, at most
--- one plain key, and count, sum, avg, min and max of plain numbers or rows.
+-- one plain key, count, sum, avg, min and max of plain numbers or rows, and
+-- min and max of plain text.
 local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
     for _, c in conds do
         local kind = type(c.value)
@@ -1166,7 +1167,9 @@ local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
         return false
     end
     for _, a in aggs do
-        if a.distinct or a.scale or (a.source and not plain(a.source)) then
+        local c = a.source
+        if a.distinct or a.scale or (c and not plain(c)
+                and not ((a.fn == "min" or a.fn == "max") and plain_text(c))) then
             return false
         end
     end
@@ -1233,6 +1236,13 @@ function start_fold(t: any, fields: any, spec: any): any
         job.vec, job.gis, job.capacity = vec, if #keys == 0 then { 1 } else {}, 0
         job.presence = buffer.create(g.pbase + g.rows)
         job.selb, job.gidb = buffer.create(unit * 4), buffer.create(unit * 4)
+        for _, a in aggs do
+            if a.source and a.source.text then
+                -- see fold_text
+                a.text, a.tcap = true, 16
+                a.trecs = new_records(16)
+            end
+        end
         -- text sources whose order or groups a long value would change
         local texts = {}
         for _, c in conds do
@@ -1583,6 +1593,19 @@ local function add_record(a: any, r: buffer, at: number, gi: number)
     end
 end
 
+-- The group of id `id` of the grouper of dictionary codes.
+local function code_group(job: any, id: number): number
+    local code = job.codes:key(id)
+    local value = if code == nil then nil else job.cmap[code - job.cnil]
+    local k = if value == nil then NIL_KEY else value
+    local gi = job.tree[k]
+    if gi == nil then
+        gi = new_group(job, { value })
+        job.tree[k] = gi
+    end
+    return gi
+end
+
 -- Adds the records that dictionary blocks folded by code to the job's
 -- groups, by the values the codes stood for, and clears them. Blocks with
 -- the same dictionary share one set of records, so this runs when the
@@ -1592,17 +1615,9 @@ local function flush_codes(job: any)
     if not size or size == 0 then
         return
     end
-    local g, dict, tree, none = job.codes, job.cmap, job.tree, job.cnil
     job.cdict = nil
     for id = 0, size - 1 do
-        local code = g:key(id)
-        local value = if code == nil then nil else dict[code - none]
-        local k = if value == nil then NIL_KEY else value
-        local gi = tree[k]
-        if gi == nil then
-            gi = new_group(job, { value })
-            tree[k] = gi
-        end
+        local gi = code_group(job, id)
         for _, a in job.aggs do
             add_record(a, a.crecs, id * 32, gi)
         end
@@ -1611,6 +1626,39 @@ local function flush_codes(job: any)
         clear_records(a.crecs, 0, size)
     end
     job.csize = 0
+end
+
+-- Adds text aggregate a over the chunk's candidates `sel, n` to its groups'
+-- running values, when its source's loaded block is a dictionary block.
+-- Codes follow the order of the values, so one fold of the codes finds each
+-- group's least and greatest code, and only those become text. gids holds
+-- the candidates' grouper ids, of which `ids` are in use; gis maps id + 1 to
+-- its group, or is nil when the ids are those of the dictionary key's codes.
+local function fold_text(job: any, a: any, sel: buffer?, n: number, gids: buffer?, ids: number,
+                         gis: { number }?)
+    local c = a.source
+    if not c.located then
+        locate(c)
+    end
+    if ids > a.tcap then
+        a.tcap = math.max(ids, a.tcap * 2)
+        a.trecs = new_records(a.tcap)
+    end
+    local r: buffer, cw = a.trecs, c.cw
+    job.vec.fold(code_kind(cw), c.b, DHEAD + c.off * cw, cw, c.cnil, sel, n, gids, r)
+    local min, vals, dict, none = a.fn == "min", a.vals, c.dict, c.cnil
+    local at = if min then 16 else 24
+    for id = 0, ids - 1 do
+        if buffer.readf64(r, id * 32) > 0 then
+            local w = dict[buffer.readf64(r, id * 32 + at) - none]
+            local gi = if gis then gis[id + 1] else code_group(job, id)
+            local acc = vals[gi]
+            if acc == nil or (if min then w < acc else acc < w) then
+                vals[gi] = w
+            end
+        end
+    end
+    clear_records(r, 0, ids)
 end
 
 -- fold_chunk with barch.vec: the selection, group ids and running values
@@ -1636,19 +1684,28 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     end
     job.last = first + (if sel then buffer.readu32(sel, (n - 1) * 4) else n - 1)
     load_sources(job, first)
-    for _, c in job.texts do
-        local sp = c.spec
-        if c.b and buffer.readu32(c.b, sp.over) > 0 then
-            local slots = job.sel
-            if sel then
-                for i = 1, n do
-                    slots[i] = buffer.readu32(sel, (i - 1) * 4)
-                end
-            else
-                table.move(ALL_SLOTS, 1, n, 1, slots)
+    local function in_luau(): boolean
+        local slots = job.sel
+        if sel then
+            for i = 1, n do
+                slots[i] = buffer.readu32(sel, (i - 1) * 4)
             end
-            luau_rows(job, slots, n, sel == nil)
-            return more
+        else
+            table.move(ALL_SLOTS, 1, n, 1, slots)
+        end
+        luau_rows(job, slots, n, sel == nil)
+        return more
+    end
+    for _, c in job.texts do
+        if c.b and buffer.readu32(c.b, c.spec.over) > 0 then
+            return in_luau()
+        end
+    end
+    for _, ag in job.aggs do
+        -- plain text values compare in Luau
+        local c = ag.text and ag.source
+        if c and c.b and not c.coded then
+            return in_luau()
         end
     end
     for _, cd in job.conds do
@@ -1693,6 +1750,8 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         end
     end
     local gids: buffer? = nil
+    -- the grouper ids in use and their groups, for fold_text
+    local ids, gis = 1, job.gis
     local k = job.keys[1]
     local coded = k and k.coded
     if coded then
@@ -1707,6 +1766,7 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         end
         gids = job.gidb
         job.csize = job.codes:ids(k.b, DHEAD + k.off * k.cw, k.cw, k.cnil, sel, n, gids)
+        ids, gis = job.csize, nil
         if job.csize > job.ccap then
             -- int16 codes number more groups than the records hold
             local cap = math.max(job.csize, job.ccap * 2)
@@ -1730,6 +1790,7 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         if size > #lane.gis then
             new_ids(job, size, lane)
         end
+        ids, gis = size, lane.gis
     elseif k then
         local b, at = k.b, k.at
         if b == nil then
@@ -1742,6 +1803,7 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         if size > #job.gis then
             new_ids(job, size)
         end
+        ids = size
     else
         if #job.records == 0 then
             new_group(job, {})
@@ -1752,7 +1814,11 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     for _, ag in job.aggs do
         local c = ag.source
         local recs = if coded then ag.crecs elseif k and k.short then ag.srecs else ag.recs
-        if c == nil then
+        if ag.text then
+            if c.b ~= nil then
+                fold_text(job, ag, sel, n, gids, ids, gis)
+            end
+        elseif c == nil then
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
         elseif c.short then
             v.fold("i16", c.b, SHEAD + c.off * 2, 2, NIL_SHORT, sel, n, gids, recs)

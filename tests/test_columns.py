@@ -179,11 +179,13 @@ function cases.byId(t)
 end
 
 -- folds that barch.vec runs: conditions, keys and aggregates on fields
--- without a default, other than bool, decimal and distinct ones
+-- without a default, other than bool, decimal and distinct ones; min and
+-- max of text fold the codes of dictionary blocks
 local STATS = {
     n = { fn = "count" }, scored = { fn = "count", field = "score" },
     sum = { fn = "sum", field = "score" }, mean = { fn = "avg", field = "score" },
     low = { fn = "min", field = "score" }, high = { fn = "max", field = "at" },
+    first = { fn = "min", field = "state" }, last = { fn = "max", field = "region" },
 }
 function cases.vAll(t) return row_text(t:query():aggregate(STATS)) end
 function cases.vIds(t) return row_text(t:query():where("id > 5 and id <= 1500"):aggregate(STATS)) end
@@ -205,6 +207,13 @@ end
 -- chunks start partway into its blocks
 function cases.vMixed(t)
     return rows_text(t:query():where("note", ">", "note1"):groupBy("state"):aggregate(STATS))
+end
+-- min and max of text in plain blocks, some with long values, which fold
+-- in Luau, beside one of a dictionary block
+function cases.vTextEnds(t)
+    return rows_text(t:query():where("score", ">", 1):groupBy("qty"):aggregate({
+        n = { fn = "count" }, lo = { fn = "min", field = "raw" }, hi = { fn = "max", field = "note" },
+        top = { fn = "max", field = "state" } }))
 end
 function cases.vMixedText(t)
     return t:query():where("raw", ">=", "by"):where("state", "=", "done"):count()
@@ -650,7 +659,7 @@ def test_column_answers_what_binary_answers(run, seed):
 
 VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
                 "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged",
-                "vRegion", "regionOps"]
+                "vRegion", "regionOps", "vTextEnds"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -829,7 +838,8 @@ def test_repeated_text_uses_dictionary_blocks(run):
     assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
     # three regions repeat; notes differ in nearly every row
     assert run("kinds") == "region=d note=t"
-    cases = ("regionOps", "vRegion", "byRegion", "grouped", "region")
+    cases = ("regionOps", "vRegion", "byRegion", "grouped", "region", "vAll", "vByQty",
+             "vByState")
     for case in cases:
         same(run, "ask", case)
     # values before, between and after the stored ones, then a long one,
@@ -866,7 +876,8 @@ def test_dictionary_blocks_past_255_values_take_int16_codes(large):
     # 300 regions in 1,024-row blocks
     assert run("spread", "Sale", "1", "1500", "300") == run("spread", "Plain", "1", "1500", "300")
     assert run("kinds", "region") == "region=D"
-    cases = ("manyRegions", "byManyRegions", "regionOps", "vRegion", "byRegion", "grouped")
+    cases = ("manyRegions", "byManyRegions", "regionOps", "vRegion", "byRegion", "grouped",
+             "vAll", "vByQty", "vByState")
     for case in cases:
         same(run, "ask", case)
     # a value before, among and after the others moves the codes
