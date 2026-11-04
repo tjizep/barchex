@@ -26,11 +26,13 @@
 --   short      an int field's block in a table with `block` while its
 --              values fit: an 8-byte header (1, "h", 0, the rows), then an
 --              int16 per slot, -32768 for nil. A new int block starts short
---              when its first value fits, and becomes a number block for
---              good when a write gives it a value outside +-32767.
+--              when its first value fits, becomes a number block when a
+--              write gives it a value outside +-32767, and turns short again
+--              when a write removes the last such value.
 --   text       for string, enum, json and bytes: a 24-byte header (1, "t",
 --              0, the rows, the bytes in use, the slots in use, the values
---              kept whole elsewhere, 0), a uint32 per slot, then the values
+--              kept whole elsewhere, and at least how many distinct values
+--              it holds, 0 when unknown), a uint32 per slot, then the values
 --              in slot order. A slot's uint32 is its length plus 1, and 0
 --              for nil. A value longer than CAP bytes keeps its first
 --              CAP + 1 bytes here and the whole value at LAYOUT's overflow
@@ -45,9 +47,11 @@
 --              where code i - 128 is the i-th value and -128 is nil; a
 --              larger one takes int16 codes, where code i - 32768 is the
 --              i-th value and -32768 is nil. Codes follow the order of the
---              values. A new text block starts as a dictionary, and becomes
---              plain text for good when it would hold more than dict_most()
---              values or a value longer than CAP.
+--              values. A new text block starts as a dictionary, becomes
+--              plain text when it would hold more than dict_most() values
+--              or a value longer than CAP, and turns back into a dictionary
+--              when a write that replaces or clears a value leaves it fit
+--              for one.
 --
 -- A field with no key has no value in that block, so a new field costs
 -- nothing to add. A number field changes in place. A text field rewrites
@@ -155,6 +159,23 @@ local function widen(b: buffer, rows: number, out: buffer?): buffer
     return w
 end
 
+-- The short block holding the values of number block b, of `rows` slots
+-- from byte `data`, or nil when a value doesn't fit in a short block.
+local function narrow(b: buffer, rows: number, data: number): buffer?
+    local h = header(SHEAD + rows * 2, "h", rows)
+    for s = 0, rows - 1 do
+        local x = buffer.readf64(b, data + s * 8)
+        if x ~= x then
+            buffer.writei16(h, SHEAD + s * 2, NIL_SHORT)
+        elseif fits_short(x) then
+            buffer.writei16(h, SHEAD + s * 2, x)
+        else
+            return nil
+        end
+    end
+    return h
+end
+
 local LEGACY_NUMBER = { rows = LEGACY, data = 0,
                         empty = empty_numbers(0, LEGACY, buffer.create(LEGACY * 8)) }
 local LEGACY_TEXT = { rows = LEGACY, text = true, used = 0, slots = 4, lens = 8,
@@ -165,8 +186,8 @@ local LEGACY_TEXT = { rows = LEGACY, text = true, used = 0, slots = 4, lens = 8,
 -- lengths and the values start and the longest value kept whole.
 local function new_spec(rows: number, text: boolean, int: boolean): any
     if text then
-        return { rows = rows, text = true, used = 8, slots = 12, over = 16, lens = 24,
-                 vals = 24 + rows * 4, cap = CAP, head = true }
+        return { rows = rows, text = true, used = 8, slots = 12, over = 16, distinct = 20,
+                 lens = 24, vals = 24 + rows * 4, cap = CAP, head = true }
     end
     local short
     if int then
@@ -1983,8 +2004,8 @@ end
 local SHORT_CELL = buffer.create(2)
 
 -- Stores number `x` in `slot` of number block k, nil as NaN, or as
--- NIL_SHORT in a short block.
-local function put_number(sp: any, k: string, slot: number, x: number?)
+-- NIL_SHORT in a short block. `was` is the value x replaces.
+local function put_number(sp: any, k: string, slot: number, x: number?, was: number?)
     if sp.short then
         local short = short_block(k)
         if short == nil then
@@ -2000,8 +2021,18 @@ local function put_number(sp: any, k: string, slot: number, x: number?)
                 barch.store.setBufferAt(k, SHORT_CELL, SHEAD + slot * 2)
                 return
             end
-            -- a value outside +-32767 makes it a number block for good
+            -- a value outside +-32767 makes it a number block
             barch.store.setBufferAt(k, widen(barch.store.getBufferAt(k, 0), sp.rows), 0)
+        elseif fits_short(x) and not fits_short(was) then
+            -- the block turns short again when x replaces its last value
+            -- outside +-32767
+            local b = barch.store.getBufferAt(k, 0)
+            buffer.writef64(b, sp.data + slot * 8, x or NAN)
+            local h = narrow(b, sp.rows, sp.data)
+            if h then
+                barch.store.set(k, buffer.tostring(h))
+                return
+            end
         end
         barch.store.setF64At(k, x or NAN, sp.data + slot * 8)
         return
@@ -2030,6 +2061,7 @@ local function new_text(sp: any, slot: number, text: string, over: number): stri
     buffer.writeu32(b, sp.slots, slot + 1)
     if sp.over then
         buffer.writeu32(b, sp.over, over)
+        buffer.writeu32(b, sp.distinct, 1)
     end
     buffer.writeu32(b, sp.lens + slot * 4, #text + 1)
     buffer.writestring(b, sp.vals, text)
@@ -2038,8 +2070,8 @@ end
 
 -- `stored` with `text` at slot, or nil at slot for text nil, and `dover`
 -- added to the values kept whole elsewhere.
-local function replace_text(sp: any, stored: string, slot: number, text: string?,
-                            dover: number): string
+local function replaced(sp: any, stored: string, slot: number, text: string?,
+                        dover: number): buffer
     local old = buffer.fromstring(stored)
     local at = text_start(sp, old, slot)
     local was = buffer.readu32(old, sp.lens + slot * 4)
@@ -2058,24 +2090,34 @@ local function replace_text(sp: any, stored: string, slot: number, text: string?
         buffer.writestring(b, at, text)
     end
     buffer.copy(b, at + size, old, at + gone, buffer.len(old) - at - gone)
-    return buffer.tostring(b)
+    return b
+end
+
+local function replace_text(sp: any, stored: string, slot: number, text: string?,
+                            dover: number): string
+    return buffer.tostring(replaced(sp, stored, slot, text, dover))
 end
 
 -- A plain text block holding vals[s + 1] at each slot s, with `over`
 -- values kept whole elsewhere.
 local function plain_block(sp: any, vals: { [number]: string }, over: number): string
-    local used, slots = 0, 0
+    local used, slots, seen, distinct = 0, 0, {}, 0
     for s = 0, sp.rows - 1 do
         local v = vals[s + 1]
         if v then
             used += #v
             slots = s + 1
+            if not seen[v] then
+                seen[v] = true
+                distinct += 1
+            end
         end
     end
     local b = header(sp.vals + used, "t", sp.rows)
     buffer.writeu32(b, sp.used, used)
     buffer.writeu32(b, sp.slots, slots)
     buffer.writeu32(b, sp.over, over)
+    buffer.writeu32(b, sp.distinct, distinct)
     local at = sp.vals
     for s = 0, slots - 1 do
         local v = vals[s + 1]
@@ -2086,6 +2128,46 @@ local function plain_block(sp: any, vals: { [number]: string }, over: number): s
         end
     end
     return buffer.tostring(b)
+end
+
+-- The dictionary block holding the values of plain text block b, or nil
+-- when it keeps a value whole elsewhere or holds more than dict_most()
+-- distinct values; then also how many distinct values it holds, when that
+-- was counted.
+local function as_dict(sp: any, b: buffer): (string?, number?)
+    if buffer.readu32(b, sp.over) ~= 0 then
+        return nil
+    end
+    local rows = sp.rows
+    local vals, index, dict = {}, {}, {}
+    local at = sp.vals
+    for s = 0, buffer.readu32(b, sp.slots) - 1 do
+        local len = buffer.readu32(b, sp.lens + s * 4)
+        if len > 0 then
+            local v = buffer.readstring(b, at, len - 1)
+            at += len - 1
+            if index[v] == nil then
+                index[v] = true
+                dict[#dict + 1] = v
+            end
+            vals[s] = v
+        end
+    end
+    if #dict > dict_most(rows) then
+        return nil, #dict
+    end
+    table.sort(dict)
+    for i, v in dict do
+        index[v] = i
+    end
+    local cw = width_of(#dict)
+    local none = nil_code(cw)
+    local codes = buffer.create(rows * cw)
+    for s = 0, rows - 1 do
+        local v = vals[s]
+        write_code(codes, s * cw, cw, if v then index[v] + none else none)
+    end
+    return dict_block(rows, codes, cw, dict)
 end
 
 -- Dictionary block `stored` with `text` at slot, or nil at slot for text
@@ -2151,7 +2233,23 @@ local function text_put(sp: any, stored: string?, slot: number, text: string?, l
     if sp.head and string.byte(stored, 2) == DTAG then
         return dict_put(sp, stored, slot, text, long)
     end
-    return replace_text(sp, stored, slot, text, dover)
+    local b = replaced(sp, stored, slot, text, dover)
+    -- only a write that replaces or clears a value can leave fewer distinct
+    -- values or none kept whole elsewhere, and it removes at most one
+    -- distinct value, so the block counts its values only when the least
+    -- it can hold reaches dict_most()
+    if sp.head and string.unpack("<I4", stored, sp.lens + slot * 4 + 1) ~= 0 then
+        local least = buffer.readu32(b, sp.distinct) - 1
+        if not long and least <= dict_most(sp.rows) then
+            local dict, n = as_dict(sp, b)
+            if dict then
+                return dict
+            end
+            least = n or least
+        end
+        buffer.writeu32(b, sp.distinct, math.max(least, 0))
+    end
+    return buffer.tostring(b)
 end
 
 -- The write that stores `text` at slot of text block k, nil for a nil value,
@@ -2259,7 +2357,8 @@ function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?
                 if f.kind == "bool" and v ~= nil then
                     x = if v then 1 else 0
                 end
-                writes[#writes + 1] = function() put_number(sp, k, fs, x) end
+                local was = old and old[f.name]
+                writes[#writes + 1] = function() put_number(sp, k, fs, x, was) end
             end
         end
     end
@@ -2298,7 +2397,7 @@ function remove(t: any, fields: any, pk: number, old: any, lock: boolean?)
                     put()
                 end
             else
-                put_number(sp, k, fs, nil)
+                put_number(sp, k, fs, nil, was)
             end
         end
     end
@@ -2372,14 +2471,43 @@ function selftest(): (boolean, string?)
         or string.unpack("<I4", long, sp.over + 1) ~= 1 then
         return false, "dictionary block with a long value"
     end
+    -- clearing the long value makes a dictionary again
+    long = text_put(sp, long, 3, nil, false, -1)
+    if string.byte(long, 2) ~= DTAG or text_at(sp, long, 0) ~= "z"
+        or text_at(sp, long, 1) ~= "z" or text_at(sp, long, 3) ~= nil then
+        return false, "dictionary block after a long value"
+    end
     for s = 0, dict_most(64) - 1 do
         b = text_put(sp, b, s, "v" .. s, false, 0)
     end
     local full = string.byte(b, 2) == DTAG
     b = text_put(sp, b, dict_most(64), "w", false, 0)
     if not full or string.byte(b, 2) ~= string.byte("t") or text_at(sp, b, 5) ~= "v5"
-        or text_at(sp, b, dict_most(64)) ~= "w" then
+        or text_at(sp, b, dict_most(64)) ~= "w"
+        or string.unpack("<I4", b, sp.distinct + 1) ~= dict_most(64) + 1 then
         return false, "dictionary block past its values"
+    end
+    -- a plain block whose distinct values fall to dict_most() is a
+    -- dictionary again; adding to an empty slot leaves it plain
+    b = text_put(sp, b, dict_most(64) + 1, "v1", false, 0)
+    local still = string.byte(b, 2) == string.byte("t")
+    b = text_put(sp, b, dict_most(64), "v0", false, 0)
+    if not still or string.byte(b, 2) ~= DTAG or text_at(sp, b, 5) ~= "v5"
+        or text_at(sp, b, dict_most(64)) ~= "v0" or text_at(sp, b, dict_most(64) + 1) ~= "v1"
+        or string.unpack("<I4", b, 9) ~= dict_most(64) then
+        return false, "dictionary block from plain text"
+    end
+    -- a number block whose values all fit makes a short block
+    local nb = header(8 + 4 * 8, "n", 4)
+    for i, x in { 3, NAN, -32767, 40000 } do
+        buffer.writef64(nb, 8 + (i - 1) * 8, x)
+    end
+    local wide_n = narrow(nb, 4, 8) == nil
+    buffer.writef64(nb, 8 + 3 * 8, 32767)
+    local h = narrow(nb, 4, 8)
+    if not wide_n or h == nil or not is_short(h) or buffer.readi16(h, SHEAD) ~= 3
+        or buffer.readi16(h, SHEAD + 2) ~= NIL_SHORT or buffer.readi16(h, SHEAD + 6) ~= 32767 then
+        return false, "short block from a number block"
     end
     -- past 255 values a dictionary block takes int16 codes, and int8 codes
     -- again when its values fall back to 255

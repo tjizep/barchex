@@ -839,6 +839,19 @@ def test_repeated_text_uses_dictionary_blocks(run):
         for case in cases:
             same(run, "ask", case)
     assert run("kinds") == "region=dt note=t"
+    # replacing the long value makes its block a dictionary again
+    write_both(run, "update", 70, {"region": "x"})
+    assert run("kinds") == "region=d note=t"
+    # more distinct values than half its rows turn a block plain, and
+    # fewer turn it back
+    for pk in range(10, 43):
+        write_both(run, "update", pk, {"region": "q%02d" % pk})
+    assert run("kinds") == "region=dt note=t"
+    for case in cases:
+        same(run, "ask", case)
+    for pk in range(10, 43):
+        write_both(run, "update", pk, {"region": "q"})
+    assert run("kinds") == "region=d note=t"
     # the last row holding "m" leaves the dictionary with it
     write_both(run, "update", 6, {"region": "n"})
     write_both(run, "delete", 7, {})
@@ -893,6 +906,20 @@ def test_small_whole_numbers_use_short_blocks(run):
         for case in cases:
             same(run, "ask", case)
     assert run("kinds", "qty") == "qty=hn"
+    # a block turns short again when its last value past them goes, by an
+    # update, a delete or a cleared field
+    write_both(run, "update", 9, {"qty": 1})
+    assert run("kinds", "qty") == "qty=hn"
+    write_both(run, "update", 300, {"qty": -5})
+    assert run("kinds", "qty") == "qty=h"
+    write_both(run, "update", 9, {"qty": 40000})
+    write_both(run, "update", 10, {"rank": 50000})
+    assert run("kinds", "qty", "rank") == "qty=hn rank=hn"
+    for case in cases:
+        same(run, "ask", case)
+    write_both(run, "delete", 9, {})
+    write_both(run, "clear", 10, "rank")
+    assert run("kinds", "qty", "rank") == "qty=h rank=h"
     write_both(run, "delete", 7, {})
     write_both(run, "create", 2000, {"region": "n", "qty": 70000})
     for case in cases:

@@ -75,8 +75,6 @@ and privacy policies are built.
     block reaches the target size with four times the rows. Decide first
     how a block that widens to f64 then stays within the value limit:
     split it, or size `int` blocks for f64 and accept small short blocks.
-  - A number block returns to short when its values fit again. Today it
-    stays f64.
   - `i32` blocks for wider whole numbers, and `i8` blocks if the `i16`
     savings justify a third width.
 - **Dictionary text blocks.** Tables with `block` store a text block whose
@@ -87,8 +85,6 @@ and privacy policies are built.
   on `"scan"` blocks. With 1,000 values on `"scan"` blocks, `i16` codes
   cut the field from 4.9 MB to 2.0 MB and raised `groupBy` by 30% to 80%.
   The rest:
-  - A plain text block returns to a dictionary block when its distinct
-    values fall below the limit. Today it stays plain.
   - The rows sizing takes the code width plus the dictionary's share of the
     block. Today it sizes every text field as plain text, so dictionary
     blocks hold fewer bytes than the target.

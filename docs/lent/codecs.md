@@ -204,9 +204,15 @@ block. Each slot holds a code: 1 byte while the block holds up to 255
 distinct values, and 2 bytes past that. The codes follow the sorted order
 of the values, so a filter compares codes and a `groupBy` groups them,
 without reading the strings of each row. A new text block starts as a
-dictionary block. It becomes a plain text block, and stays one, when a
-write would give it more distinct values than half its rows or a value
-longer than 32 bytes. Reads and query answers are the same for both kinds.
+dictionary block. It becomes a plain text block when a write would give
+it more distinct values than half its rows or a value longer than 32
+bytes. It becomes a dictionary block again when an update or delete that
+removes a value leaves it with no value longer than 32 bytes and at most
+half its rows in distinct values. The block keeps a lower bound of its
+distinct values and counts them only when a write brings that bound down to
+the limit, so updates to a block of mostly distinct values stay as fast as
+other plain text writes. Reads and query answers are the same for both
+kinds.
 
 A block of up to 511 rows holds at most 255 distinct values, so 2-byte
 codes need larger blocks: a `string` field without `maxLen` has 512-row
@@ -218,10 +224,11 @@ to 80% faster.
 With `block`, an `int` block whose values lie within -32,767 to 32,767 is
 stored as a short block, which takes a quarter of the bytes of a number
 block. A new `int` block starts short when its first value fits. It becomes
-a number block, and stays one, when a write stores a value outside that
-range. Reads and query answers are the same for both kinds. The rows sizing
-counts 8 bytes per row for every `int` field, so a short block holds a
-quarter of the target block size. On 409,600 rows with an `int` field of
+a number block when a write stores a value outside that range, and short
+again when an update or delete removes the last such value. Reads and
+query answers are the same for both kinds. The rows sizing counts 8 bytes
+per row for every `int` field, so a short block holds a quarter of the
+target block size. On 409,600 rows with an `int` field of
 values 0 to 99, short blocks shrank that field from 3.3 MB to 0.83 MB, and
 a filter or `groupBy` on it ran 15% to 60% faster.
 
