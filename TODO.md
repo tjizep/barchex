@@ -66,20 +66,28 @@ and privacy policies are built.
   barch needs a count with no lock and no phantom log; lent then calls it in
   `plan_keys`, and the cost note under Index choice in
   `docs/lent/queries.md` goes away.
-- **Typed column blocks.** Column blocks hold every number as an f64. Store
-  `int` fields that fit as `i8` or `i32` blocks, so scans read a half to an
-  eighth of the bytes. Decide how a block widens when its values outgrow
-  `i8`. Typed blocks can use the header that blocks of a table with `block`
-  start with: its version and tag bytes can name the element type, and the
-  rows sizing then takes the element width.
+- **Typed column blocks.** Tables with `block` store an `int` block whose
+  values fit in 16 bits as a short block of `i16` values, a quarter of the
+  bytes of an f64 block. On 409,600 rows that shrank a 0 to 99 field from
+  3.3 MB to 0.83 MB, and a filter or `groupBy` on it ran 15% to 60% faster.
+  The rest:
+  - The rows sizing takes 2 bytes per row for `int` fields, so a short
+    block reaches the target size with four times the rows. Decide first
+    how a block that widens to f64 then stays within the value limit:
+    split it, or size `int` blocks for f64 and accept small short blocks.
+  - A number block returns to short when its values fit again. Today it
+    stays f64.
+  - `i32` blocks for wider whole numbers, and `i8` blocks if the `i16`
+    savings justify a third width.
 - **Dictionary text blocks.** Tables with `block` store a text block whose
   values repeat as a dictionary block: its distinct values sorted by byte,
   then an `i8` code per slot. A `groupBy` on the field groups the codes,
   and a comparison filters them, which raised `groupBy` with 10 values by
   25% on `"htap"` blocks and 65% on `"scan"` blocks. The rest:
-  - `i32` codes, so a block with more than 255 distinct values, or with
-    more than half its rows distinct, stays a dictionary block. Today it
-    becomes a plain text block.
+  - `i16` codes, so a block with more than 255 distinct values stays a
+    dictionary block while at most half its rows are distinct. Today it
+    becomes a plain text block. A text block holds at most 8,192 rows, so
+    `i16` codes cover every dictionary block.
   - A plain text block returns to a dictionary block when its distinct
     values fall below the limit. Today it stays plain.
   - The rows sizing takes the code width plus the dictionary's share of the

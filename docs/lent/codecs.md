@@ -195,6 +195,7 @@ schema`.
 |---|---|---|
 | presence | a 16-byte header, then 1 byte per slot, 1 for a slot that holds a row; without `block`, the 1,024 bytes, then the row count as an int32 | every table |
 | number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
+| short | with `block` only: an 8-byte header, then an int16 per slot, with -32,768 for nil | `int` |
 | text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
 | dictionary | with `block` only: a 24-byte header with the count of distinct values, an int8 code per slot, then the distinct values sorted by byte, each with its length | `string`, `enum`, `json`, `bytes` |
 
@@ -206,6 +207,16 @@ dictionary block. It becomes a plain text block, and stays one, when a
 write would give it more distinct values than half its rows, more than
 255, or a value longer than 32 bytes. Reads and query answers are the same
 for both kinds.
+
+With `block`, an `int` block whose values lie within -32,767 to 32,767 is
+stored as a short block, which takes a quarter of the bytes of a number
+block. A new `int` block starts short when its first value fits. It becomes
+a number block, and stays one, when a write stores a value outside that
+range. Reads and query answers are the same for both kinds. The rows sizing
+counts 8 bytes per row for every `int` field, so a short block holds a
+quarter of the target block size. On 409,600 rows with an `int` field of
+values 0 to 99, short blocks shrank that field from 3.3 MB to 0.83 MB, and
+a filter or `groupBy` on it ran 15% to 60% faster.
 
 With `block`, a text block keeps the first 33 bytes of a value longer than
 32 bytes, and the whole value is stored under its own key. Reads, filters

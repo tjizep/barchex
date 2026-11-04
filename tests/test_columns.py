@@ -318,7 +318,6 @@ function steps.fill(c, tname, from, to)
             paid = if i % 3 == 0 then nil else i % 2 == 0,
             at = if i % 4 == 0 then nil else i * 7919 % 1e9,
             state = if i % 7 == 0 then nil elseif i % 2 == 0 then "new" else "done",
-            -- values of 0 to 8 bytes, some repeating
             -- values of 0 to 8 bytes, some repeating, and a long one that
             -- repeats
             raw = if i % 6 == 0 then nil elseif i % 37 == 0 then string.rep("r", 40)
@@ -403,14 +402,17 @@ function steps.huge_update(c, id, size)
     return err(function() c.Sale:update(id, { raw = string.rep("y", size) }) end)
 end
 
--- how region's and note's blocks are stored: "d" for dictionary blocks,
--- "t" for plain text
-function steps.kinds()
+-- how fields' blocks are stored, region's and note's by default: "d" for
+-- dictionary blocks, "t" for plain text, "h" for short and "n" for f64
+-- numbers
+function steps.kinds(_, ...)
     local lay = require("lent.LAYOUT")
     local kc = require("lent.KEYCODEC")
     local t = m.load().tables.sale
     local out = {}
-    for _, name in { "region", "note" } do
+    local names = { ... }
+    if #names == 0 then names = { "region", "note" } end
+    for _, name in names do
         for _, f in t.fields do
             if f.name == name then
                 local p = lay.column(t, f.id)
@@ -629,6 +631,35 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
         assert len(set(answers)) == 1, (case, answers)
 
 
+def test_small_whole_numbers_use_short_blocks(run):
+    if run.block == "fixed":
+        pytest.skip("a fixed table keeps its number blocks as f64")
+    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
+    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value",
+             "defaults", "byRank", "ranked")
+    for case in cases:
+        same(run, "ask", case)
+    # nil and +-32,767 stay short; a value past them turns its block to f64
+    write_both(run, "clear", 5, "rank")
+    for pk, qty in ((6, -32767), (7, 32767), (8, 0)):
+        write_both(run, "update", pk, {"qty": qty})
+    for case in cases:
+        same(run, "ask", case)
+    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    for pk, qty in ((9, 40000), (300, -32768), (500, 2)):
+        write_both(run, "update", pk, {"qty": qty})
+        for case in cases:
+            same(run, "ask", case)
+    assert run("kinds", "qty") == "qty=hn"
+    write_both(run, "delete", 7, {})
+    write_both(run, "create", 2000, {"region": "n", "qty": 70000})
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+
+
 def test_full_blocks_answer_what_binary_answers(run):
     # ids 1024 to 3071 fill two blocks, which a fold reads slot by slot
     for lo in range(1, 3101, 500):
@@ -802,6 +833,35 @@ def test_repeated_text_uses_dictionary_blocks(run):
     # the last row holding "m" leaves the dictionary with it
     write_both(run, "update", 6, {"region": "n"})
     write_both(run, "delete", 7, {})
+    for case in cases:
+        same(run, "ask", case)
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+
+
+def test_small_whole_numbers_use_short_blocks(run):
+    if run.block == "fixed":
+        pytest.skip("a fixed table keeps its number blocks as f64")
+    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
+    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value",
+             "defaults", "byRank", "ranked")
+    for case in cases:
+        same(run, "ask", case)
+    # nil and +-32,767 stay short; a value past them turns its block to f64
+    write_both(run, "clear", 5, "rank")
+    for pk, qty in ((6, -32767), (7, 32767), (8, 0)):
+        write_both(run, "update", pk, {"qty": qty})
+    for case in cases:
+        same(run, "ask", case)
+    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    for pk, qty in ((9, 40000), (300, -32768), (500, 2)):
+        write_both(run, "update", pk, {"qty": qty})
+        for case in cases:
+            same(run, "ask", case)
+    assert run("kinds", "qty") == "qty=hn"
+    write_both(run, "delete", 7, {})
+    write_both(run, "create", 2000, {"region": "n", "qty": 70000})
     for case in cases:
         same(run, "ask", case)
         answers = same(run, "paths", case)

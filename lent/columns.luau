@@ -23,6 +23,11 @@
 --              slot, an f64, for int, float and what ROWCODEC stores as
 --              those, and bool as 1 and 0. NaN is nil, since every row
 --              format refuses NaN as a value. Without `block`: no header.
+--   short      an int field's block in a table with `block` while its
+--              values fit: an 8-byte header (1, "h", 0, the rows), then an
+--              int16 per slot, -32768 for nil. A new int block starts short
+--              when its first value fits, and becomes a number block for
+--              good when a write gives it a value outside +-32767.
 --   text       for string, enum, json and bytes: a 24-byte header (1, "t",
 --              0, the rows, the bytes in use, the slots in use, the values
 --              kept whole elsewhere, 0), a uint32 per slot, then the values
@@ -116,6 +121,38 @@ local function empty_numbers(data: number, rows: number, b: buffer): buffer
     return b
 end
 
+-- short blocks: the header's bytes, its tag, the int16 of nil, and the
+-- most a short block holds either side of 0
+local SHEAD = 8
+local STAG = string.byte("h")
+local NIL_SHORT = -32768
+local SHORT_MOST = 32767
+
+local function is_short(b: buffer): boolean
+    return buffer.len(b) > 1 and buffer.readu8(b, 1) == STAG
+end
+
+local function fits_short(x: number?): boolean
+    return x == nil or (x >= -SHORT_MOST and x <= SHORT_MOST and x == math.floor(x))
+end
+
+-- The number block holding the values of short block b, of `rows` slots,
+-- written into `out` when it is given.
+local function widen(b: buffer, rows: number, out: buffer?): buffer
+    local w = out or header(8 + rows * 8, "n", rows)
+    if out then
+        buffer.writeu8(w, 0, 1)
+        buffer.writeu8(w, 1, string.byte("n"))
+        buffer.writeu16(w, 2, 0)
+        buffer.writeu32(w, 4, rows)
+    end
+    for s = 0, rows - 1 do
+        local h = buffer.readi16(b, SHEAD + s * 2)
+        buffer.writef64(w, 8 + s * 8, if h == NIL_SHORT then NAN else h)
+    end
+    return w
+end
+
 local LEGACY_NUMBER = { rows = LEGACY, data = 0,
                         empty = empty_numbers(0, LEGACY, buffer.create(LEGACY * 8)) }
 local LEGACY_TEXT = { rows = LEGACY, text = true, used = 0, slots = 4, lens = 8,
@@ -124,12 +161,19 @@ local LEGACY_TEXT = { rows = LEGACY, text = true, used = 0, slots = 4, lens = 8,
 -- How a field's blocks are laid out: its rows, and for numbers where the
 -- f64s start and an empty block, or for text where each header field, the
 -- lengths and the values start and the longest value kept whole.
-local function new_spec(rows: number, text: boolean): any
+local function new_spec(rows: number, text: boolean, int: boolean): any
     if text then
         return { rows = rows, text = true, used = 8, slots = 12, over = 16, lens = 24,
                  vals = 24 + rows * 4, cap = CAP, head = true }
     end
-    return { rows = rows, data = 8, head = true,
+    local short
+    if int then
+        short = header(SHEAD + rows * 2, "h", rows)
+        for s = 0, rows - 1 do
+            buffer.writei16(short, SHEAD + s * 2, NIL_SHORT)
+        end
+    end
+    return { rows = rows, data = 8, head = true, short = short,
              empty = empty_numbers(8, rows, header(8 + rows * 8, "n", rows)) }
 end
 
@@ -176,7 +220,7 @@ local function spec(g: any, f: any): any
             fail("table " .. g.t.name .. " field " .. f.name .. " has no block rows in the"
                 .. " catalog; migrate the schema")
         end
-        sp = new_spec(rows, text)
+        sp = new_spec(rows, text, f.kind == "int")
     end
     g.specs[f.id] = sp
     return sp
@@ -441,6 +485,7 @@ local function read_block(t: any, g: any, cols: { any }, block: number, presence
                         check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
                     end
                     c.dict = nil
+                    c.short = b and not c.text and sp.short ~= nil and is_short(b)
                     if b and c.text then
                         if sp.head and is_dict(b) then
                             c.dict = dict_of(b, rows)
@@ -466,6 +511,11 @@ local function read_block(t: any, g: any, cols: { any }, block: number, presence
                             local v = if len - 1 > sp.cap then long_value(t, c.name, c.okey, pk)
                                 else buffer.readstring(b, c.starts[fs + 1], len - 1)
                             r[c.name] = if c.json then VALUES.parse_json(v) else v
+                        end
+                    elseif c.short then
+                        local h = buffer.readi16(b, SHEAD + fs * 2)
+                        if h ~= NIL_SHORT then
+                            r[c.name] = h
                         end
                     else
                         local x = buffer.readf64(b, sp.data + fs * 8)
@@ -648,6 +698,7 @@ local function load(t: any, c: any, first: number)
         end
         c.b, c.fb, c.located, c.elements = b, fb, false, false
         c.coded, c.gmap = c.text and b ~= nil and c.spec.head == true and is_dict(b), nil
+        c.short = not c.text and b ~= nil and c.spec.short ~= nil and is_short(b)
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
@@ -700,6 +751,10 @@ local function value_at(c: any, s: number): any
             locate(c)
         end
         return buffer.readstring(b, c.starts[fs + 1], len - 1)
+    end
+    if c.short then
+        local h = buffer.readi16(b, SHEAD + (c.off + s) * 2)
+        return if h == NIL_SHORT then c.default else h
     end
     local x = buffer.readf64(b, c.at + s * 8)
     if x ~= x then
@@ -1276,26 +1331,31 @@ local function elements(v: any, c: any): buffer
     return w
 end
 
--- Makes room in each aggregate's records for `size` grouper ids.
-local function grow(job: any, size: number)
-    local was = job.capacity
+-- Makes room in each aggregate's records for `size` grouper ids, of the
+-- job's grouper, or of the short lane's when `lane` is given.
+local function grow(job: any, size: number, lane: any?)
+    local l = lane or job
+    local was = l.capacity
     if size <= was then
         return
     end
     local cap = math.max(size, was * 2, 16)
+    local field = if lane then "srecs" else "recs"
     for _, a in job.aggs do
         local r = new_records(cap)
-        if a.recs then
-            buffer.copy(r, 0, a.recs, 0, was * 32)
+        if a[field] then
+            buffer.copy(r, 0, a[field], 0, was * 32)
         end
-        a.recs = r
+        a[field] = r
     end
-    job.capacity = cap
+    l.capacity = cap
 end
 
--- Gives the grouper's ids from #job.gis to size - 1 their groups.
-local function new_ids(job: any, size: number)
-    local g, gis, tree = job.grouper, job.gis, job.tree
+-- Gives the grouper's ids from #gis to size - 1 their groups, for the job's
+-- grouper, or the short lane's when `lane` is given.
+local function new_ids(job: any, size: number, lane: any?)
+    local l = lane or job
+    local g, gis, tree = l.grouper, l.gis, job.tree
     for id = #gis, size - 1 do
         local v = g:key(id)
         local k = if v == nil then NIL_KEY else v
@@ -1306,13 +1366,20 @@ local function new_ids(job: any, size: number)
         end
         gis[id + 1] = gi
     end
-    grow(job, size)
+    grow(job, size, lane)
 end
 
 -- Adds the rows at chunk slots sel[1..n] to the job's groups with Luau
 -- loops, once the chunk's blocks are loaded. `full` says sel holds every
 -- slot of the chunk in order.
 local function luau_rows(job: any, sel: { number }, n: number, full: boolean)
+    -- the Luau loops read f64s
+    for _, c in job.sources do
+        if c.short then
+            c.wide = widen(c.b, c.rows, c.wide)
+            c.b, c.short = c.wide, false
+        end
+    end
     local fuse = job.fuse
     if full and fuse then
         if #job.records == 0 then
@@ -1512,11 +1579,13 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
                 end
             end
         else
-            local kind, b, at = "f64", c.b, c.at
+            local kind, b, at, stride, none = "f64", c.b, c.at, 8, nil
             if c.text then
                 kind, b, at = "str", elements(v, c), c.off * 8
+            elseif c.short then
+                kind, at, stride, none = "i16", SHEAD + c.off * 2, 2, NIL_SHORT
             end
-            n = v.filter(kind, b, at, 8, cd.op, cd.value, nil, sel, n, selb)
+            n = v.filter(kind, b, at, stride, cd.op, cd.value, none, sel, n, selb)
             sel = selb
             if n == 0 then
                 return more
@@ -1537,6 +1606,19 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         end
         gids = job.gidb
         job.csize = job.codes:ids(k.b, DHEAD + k.off, 1, NIL_CODE, sel, n, gids)
+    elseif k and k.short then
+        -- short blocks group on their own grouper; add_records joins the
+        -- groups by value
+        local lane = job.slane
+        if lane == nil then
+            lane = { grouper = v.grouper("i16"), gis = {}, capacity = 0 }
+            job.slane = lane
+        end
+        gids = job.gidb
+        local size = lane.grouper:ids(k.b, SHEAD + k.off * 2, 2, NIL_SHORT, sel, n, gids)
+        if size > #lane.gis then
+            new_ids(job, size, lane)
+        end
     elseif k then
         local b, at = k.b, k.at
         if b == nil then
@@ -1558,9 +1640,11 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     end
     for _, ag in job.aggs do
         local c = ag.source
-        local recs = if coded then ag.crecs else ag.recs
+        local recs = if coded then ag.crecs elseif k and k.short then ag.srecs else ag.recs
         if c == nil then
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
+        elseif c.short then
+            v.fold("i16", c.b, SHEAD + c.off * 2, 2, NIL_SHORT, sel, n, gids, recs)
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
@@ -1678,6 +1762,14 @@ local function add_records(job: any)
             add_record(a, r, (id - 1) * 32, gi)
         end
     end
+    local lane = job.slane
+    if lane then
+        for _, a in job.aggs do
+            for id, gi in lane.gis do
+                add_record(a, a.srecs, (id - 1) * 32, gi)
+            end
+        end
+    end
 end
 
 -- Writes the job's running values into the group records it read.
@@ -1746,6 +1838,16 @@ local function text_at(sp: any, stored: string, slot: number): string?
     return buffer.readstring(b, text_start(sp, b, slot), len - 1)
 end
 
+-- Whether number block k is short, or nil when there is no block k.
+local function short_block(k: string): boolean?
+    -- the header's first 4 bytes: 1, the tag, then 0
+    local w = barch.store.getInt32At(k, 0)
+    if w == nil then
+        return nil
+    end
+    return (w // 256) % 256 == STAG
+end
+
 -- The row at pk with no defaults, or nil. `lock` reads the block's presence
 -- with the exclusive lock, for a pessimistic caller about to write.
 function read(t: any, fields: any, pk: number, lock: boolean?): any
@@ -1770,6 +1872,13 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
             if v then
                 r[f.name] = if f.kind == "json" then VALUES.parse_json(v) else v
             end
+        elseif sp.short and short_block(k) then
+            -- 4 bytes ending at the slot's int16, which follows the header
+            local w = barch.store.getInt32At(k, SHEAD + fs * 2 - 2)
+            local h = w and (w // 65536) % 65536
+            if h and h ~= 32768 then
+                r[f.name] = if h > 32767 then h - 65536 else h
+            end
         else
             local x = barch.store.getF64At(k, sp.data + fs * 8)
             if x and x == x then
@@ -1780,8 +1889,32 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
     return r
 end
 
--- Stores number `x` in `slot` of number block k, nil as NaN.
+local SHORT_CELL = buffer.create(2)
+
+-- Stores number `x` in `slot` of number block k, nil as NaN, or as
+-- NIL_SHORT in a short block.
 local function put_number(sp: any, k: string, slot: number, x: number?)
+    if sp.short then
+        local short = short_block(k)
+        if short == nil then
+            if x == nil then
+                return
+            end
+            short = fits_short(x)
+            barch.store.setBufferAt(k, if short then sp.short else sp.empty, 0)
+        end
+        if short then
+            if fits_short(x) then
+                buffer.writei16(SHORT_CELL, 0, x or NIL_SHORT)
+                barch.store.setBufferAt(k, SHORT_CELL, SHEAD + slot * 2)
+                return
+            end
+            -- a value outside +-32767 makes it a number block for good
+            barch.store.setBufferAt(k, widen(barch.store.getBufferAt(k, 0), sp.rows), 0)
+        end
+        barch.store.setF64At(k, x or NAN, sp.data + slot * 8)
+        return
+    end
     if not barch.store.exists(k) then
         if x == nil then
             return
