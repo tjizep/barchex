@@ -189,11 +189,11 @@ one row per transaction ran at these rates on one machine:
 
 | `block` | sum | filtered sum | `groupBy` and sum | `update` | `createMany` |
 |---|---:|---:|---:|---:|---:|
-| none, 1,024 rows | 79 million rows/s | 43 million rows/s | 36 million rows/s | 370 µs | 25,000 rows/s |
-| `1024` | 23 million rows/s | 11 million rows/s | 7 million rows/s | 290 µs | 32,000 rows/s |
-| `"htap"` | 63 million rows/s | 28 million rows/s | 25 million rows/s | 350 µs | 31,000 rows/s |
-| `"balanced"` | 80 million rows/s | 54 million rows/s | 38 million rows/s | 440 µs | 29,000 rows/s |
-| `"scan"` | 143 million rows/s | 70 million rows/s | 148 million rows/s | 1,090 µs | 14,000 rows/s |
+| none, 1,024 rows | 78 million rows/s | 42 million rows/s | 36 million rows/s | 420 µs | 24,000 rows/s |
+| `1024` | 21 million rows/s | 15 million rows/s | 11 million rows/s | 350 µs | 30,000 rows/s |
+| `"htap"` | 57 million rows/s | 49 million rows/s | 37 million rows/s | 410 µs | 29,000 rows/s |
+| `"balanced"` | 97 million rows/s | 86 million rows/s | 64 million rows/s | 460 µs | 26,000 rows/s |
+| `"scan"` | 205 million rows/s | 155 million rows/s | 90 million rows/s | 1,450 µs | 12,000 rows/s |
 
 The sum reads a `float` field, the filter compares an `int` field, and the
 group key is a `string` field with 10 values, which tables with `block`

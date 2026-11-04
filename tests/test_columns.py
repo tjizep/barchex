@@ -1073,10 +1073,11 @@ def test_text_blocks_split_past_the_value_limit(most):
     if run.mode == "pessimistic":
         pytest.skip("filling a block of this size takes a while; one mode covers it")
     # 32,768-row blocks of 40-byte notes, which keep 33 bytes each and turn
-    # their block plain, pass the limit after about 11,900 rows
-    for lo in range(1, 12001, 400):
-        assert run("notes", "Sale", str(lo), str(lo + 399), "40") == 400
-        assert run("notes", "Plain", str(lo), str(lo + 399), "40") == 400
+    # their block plain, pass the limit after about 11,900 rows. Each write
+    # rewrites the block, so 200 rows a call stay under the function deadline.
+    for lo in range(1, 12001, 200):
+        assert run("notes", "Sale", str(lo), str(lo + 199), "40") == 200
+        assert run("notes", "Plain", str(lo), str(lo + 199), "40") == 200
     assert run("kinds", "note") == "note=t3"
     assert run("parts") == 2
     write_both(run, "update", 11000, {"note": "short"})
@@ -1088,7 +1089,9 @@ def test_text_blocks_split_past_the_value_limit(most):
     answers = same(run, "paths", "aggregate")
     assert len(set(answers)) == 1, answers
     # with fewer values the block fits in one key again
-    assert run("clear_notes", "Sale", "1", "100") == run("clear_notes", "Plain", "1", "100")
+    for lo in (1, 51):
+        hi = str(lo + 49)
+        assert run("clear_notes", "Sale", str(lo), hi) == run("clear_notes", "Plain", str(lo), hi)
     assert run("kinds", "note") == "note=t"
     assert run("parts") == 0
     for case in ("notes", "aggregate", "count"):
