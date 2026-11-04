@@ -186,12 +186,15 @@ first. `explain` shows the comparison in brackets after the index it chose:
 by_customer = customer [2 keys over by_status 38]
 ```
 
-Counting has a cost in a transaction. A pessimistic transaction holds a range
-lock on each counted range until it ends, so writers to those ranges wait,
-including ranges of the index the query then skips. An optimistic transaction
-rechecks those ranges at commit, so a write to one of them makes it retry. To
-avoid this on a busy table, call `using(name)`, which reads the named index
-with no count.
+These counts take no lock and add nothing to the transaction's commit
+check, so counting an index the query then skips holds up no writer and
+causes no retry. Each count reads the store as it is at that moment: it
+leaves out the transaction's own uncommitted writes and includes writes
+other clients commit meanwhile. A count that is off changes only which
+index the query reads; the rows it answers stay the same. The primary index
+of a `column` table is the exception: the query counts its rows by reading
+presence blocks, which locks and checks them as any read does. To skip the
+counts, call `using(name)`, which reads the named index.
 
 Key counts decide only between equal matches, so an index with one more `=`
 field wins even when another index holds fewer keys. Store statistics with
@@ -209,7 +212,7 @@ indexes; [planner statistics](migrate.md#planner-statistics) describes the
 call. When every index that narrows a query has statistics, the query
 estimates the keys each one would read and uses the smallest estimate. A
 range on one field can then win over an `=` on another, and the comparison
-reads no index, so it takes no range lock. Equal estimates keep the better
+reads no index. Equal estimates keep the better
 match. `explain` marks estimates with `~`:
 
 ```

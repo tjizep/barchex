@@ -1581,20 +1581,22 @@ local function bound(kind: string, prefix: string, v: any, open: boolean?, upper
 end
 
 -- How many keys of table `tbl` lie in index `ix` from lo up to hi. A column
--- table has no keys for its rows, so its primary index counts them.
-local function keys_within(tbl: any, ix: any, lo: string, hi: string): number
+-- table has no keys for its rows, so its primary index counts them. `loose`
+-- counts the store as it is, with no lock, no read logged and without this
+-- transaction's writes, for a guess that only picks a plan.
+local function keys_within(tbl: any, ix: any, lo: string, hi: string, loose: boolean?): number
     if ix.primary and is_column(tbl) then
         return col.count(tbl.t, lo, hi)
     end
-    return barch.store.count(lo, hi)
+    return if loose then barch.store.looseCount(lo, hi) else barch.store.count(lo, hi)
 end
 
--- How many keys plan p reads.
+-- About how many keys plan p reads.
 local function plan_keys(q: any, p: any): number
     local n = 0
     for _, s in p.spans or { p } do
         if s.lo < s.hi then
-            n += keys_within(q.tbl, p.ix, s.lo, s.hi)
+            n += keys_within(q.tbl, p.ix, s.lo, s.hi, true)
         end
     end
     return n

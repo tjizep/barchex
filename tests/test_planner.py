@@ -3,6 +3,7 @@ import re
 
 import pytest
 
+from .helpers import connect
 from .test_client import setup
 
 redis = pytest.importorskip("redis")
@@ -163,6 +164,13 @@ function steps.closeSome(c)
     return "ok"
 end
 
+-- Opens order 8, of customer 9, adding a key to the range of by_status
+-- that a tie with by_customer counts and then skips.
+function steps.openOne(c)
+    c.Order:update(8, { status = "open" })
+    return "ok"
+end
+
 -- Status past "p" then holds more keys than customer past 1, which held more.
 function steps.widen(c)
     for i = 20, 30 do c.Order:update(i, { status = "rare" }) end
@@ -252,6 +260,23 @@ def test_ties_compare_range_widths(run):
     # a range on an int field also reads the keys at its bound
     assert run("explain", "ranges") == "by_weight range weight [4 keys over by_size 39]"
     assert run("explain", "spans") == "by_size 2 ranges size [2 keys over by_weight 36]"
+
+
+def test_tie_counts_leave_other_writers_alone(run, server, client, request):
+    # the update's tie counts by_status's open orders, then it reads and
+    # writes through by_customer; another client then adds a key to the
+    # range it counted, which neither waits nor fails the commit
+    mode = request.node.callspec.params["run"]
+    other = connect(server.port)
+    other.execute_command("USE", "plan_" + re.sub(r"\W", "_", request.node.name))
+    try:
+        client.execute_command("BEGINTX", *(["PESSIMISTIC"] if mode == "pessimistic" else []))
+        assert run("update") == 1
+        assert other.execute_command("CALLF", "PLANNER", "openOne", mode) == "ok"
+        client.execute_command("COMMITTX")
+    finally:
+        other.close()
+    assert run("rows", "eitherIndex") == [9]
 
 
 def test_equal_counts_keep_the_first_index(run):

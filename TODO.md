@@ -59,13 +59,6 @@ and privacy policies are built.
   TPC-H, the taxi data and Sakila, is in
   [docs/sql-survey.md](docs/sql-survey.md); its gaps section lists the
   features to add.
-- **Count index keys without a conflict.** The planner breaks a tie between
-  indexes with `barch.store.count`, which takes a range lock in a pessimistic
-  transaction and joins the phantom check in an optimistic one. Counting an
-  index the query then skips can block writers or abort the transaction.
-  barch needs a count with no lock and no phantom log; lent then calls it in
-  `plan_keys`, and the cost note under Index choice in
-  `docs/lent/queries.md` goes away.
 - **Typed column blocks.** Tables with `block` store an `int` block whose
   values fit in 16 bits as a short block of `i16` values, a quarter of the
   bytes of an f64 block. On 409,600 rows that shrank a 0 to 99 field from
