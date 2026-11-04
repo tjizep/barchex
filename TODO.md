@@ -77,11 +77,10 @@ and privacy policies are built.
   which raised `groupBy` with 10 values by 25% on `"htap"` blocks and 65%
   on `"scan"` blocks. With 1,000 values on `"scan"` blocks, `i16` codes
   cut the field from 4.9 MB to 2.0 MB and raised `groupBy` by 30% to 80%.
-  `min` and `max` compare codes too. The rest:
-  - The rows sizing takes the code width plus the dictionary's share of the
-    block. Today it sizes every text field as plain text, so dictionary
-    blocks hold fewer bytes than the target.
-  - Ordering on the field compares codes.
+  `min`, `max` and `order` with `limit` compare codes too. The rest: the
+  rows sizing takes the code width plus the dictionary's share of the
+  block. Today it sizes every text field as plain text, so dictionary
+  blocks hold fewer bytes than the target.
 
   Each block keeps its own dictionary, so a new value re-sorts and recodes
   one block, which a write already rewrites, and writers to different

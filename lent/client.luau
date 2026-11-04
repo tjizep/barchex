@@ -2137,6 +2137,28 @@ end
 -- key or id order. It sets page.last to the last one read, page.seen to how
 -- many it read, and page.more when more remain. A column table's rows hold
 -- the fields in the set `need`, or all of them with need nil.
+-- The set of fields q's filters and order read from a row, with those of
+-- `more`, or nil when a function may read any field. It lets a column table
+-- read only those fields' blocks.
+local function needed(q: any, more: { string }?): any
+    local tbl = q.tbl
+    if tbl.memory or #tbl.computed > 0 or #tbl.stored > 0 or tbl.queryRules
+        or #q.preds ~= q.exprPreds then
+        return nil
+    end
+    local need = table.clone(q.exprFields)
+    for _, c in q.conds do
+        need[c.field] = true
+    end
+    if q.sortField then
+        need[q.sortField] = true
+    end
+    for _, name in more or {} do
+        need[name] = true
+    end
+    return need
+end
+
 local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
     if q.tbl.linksOf then
         return link_rows(q)
@@ -2175,11 +2197,44 @@ local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
     local want = q.lim and q.skip + q.lim
     local ordered, early, back = p.ordered, false, false
     local out = {}
+    -- A column table's scan for the first `want` rows in the order of a
+    -- field keeps only those rows. It reads the fields the query needs,
+    -- skips the rows that sort after the last row it keeps, and reads the
+    -- other fields of the rows it answers at the end.
+    local f, desc = q.sortField, q.desc == true
+    local top = want ~= nil and want > 0 and f ~= nil and idset == nil and page == nil
+        and not p.ordered and is_column(tbl) and p.ix ~= nil and p.ix.primary
+    local cut, scanned = nil, need
+    if top then
+        local d = tbl.byName[f]
+        -- a stored nil reads as the default, so a field with one takes no cut
+        if d and d.default == nil then
+            cut = { field = f, desc = desc, n = 0 }
+        end
+        scanned = need or needed(q)
+    end
+    -- whether row a comes before row b in q's order
+    local function before(a: any, b: any): boolean
+        local x, y = a[f], b[f]
+        if x == y then
+            return (a.id < b.id) ~= desc
+        end
+        return less(x, y) ~= desc
+    end
     -- `v` is the row's stored value when the scan read it with the key
     local function consider(pk: number, v: string?): boolean
         local r = if v then row_of(tbl, pk, v) else read(tbl, pk)
         if r and matches(q, r) then
             out[#out + 1] = r
+            if top and #out >= 2 * want + 64 then
+                table.sort(out, before)
+                for i = #out, want + 1, -1 do
+                    out[i] = nil
+                end
+                if cut then
+                    cut.value, cut.n = out[want][f], cut.n + 1
+                end
+            end
             return early and #out >= want
         end
         return false
@@ -2221,7 +2276,7 @@ local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
         if blocks then
             first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
             scan = function(lo: string, hi: string, fn: any, limit: number?): boolean
-                return col.scan(tbl.t, tbl.fields, lo, hi, fn, limit, back, need)
+                return col.scan(tbl.t, tbl.fields, lo, hi, fn, limit, back, scanned, cut)
             end
         elseif rowValues or (unique and not primary) then
             first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
@@ -2313,6 +2368,15 @@ local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
     if q.skip ~= 0 or (want ~= nil and #out > want) then
         out = table.move(out, q.skip + 1, math.min(#out, want or #out), 1, {})
     end
+    if top and scanned ~= need then
+        local pks = table.create(#out)
+        for i, r in out do
+            pks[i] = r.id
+        end
+        for i, v in col.rows_at(tbl.t, tbl.fields, pks, need) do
+            out[i] = row_of(tbl, pks[i], v)
+        end
+    end
     if loading then
         load(q, out)
     end
@@ -2341,28 +2405,6 @@ function Query:ids(): { number }
         list[i] = r.id
     end
     return list
-end
-
--- The set of fields q's filters and order read from a row, with those of
--- `more`, or nil when a function may read any field. It lets a column table
--- read only those fields' blocks.
-local function needed(q: any, more: { string }?): any
-    local tbl = q.tbl
-    if tbl.memory or #tbl.computed > 0 or #tbl.stored > 0 or tbl.queryRules
-        or #q.preds ~= q.exprPreds then
-        return nil
-    end
-    local need = table.clone(q.exprFields)
-    for _, c in q.conds do
-        need[c.field] = true
-    end
-    if q.sortField then
-        need[q.sortField] = true
-    end
-    for _, name in more or {} do
-        need[name] = true
-    end
-    return need
 end
 
 -- How many keys of q's index hold exactly the rows q matches, before offset

@@ -129,6 +129,35 @@ function cases.fn(t)
     return rows_text(t:query():where(function(r) return r.score ~= nil end):all())
 end
 function cases.count(t) return t:query():count() end
+-- the first rows in the order of a field, which a column table finds by
+-- keeping that many as it reads, then by cursor pages; o_region and so on
+for _, field in { "region", "state", "score", "paid", "raw", "rank", "note", "at" } do
+    cases["o_" .. field] = function(t)
+        local out = {}
+        local function add(q)
+            out[#out + 1] = table.concat(rows_text(q:all()), ";")
+        end
+        for _, dir in { "asc", "desc" } do
+            for _, size in { 1, 5, 40, 90 } do
+                add(t:query():order(field, dir):limit(size):offset(size // 5))
+            end
+            add(t:query():where("score", ">", 2):order(field, dir):limit(7))
+            add(t:query():where("qty * 2 > 5"):order(field, dir):limit(3))
+            add(t:query():where(function(r) return r.qty ~= 2 end):order(field, dir):limit(4))
+        end
+        local ids, cur = {}, nil
+        for _ = 1, 6 do
+            local q = t:query():order(field, "desc"):limit(5)
+            if cur then q = q:after(cur) end
+            local list = q:all()
+            for _, r in list do ids[#ids + 1] = r.id end
+            if #list < 5 then break end
+            cur = q:cursor(list[#list])
+        end
+        out[#out + 1] = table.concat(ids, ",")
+        return out
+    end
+end
 function cases.countIds(t) return t:query():where("id", ">", 1000):count() end
 function cases.countExpr(t) return t:query():where("qty + 1 > 3"):count() end
 function cases.aggregate(t) return row_text(t:query():aggregate(SPEC)) end
@@ -584,6 +613,7 @@ CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "regio
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
          "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
          "byQty", "byRaw", "byId", "cheap", "early", "byBytes", "byRegion"]
+ORDERED = ["o_region", "o_state", "o_score", "o_paid", "o_raw", "o_rank", "o_note", "o_at"]
 
 
 def seed_row(rng, pk):
@@ -622,7 +652,7 @@ def test_column_answers_what_binary_answers(run, seed):
     for pk in rng.sample(IDS, len(IDS)):
         write_both(run, "create", pk, seed_row(rng, pk))
         live.add(pk)
-    for case in CASES:
+    for case in CASES + ORDERED:
         same(run, "ask", case)
     for _ in range(60):
         pk = rng.choice(IDS)
@@ -642,7 +672,7 @@ def test_column_answers_what_binary_answers(run, seed):
         assert same(run, "get", str(pk)) != "" and same(run, "ask", "all") is not None
     for pk in IDS:
         same(run, "get", str(pk))
-    for case in CASES:
+    for case in CASES + ORDERED:
         same(run, "ask", case)
     for dir_ in ("asc", "desc"):
         for size in ("1", "3", "7"):
@@ -683,7 +713,7 @@ def test_full_blocks_answer_what_binary_answers(run):
     for lo in range(1, 3101, 500):
         hi = str(min(lo + 499, 3100))
         assert run("fill", "Sale", str(lo), hi) == run("fill", "Plain", str(lo), hi)
-    for case in CASES[13:]:
+    for case in CASES[13:] + ORDERED:
         same(run, "ask", case)
     for size in ("1000", "2000", "5000"):
         same(run, "paged", size)
@@ -839,7 +869,7 @@ def test_repeated_text_uses_dictionary_blocks(run):
     # three regions repeat; notes differ in nearly every row
     assert run("kinds") == "region=d note=t"
     cases = ("regionOps", "vRegion", "byRegion", "grouped", "region", "vAll", "vByQty",
-             "vByState")
+             "vByState", "o_region", "o_state")
     for case in cases:
         same(run, "ask", case)
     # values before, between and after the stored ones, then a long one,
@@ -877,7 +907,7 @@ def test_dictionary_blocks_past_255_values_take_int16_codes(large):
     assert run("spread", "Sale", "1", "1500", "300") == run("spread", "Plain", "1", "1500", "300")
     assert run("kinds", "region") == "region=D"
     cases = ("manyRegions", "byManyRegions", "regionOps", "vRegion", "byRegion", "grouped",
-             "vAll", "vByQty", "vByState")
+             "vAll", "vByQty", "vByState", "o_region", "o_state")
     for case in cases:
         same(run, "ask", case)
     # a value before, among and after the others moves the codes

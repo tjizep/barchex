@@ -129,6 +129,15 @@ aggregates read whole rows when the query has a filter function or a query
 policy, when the table has computed fields, or when an aggregate takes a
 `value` function.
 
+A query with `order` and `limit` that reads the table by id keeps only the
+rows that sort first. It reads the fields it filters and sorts on, skips
+each row that sorts after the last row it keeps, and then reads every field
+of the rows it answers. In a dictionary block it compares each row's code
+with the code of that last value. A sort field with a `:default()` is
+compared row by row. On 204,800 rows in `"scan"` blocks, `order` on a
+`string` field with 1,000 values and `limit(10)` took 20 ms, and 60 ms with
+`limit(1000)`; reading and sorting every row took 600 ms.
+
 ### Block size
 
 Set `block` on a column table to choose how large its blocks are. Smaller
@@ -203,8 +212,8 @@ With `block`, a text block whose values repeat is stored as a dictionary
 block. Each slot holds a code: 1 byte while the block holds up to 255
 distinct values, and 2 bytes past that. The codes follow the sorted order
 of the values, so a filter compares codes, a `groupBy` groups them, and
-`min` and `max` compare them, without reading the strings of each row.
-A new text block starts as a
+`min`, `max` and `order` with `limit` compare them, without reading the
+strings of each row. A new text block starts as a
 dictionary block. It becomes a plain text block when a write would give
 it more distinct values than half its rows or a value longer than 32
 bytes. It becomes a dictionary block again when an update or delete that

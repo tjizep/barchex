@@ -173,7 +173,9 @@ then one range filter, or the ranges of an expression's `or`, on the next
 field. When that index already returns rows in the requested order, the
 query stops reading at the limit. A `desc` order reads the index from the
 end and stops the same way. Otherwise `explain` ends with `then sort`, and
-the query reads every matching row before sorting. A unique index leaves
+the query reads every matching row before sorting. A `column` table read by
+id with a `limit` keeps only the rows that sort first; see
+[Column tables](codecs.md#column-tables-with-columns). A unique index leaves
 out rows with a missing value, so it is used when every one of its fields
 has an `=` filter, or when each field before the last has one and the last
 has a range. Filters on other fields are checked on each row read.

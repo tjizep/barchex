@@ -542,12 +542,129 @@ local function starts_of(sp: any, b: buffer, starts: { number })
     end
 end
 
+-- Reads block fb of the field of source c into c.b, and its dictionary into
+-- c.dict when it has one, unless c holds that block already. Set c.fb to nil
+-- to read it again.
+local function hold(t: any, c: any, fb: number)
+    if fb == c.fb then
+        return
+    end
+    local sp = c.spec
+    local stored = barch.store.get(block_key(c.prefix, fb))
+    local b = stored and buffer.fromstring(stored) or false
+    if b and sp.head then
+        check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), sp.rows)
+    end
+    c.dict = nil
+    c.short = b and not c.text and sp.short ~= nil and is_short(b)
+    if b and c.text then
+        if sp.head and is_dict(b) then
+            c.dict, c.cw = dict_of(b, sp.rows), code_width(b)
+        else
+            starts_of(sp, b, c.starts)
+        end
+    end
+    c.fb, c.b = fb, b
+end
+
+-- The value at pk of the field of source c, or nil when it has none.
+local function field_at(t: any, c: any, pk: number): any
+    local sp = c.spec
+    local rows = sp.rows
+    local fb = pk // rows
+    hold(t, c, fb)
+    local b = c.b
+    if not b then
+        return nil
+    end
+    local fs = pk - fb * rows
+    local dict = c.dict
+    if dict then
+        local cw = c.cw
+        local code = read_code(b, DHEAD + fs * cw, cw)
+        local none = nil_code(cw)
+        if code == none then
+            return nil
+        end
+        local v = dict[code - none]
+        return if c.json then VALUES.parse_json(v) else v
+    elseif c.text then
+        local len = buffer.readu32(b, sp.lens + fs * 4)
+        if len == 0 then
+            return nil
+        end
+        local v = if len - 1 > sp.cap then long_value(t, c.name, c.okey, pk)
+            else buffer.readstring(b, c.starts[fs + 1], len - 1)
+        return if c.json then VALUES.parse_json(v) else v
+    elseif c.short then
+        local h = buffer.readi16(b, SHEAD + fs * 2)
+        return if h ~= NIL_SHORT then h else nil
+    end
+    local x = buffer.readf64(b, sp.data + fs * 8)
+    if x ~= x then
+        return nil
+    end
+    return if c.bool then x == 1 else x
+end
+
+-- The row at pk of the fields in `cols`, with no defaults.
+local function row_at(t: any, cols: { any }, pk: number): any
+    local r = {}
+    for i = 1, #cols do
+        local c = cols[i]
+        r[c.name] = field_at(t, c, pk)
+    end
+    return r
+end
+
+-- Whether a sorts before b in a query's order, with nil first.
+local function sorts_before(a: any, b: any): boolean
+    if a == nil or b == nil then
+        return a == nil and b ~= nil
+    end
+    if type(a) == "boolean" then
+        return not a and b
+    end
+    return a < b
+end
+
+-- Whether the row at pk can join the rows a top-k scan keeps, as `cut` says
+-- (see scan). Rows come in id order, so a row whose value equals the cut
+-- joins only in desc order. In a dictionary block it compares the slot's
+-- code with the code of the cut value, found once per block and cut.
+local function joins(t: any, cut: any, pk: number): boolean
+    local c = cut.col
+    local rows = c.spec.rows
+    local fb = pk // rows
+    hold(t, c, fb)
+    local dict = c.dict
+    if dict == nil then
+        local v = field_at(t, c, pk)
+        if cut.desc then
+            return not sorts_before(v, cut.value)
+        end
+        return sorts_before(v, cut.value)
+    end
+    if cut.fb ~= fb or cut.seen ~= cut.n then
+        -- codes from the cut's code up hold values at or past the cut value
+        local w = cut.value
+        cut.fb, cut.seen = fb, cut.n
+        cut.code = nil_code(c.cw) + (if w == nil then 0 else lower(dict, w))
+    end
+    local code = read_code(c.b, DHEAD + (pk - fb * rows) * c.cw, c.cw)
+    if cut.desc then
+        return code >= cut.code
+    end
+    return code < cut.code
+end
+
 -- The slots from `a` to `z` of presence block `block`, in order or, with
 -- `back`, highest first, as rows of the fields in `cols`. Calls each(pk, row)
--- until it answers true, and answers whether it did.
+-- until it answers true, and answers whether it did. With `cut`, it skips
+-- the rows that cannot join a top-k scan's rows.
 local function read_block(t: any, g: any, cols: { any }, block: number, presence: string,
                           a: number, z: number, back: boolean?,
-                          each: (number, any) -> boolean?): boolean
+                          each: (number, any) -> boolean?, cut: any?): boolean
     check_presence(g, block, presence)
     local n = #cols
     for i = 1, n do
@@ -557,63 +674,10 @@ local function read_block(t: any, g: any, cols: { any }, block: number, presence
     for s = if back then z else a, if back then a else z, if back then -1 else 1 do
         if string.byte(presence, pbase + s + 1) == 1 then
             local pk = base + s
-            local r = {}
-            for i = 1, n do
-                local c = cols[i]
-                local sp = c.spec
-                local rows = sp.rows
-                local fb = pk // rows
-                if fb ~= c.fb then
-                    local stored = barch.store.get(block_key(c.prefix, fb))
-                    local b = stored and buffer.fromstring(stored) or false
-                    if b and sp.head then
-                        check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
-                    end
-                    c.dict = nil
-                    c.short = b and not c.text and sp.short ~= nil and is_short(b)
-                    if b and c.text then
-                        if sp.head and is_dict(b) then
-                            c.dict, c.cw = dict_of(b, rows), code_width(b)
-                        else
-                            starts_of(sp, b, c.starts)
-                        end
-                    end
-                    c.fb, c.b = fb, b
+            if cut == nil or cut.n == 0 or joins(t, cut, pk) then
+                if each(pk, row_at(t, cols, pk)) then
+                    return true
                 end
-                local b = c.b
-                if b then
-                    local fs = pk - fb * rows
-                    local dict = c.dict
-                    if dict then
-                        local cw = c.cw
-                        local code = read_code(b, DHEAD + fs * cw, cw)
-                        local none = nil_code(cw)
-                        if code ~= none then
-                            local v = dict[code - none]
-                            r[c.name] = if c.json then VALUES.parse_json(v) else v
-                        end
-                    elseif c.text then
-                        local len = buffer.readu32(b, sp.lens + fs * 4)
-                        if len > 0 then
-                            local v = if len - 1 > sp.cap then long_value(t, c.name, c.okey, pk)
-                                else buffer.readstring(b, c.starts[fs + 1], len - 1)
-                            r[c.name] = if c.json then VALUES.parse_json(v) else v
-                        end
-                    elseif c.short then
-                        local h = buffer.readi16(b, SHEAD + fs * 2)
-                        if h ~= NIL_SHORT then
-                            r[c.name] = h
-                        end
-                    else
-                        local x = buffer.readf64(b, sp.data + fs * 8)
-                        if x == x then
-                            r[c.name] = if c.bool then x == 1 else x
-                        end
-                    end
-                end
-            end
-            if each(pk, r) then
-                return true
             end
         end
     end
@@ -626,8 +690,15 @@ end
 -- with need nil, and no defaults. `first` says how many rows the caller
 -- expects to read, which sets how many blocks the first page holds. `back`
 -- reads highest id first; `each` must not add or remove rows then.
+--
+-- A `cut` lets a scan for the first k rows in the order of a field skip the
+-- rows that come after the k-th row kept so far. It holds `field`, the sort
+-- field, and `desc`; the caller sets `value` to the k-th row's value and
+-- adds 1 to `n` each time it changes, from 0 for no cut yet. Read in id
+-- order, a row then joins when its value sorts before `value`, or in desc
+-- order when it sorts at or past it. A `json` field takes no cut.
 function scan(t: any, fields: any, lo: string, hi: string, each: (number, any) -> boolean?,
-              first: number?, back: boolean?, need: any?): boolean
+              first: number?, back: boolean?, need: any?, cut: any?): boolean
     local g = geometry(t)
     local rows = g.rows
     local from, last, plo, phi = span(t, g, lo, hi)
@@ -635,12 +706,23 @@ function scan(t: any, fields: any, lo: string, hi: string, each: (number, any) -
         return false
     end
     local cols = columns(t, g, fields, need)
+    if cut then
+        cut.col = nil
+        for _, c in cols do
+            if c.name == cut.field and not c.json then
+                cut.col = c
+            end
+        end
+        if back or cut.col == nil then
+            cut = nil
+        end
+    end
     local page = math.clamp((first or rows * 16) // rows + 1, 1, 16)
     local function run(keys: { string }, values: { string }, i: number): boolean
         local block = lay.present_block(keys[i])
         local base = block * rows
         local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
-        return a <= z and read_block(t, g, cols, block, values[i], a, z, back, each)
+        return a <= z and read_block(t, g, cols, block, values[i], a, z, back, each, cut)
     end
     if back then
         local pos = barch.store.count(plo, phi)
@@ -682,6 +764,18 @@ function page(t: any, fields: any, lo: string, hi: string, limit: number,
         return #keys == limit
     end, limit, false, need)
     return keys, rows
+end
+
+-- The rows of table t at the ids in `pks`, in that order, each holding the
+-- fields in the set `need`, or all of them with need nil, and no defaults.
+-- It reads each block once when `pks` keeps the ids of a block together.
+function rows_at(t: any, fields: any, pks: { number }, need: any?): { any }
+    local cols = columns(t, geometry(t), fields, need)
+    local out = table.create(#pks)
+    for i, pk in pks do
+        out[i] = row_at(t, cols, pk)
+    end
+    return out
 end
 
 -- How many rows lie from `lo` up to `hi`, row keys or key bounds.
