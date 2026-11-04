@@ -17,6 +17,7 @@
 --
 --   kind  element, little-endian           nil
 --   i8    int8                             equal to `none`
+--   i16   int16                            equal to `none`
 --   i32   int32                            equal to `none`
 --   i64   int64                            equal to `none`
 --   f64   float64                          NaN
@@ -27,8 +28,8 @@
 -- buffer, or 0 to n - 1 when sel is nil. Results go to caller buffers, so a
 -- caller reuses them from block to block.
 
-local WIDTH = { i8 = 1, i32 = 4, i64 = 8, f64 = 8, str = 8 }
-local CODE = { i8 = 1, i32 = 2, i64 = 3, f64 = 4, str = 5 }
+local WIDTH = { i8 = 1, i16 = 2, i32 = 4, i64 = 8, f64 = 8, str = 8 }
+local CODE = { i8 = 1, i32 = 2, i64 = 3, f64 = 4, str = 5, i16 = 6 }
 local OPS = { ["="] = 1, ["~="] = 2, ["<"] = 3, ["<="] = 4, [">"] = 5, [">="] = 6 }
 local TWO32 = 4294967296
 
@@ -73,7 +74,7 @@ local function output(fn: string, out: any)
     end
 end
 
--- The number at byte `at` of b, for kind codes 1 to 4.
+-- The number at byte `at` of b, for every kind code but 5.
 local function read(code: number, b: buffer, at: number): number
     if code == 4 then
         return buffer.readf64(b, at)
@@ -81,6 +82,8 @@ local function read(code: number, b: buffer, at: number): number
         return buffer.readi8(b, at)
     elseif code == 2 then
         return buffer.readi32(b, at)
+    elseif code == 6 then
+        return buffer.readi16(b, at)
     end
     return buffer.readu32(b, at) + buffer.readi32(b, at + 4) * TWO32
 end
@@ -173,15 +176,15 @@ function filter(kind: string, b: buffer, off: number, stride: number, op: string
     return kept
 end
 
--- Writes into `out` the candidates whose code c, of kind i8 or i32, has
+-- Writes into `out` the candidates whose code c, of kind i8, i16 or i32, has
 -- 0 <= c < len(set) and set[c] ~= 0, in order, and answers how many it
 -- wrote. A dictionary column tests any condition on its strings this way:
 -- the caller marks the codes whose strings pass. out may be sel.
 function filterIn(kind: string, b: buffer, off: number, stride: number, set: buffer,
                   sel: buffer?, n: number, out: buffer): number
     local code = column("filterIn", kind, b, off, stride, sel, n)
-    if code ~= 1 and code ~= 2 then
-        fail("filterIn", "takes kind i8 or i32")
+    if code ~= 1 and code ~= 2 and code ~= 6 then
+        fail("filterIn", "takes kind i8, i16 or i32")
     end
     if type(set) ~= "buffer" then
         fail("filterIn", "takes a buffer of bytes for set")
@@ -399,6 +402,14 @@ function selftest(): (boolean, string?)
     buffer.writeu8(set, 2, 1)
     if filterIn("i8", codes, 0, 1, set, nil, 4, sel) ~= 2 then
         return false, "filterIn i8"
+    end
+    local wide = buffer.create(6)
+    buffer.writei16(wide, 0, 300)
+    buffer.writei16(wide, 2, -32768)
+    buffer.writei16(wide, 4, -2)
+    if filter("i16", wide, 0, 2, "<", 0, -32768, nil, 3, sel) ~= 1
+        or buffer.readu32(sel, 0) ~= 2 then
+        return false, "filter i16"
     end
     local g = grouper("i8")
     local gids = buffer.create(16)

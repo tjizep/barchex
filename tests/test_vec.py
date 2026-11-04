@@ -58,7 +58,10 @@ end
 function call(step, impl, ...)
     local vec = vec_of(impl)
     if step == "native" then
-        return if barch.vec then 1 else 0
+        if barch.vec == nil then
+            return 0
+        end
+        return if pcall(barch.vec.grouper, "i16") then 2 else 1
     end
     local a = { ... }
     if step == "errors" then
@@ -184,14 +187,14 @@ function call(step, impl, ...)
 end
 """
 
-KINDS = ["i8", "i32", "i64", "f64", "str"]
+KINDS = ["i8", "i16", "i32", "i64", "f64", "str"]
 OPS = ["=", "~=", "<", "<=", ">", ">="]
-FORMAT = {"i8": "<b", "i32": "<i", "i64": "<q", "f64": "<d"}
-WIDTH = {"i8": 1, "i32": 4, "i64": 8, "f64": 8, "str": 8}
-NONE = {"i8": -128, "i32": -(2**31), "i64": -(2**53)}
+FORMAT = {"i8": "<b", "i16": "<h", "i32": "<i", "i64": "<q", "f64": "<d"}
+WIDTH = {"i8": 1, "i16": 2, "i32": 4, "i64": 8, "f64": 8, "str": 8}
+NONE = {"i8": -128, "i16": -(2**15), "i32": -(2**31), "i64": -(2**53)}
 # where each kind sits in a row, and the row's width; odd, so rows misalign
-ROW_AT = {"i8": 0, "i32": 1, "i64": 5, "f64": 13, "str": 21}
-ROW = 29
+ROW_AT = {"i8": 0, "i32": 1, "i64": 5, "f64": 13, "str": 21, "i16": 29}
+ROW = 31
 N = 300
 WORDS = ["", "a", "ab", "abc", "b", "ba", "z", "\x00x", "\xffend", "east", "west"]
 
@@ -207,6 +210,8 @@ def values(kind, rng):
             out.append(rng.choice(WORDS))
         elif kind == "i8":
             out.append(rng.randint(-127, 127) if rng.random() < 0.3 else rng.randint(-4, 4))
+        elif kind == "i16":
+            out.append(rng.choice([rng.randint(-(2**15) + 1, 2**15 - 1), rng.randint(-9, 9)]))
         elif kind == "i32":
             out.append(rng.choice([rng.randint(-(2**31) + 1, 2**31 - 1), rng.randint(-9, 9)]))
         elif kind == "i64":
@@ -280,10 +285,19 @@ def run(server, request):
     install(c, "lent", "VEC", "lent/vec.luau")
     c.execute_command("USE", "default")
     c.execute_command("SETF", "VECT", KERNELS)
-    if request.param == "native" and c.execute_command("CALLF", "VECT", "native", "ref") != 1:
+    native = c.execute_command("CALLF", "VECT", "native", "ref")
+    if request.param == "native" and native == 0:
         pytest.skip("barch has no barch.vec")
     impl = request.param
-    return lambda step, *a: c.execute_command("CALLF", "VECT", step, impl, *a)
+    call = lambda step, *a: c.execute_command("CALLF", "VECT", step, impl, *a)
+    # a barch.vec from before the i16 kind skips the i16 checks
+    call.i16 = impl == "ref" or native == 2
+    return call
+
+
+def kinds(run, *names):
+    if "i16" in names and not run.i16:
+        pytest.skip("barch.vec has no i16 kind")
 
 
 def test_selftest(server):
@@ -297,6 +311,7 @@ def test_selftest(server):
 @pytest.mark.parametrize("shape", ["column", "row"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_filter(run, kind, shape):
+    kinds(run, kind)
     rng = random.Random(f"{kind}{shape}")
     vals = values(kind, rng)
     data, off, stride = layout(kind, vals, shape)
@@ -323,8 +338,9 @@ def test_filter_without_none_reads_every_integer(run, shape):
 
 
 @pytest.mark.parametrize("shape", ["column", "row"])
-@pytest.mark.parametrize("kind", ["i8", "i32"])
+@pytest.mark.parametrize("kind", ["i8", "i16", "i32"])
 def test_filter_in(run, kind, shape):
+    kinds(run, kind)
     rng = random.Random(f"in{kind}{shape}")
     vals = [rng.randint(-3, 40) for _ in range(N)]
     data, off, stride = layout(kind, vals, shape)
@@ -364,6 +380,7 @@ def same_records(got, want, kind):
 @pytest.mark.parametrize("shape", ["column", "row"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_fold(run, kind, shape):
+    kinds(run, kind)
     rng = random.Random(f"fold{kind}{shape}")
     vals = values(kind, rng)
     if kind == "i64":
@@ -382,6 +399,7 @@ def test_fold(run, kind, shape):
 @pytest.mark.parametrize("shape", ["column", "row"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_grouper_numbers_values_in_first_seen_order(run, kind, shape):
+    kinds(run, kind)
     rng = random.Random(f"ids{kind}{shape}")
     vals = values(kind, rng)
     data, off, stride = layout(kind, vals, shape)
@@ -422,7 +440,7 @@ def test_errors(run):
         "vec.filter: kind str compares with a string",
         "vec.filter: kind i32 compares with a number",
         "vec.filter: stride must be a whole number from 1",
-        "vec.filterIn: takes kind i8 or i32",
+        "vec.filterIn: takes kind i8, i16 or i32" if run.i16 else "vec.filterIn: takes kind i8 or i32",
         "vec.fold: takes a buffer of n u32 group ids or nil for gids",
         "vec.mask: reads past the end of a buffer",
         "vec.offsets: reads past the end of a buffer",

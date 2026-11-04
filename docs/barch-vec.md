@@ -33,11 +33,12 @@ A column of elements lives in a buffer `b`. Element `i` starts at byte
 `off + i * stride`. A column block packs its elements, so `stride` is the
 element's width. A block of fixed-width rows holds one element per row, so
 `stride` is the row's width. Elements may be unaligned; the tests use a
-29-byte row, so load with `memcpy` or unaligned loads.
+31-byte row, so load with `memcpy` or unaligned loads.
 
 | kind | element, little-endian | width | nil |
 |---|---|---|---|
 | `i8` | int8 | 1 | equal to `none` |
+| `i16` | int16 | 2 | equal to `none` |
 | `i32` | int32 | 4 | equal to `none` |
 | `i64` | int64 | 8 | equal to `none` |
 | `f64` | float64 | 8 | NaN |
@@ -46,6 +47,11 @@ element's width. A block of fixed-width rows holds one element per row, so
 `none` is an optional Luau number that marks nil in the integer kinds, such
 as code 0 of a dictionary column. Pass `nil` when the column has no nil.
 `f64` ignores `none` and treats NaN as nil. `str` ignores it too.
+
+lent uses `i16` for the short blocks of `int` columns whose values fit in
+16 bits, and plans it for the codes of dictionary blocks with more than 255
+distinct values. It follows the same rules as the other integer kinds in
+every function.
 
 Most functions take candidates as `sel, n`. When `sel` is a buffer, the
 candidates are the u32 indexes `sel[0..n)`, in that order. When `sel` is
@@ -79,13 +85,14 @@ or `>=`.
 
 ### `vec.filterIn(kind, b, off, stride, set, sel, n, out) -> count`
 
-For kinds `i8` and `i32`. Writes the candidates whose code `c` has
+For kinds `i8`, `i16` and `i32`. Writes the candidates whose code `c` has
 `0 <= c < buffer.len(set)` and `set[c] ~= 0` into `out`, in order, and
 answers how many it wrote. A dictionary column tests any condition on its
 strings this way: lent marks the codes whose strings pass, then one call
 tests the block. For `i8`, a 256-entry table lookup per element suffices;
 with `buffer.len(set) <= 16` or 32, `pshufb`/`tbl` lookups test 16 or 32
-codes at once.
+codes at once. For `i16`, `set` holds up to 65,536 bytes, so look up each
+element in it.
 
 ### `vec.fold(kind, b, off, stride, none, sel, n, gids, out)`
 
@@ -125,9 +132,13 @@ Nil is one value. `-0` and `0` are one value, keyed `0`. Its ids serve as a
 - `g:size()` answers how many groups it holds.
 
 For `i8` keys, a 256-entry direct table maps a value to its id with no
-hashing. For other kinds, use an open-addressing hash table. A grouper over
-many distinct values grows, so allocate through the Luau state's allocator
-or report its size to the garbage collector, so a function's memory limit
+hashing. For other kinds, use an open-addressing hash table. `i16` keys may
+use a direct table of 65,536 entries. lent can create a grouper for each
+block, so keep creating an `i16` grouper and its first `g:ids` call on
+1,024 elements about as cheap as an `i8` grouper's: allocate the table
+lazily, or hash until the grouper holds many values. A grouper over many
+distinct values grows, so allocate through the Luau state's allocator or
+report its size to the garbage collector, so a function's memory limit
 covers it.
 
 ### `vec.offsets(b, off, n, start, out) -> end`
@@ -152,7 +163,7 @@ tests check them exactly.
 | a number kind with a non-number value | `vec.filter: kind i32 compares with a number` |
 | `stride` below 1 or fractional | `vec.filter: stride must be a whole number from 1` |
 | `off` or `n` below 0 or fractional | `vec.filter: off must be a whole number from 0` |
-| `filterIn` with another kind | `vec.filterIn: takes kind i8 or i32` |
+| `filterIn` with another kind | `vec.filterIn: takes kind i8, i16 or i32` |
 | `gids` shorter than `4 * n` | `vec.fold: takes a buffer of n u32 group ids or nil for gids` |
 | `mask` or `offsets` past the end | `vec.mask: reads past the end of a buffer` |
 | `grouper` with an unknown kind | `vec.grouper: unknown kind u8` |
@@ -177,29 +188,30 @@ BARCHD=/home/test/barch/cmake-build-release/barchd python -m tests.bench_vec
 ```
 
 `test_vec.py` runs each test twice, as `ref` on `lent.VEC` and as `native`
-on `barch.vec`. The native runs skip on a barch without `barch.vec`. The
-benchmark adds `native` columns when `barch.vec` exists and times each
-measurement for 200 ms, or the milliseconds its argument gives. Leave the lent
-files unchanged; report a disagreement with the reference so lent's owner
-decides which side changes.
+on `barch.vec`. The native runs skip on a barch without `barch.vec`, and
+the native `i16` runs skip while `vec.grouper("i16")` raises. The benchmark
+adds `native` columns when `barch.vec` exists and times each measurement
+for 200 ms, or the milliseconds its argument gives. Leave the lent files
+unchanged; report a disagreement with the reference so lent's owner decides
+which side changes.
 
 Rates on one machine, in millions of elements/s, blocks of 1,024 elements,
 column layout, as the reference and then native:
 
-| kernel | i8 | i32 | i64 | f64 | str |
-|---|---:|---:|---:|---:|---:|
-| `filter`, dense | 53 / 4,490 | 54 / 4,130 | 46 / 2,500 | 55 / 4,050 | 21 / 1,170 |
-| `filter`, half the slots in `sel` | 89 / 1,190 | 85 / 1,140 | 78 / 1,370 | 90 / 1,340 | 22 / 650 |
-| `filterIn`, dense | 42 / 4,440 | 42 / 3,980 | | | |
-| `fold`, one group | 49 / 6,650 | 50 / 7,380 | 46 / 4,510 | 53 / 5,680 | 60 / 2,940 |
-| `fold`, 16 groups | 50 / 980 | 50 / 1,000 | 44 / 1,080 | 53 / 1,020 | 56 / 2,430 |
-| `g:ids`, 16 distinct values | 32 / 2,640 | 33 / 1,140 | 27 / 1,190 | 30 / 1,110 | 10 / 600 |
-| `mask` | 200 / 5,510 | | | | |
+| kernel | i8 | i16 | i32 | i64 | f64 | str |
+|---|---:|---:|---:|---:|---:|---:|
+| `filter`, dense | 53 / 4,490 | 52 / 4,240 | 54 / 4,130 | 46 / 2,500 | 55 / 4,050 | 21 / 1,170 |
+| `filter`, half the slots in `sel` | 89 / 1,190 | 83 / 1,130 | 85 / 1,140 | 78 / 1,370 | 90 / 1,340 | 22 / 650 |
+| `filterIn`, dense | 42 / 4,440 | 41 / 3,580 | 42 / 3,980 | | | |
+| `fold`, one group | 49 / 6,650 | 49 / 8,320 | 50 / 7,380 | 46 / 4,510 | 53 / 5,680 | 60 / 2,940 |
+| `fold`, 16 groups | 50 / 980 | 50 / 1,020 | 50 / 1,000 | 44 / 1,080 | 53 / 1,020 | 56 / 2,430 |
+| `g:ids`, 16 distinct values | 32 / 2,640 | 32 / 1,360 | 33 / 1,140 | 27 / 1,190 | 30 / 1,110 | 10 / 600 |
+| `mask` | 200 / 5,510 | | | | | |
 
-In the 29-byte row layout the reference runs at the same rates, and native
-dense `filter` and one-group `fold` run at 1.5 to 2.8 billion, since each
-element sits in its own row. A plain Luau loop that only sums an `f64`
-block runs at 52 million, the same as the reference `fold`.
+In the row layout the reference runs at the same rates, and native dense
+`filter` and one-group `fold` run at 1.5 to 2.8 billion, since each element
+sits in its own row. A plain Luau loop that only sums an `f64` block runs
+at 52 million, the same as the reference `fold`.
 
 ## Where the time goes after this
 

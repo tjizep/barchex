@@ -5,7 +5,7 @@ reference, and barch.vec when barch provides it.
 
 An optional argument sets how many milliseconds each measurement lasts, 200
 by default. Each row is millions of elements per second through one kernel, on a column
-block (elements packed) and on a block of fixed-width rows (29 bytes, so most
+block (elements packed) and on a block of fixed-width rows (31 bytes, so most
 elements are unaligned)."""
 
 import sys
@@ -16,9 +16,9 @@ BENCH = r"""
 local N = 1024
 local WORDS = { "east", "west", "north", "south", "up", "down", "left", "right",
                 "red", "green", "blue", "cyan", "a", "bb", "ccc", "dddd" }
-local WIDTH = { i8 = 1, i32 = 4, i64 = 8, f64 = 8, str = 8 }
-local ROW_AT = { i8 = 0, i32 = 1, i64 = 5, f64 = 13, str = 21 }
-local ROW = 29
+local WIDTH = { i8 = 1, i16 = 2, i32 = 4, i64 = 8, f64 = 8, str = 8 }
+local ROW_AT = { i8 = 0, i32 = 1, i64 = 5, f64 = 13, str = 21, i16 = 29 }
+local ROW = 31
 
 -- element i of a kind: 16 distinct values, so groups and = find matches
 local function value(kind, i)
@@ -36,6 +36,7 @@ local function block(kind, shape)
     for i = 0, N - 1 do
         local at = off + i * stride
         if kind == "i8" then buffer.writei8(b, at, value(kind, i))
+        elseif kind == "i16" then buffer.writei16(b, at, value(kind, i))
         elseif kind == "i32" then buffer.writei32(b, at, value(kind, i))
         elseif kind == "i64" then
             local v = value(kind, i)
@@ -70,7 +71,7 @@ end
 
 function call(impl, kind, shape, kernel, ms)
     local vec = if impl == "native" then barch.vec else require("lent.VEC")
-    if vec == nil then return "-" end
+    if vec == nil or not pcall(vec.grouper, kind) then return "-" end
     ms = tonumber(ms)
     local b, off, stride = block(kind, shape)
     local sel = buffer.create(N * 4)
@@ -88,7 +89,7 @@ function call(impl, kind, shape, kernel, ms)
         rate = timed(ms, function() vec.filter(kind, b, off, stride, "<", mid, nil, sel, half, out) end)
         rate = rate * half / N
     elseif kernel == "filterIn" then
-        if kind ~= "i8" and kind ~= "i32" then return "-" end
+        if kind ~= "i8" and kind ~= "i16" and kind ~= "i32" then return "-" end
         local set = buffer.create(16)
         for c = 0, 15, 2 do buffer.writeu8(set, c, 1) end
         rate = timed(ms, function() vec.filterIn(kind, b, off, stride, set, nil, N, out) end)
@@ -119,7 +120,7 @@ function call(impl, kind, shape, kernel, ms)
 end
 """
 
-KINDS = ["i8", "i32", "i64", "f64", "str"]
+KINDS = ["i8", "i16", "i32", "i64", "f64", "str"]
 KERNELS = ["filter", "filter sel", "filterIn", "fold", "fold groups", "grouper ids", "mask",
            "plain sum"]
 
