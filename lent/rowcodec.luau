@@ -408,14 +408,19 @@ local DECODE = { ["{"] = dec_json, t = dec_text, b = dec_binary }
 local FORMAT = { ["{"] = "json", t = "text", b = "binary" }
 
 -- The stored value for `row` in `format` ("json", "text" or "binary"),
--- marked with the schema `version` (an integer from 0 to 2^32-1).
-function encode(schema: any, format: string, version: number, row: { [string]: any }): string
+-- marked with the schema `version` (an integer from 0 to 2^32-1). With
+-- `stored` true, `row` is a row read from the store, which encode() keeps as
+-- it is: a field it lacks stays without a value and reads as its default.
+function encode(schema: any, format: string, version: number, row: { [string]: any },
+                stored: boolean?): string
     local enc = ENCODE[format]
     if enc == nil then
         error("ROWCODEC has no format " .. tostring(format), 2)
     end
     check_version(version)
-    check_row(schema, row)
+    if not stored then
+        check_row(schema, row)
+    end
     return enc(schema, version, row)
 end
 

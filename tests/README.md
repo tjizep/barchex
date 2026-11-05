@@ -27,7 +27,9 @@ beside a development server.
 - `test_column_migrate.py` migrates a `column` table beside a `binary` twin
   through index builds, stored computed fills, added, renamed, dropped and
   retyped fields and stored path edges, checks that a dropped field's blocks
-  leave in pages, and checks that format changes and `uuid` ids are refused.
+  leave in pages, copies both tables to and from `column` and into a new
+  block size in pages while rows are written, and checks that `uuid` ids
+  are refused.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

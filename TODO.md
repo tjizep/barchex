@@ -22,8 +22,7 @@ and privacy policies are built.
   order the two calls.
 - **Column tables.** `format = "column"` needs `int` ids and shares
   conflicts and locks across each block. Without `block`, a field's values
-  of one block stay within 524,032 bytes. `migrate` refuses a format change
-  to or from `column`. See `docs/lent/codecs.md`.
+  of one block stay within 524,032 bytes. See `docs/lent/codecs.md`.
 
 ## Needed from barch
 
@@ -56,33 +55,6 @@ and privacy policies are built.
   TPC-H, the taxi data and Sakila, is in
   [docs/sql-survey.md](docs/sql-survey.md); its gaps section lists the
   features to add.
-- **Typed column blocks.** Tables with `block` store an `int` block in the
-  narrowest of `i8`, `i16`, `i32` and f64 that holds its values. On 409,600
-  rows a 0 to 99 field took 3.3 MB as f64, 0.83 MB as `i16` and about
-  0.41 MB as `i8`; `i16` ran a filter or `groupBy` on it 15% to 60% faster
-  than f64, and `i8` up to 10% faster than `i16`. The rows sizing takes
-  2 bytes per row for `int` fields. A block widens for a value outside its
-  range, narrows when its last such value goes, and splits into parts past
-  the value limit.
-- **Dictionary text blocks.** Tables with `block` store a text block whose
-  values repeat as a dictionary block: its distinct values sorted by byte,
-  then an `i8` code per slot, or an `i16` code past 255 values. A
-  `groupBy` on the field groups the codes, and a comparison filters them,
-  which raised `groupBy` with 10 values by 25% on `"htap"` blocks and 65%
-  on `"scan"` blocks. With 1,000 values on `"scan"` blocks, `i16` codes
-  cut the field from 4.9 MB to 2.0 MB and raised `groupBy` by 30% to 80%.
-  `min`, `max` and `order` with `limit` compare codes too. The rows sizing
-  takes the code width plus the dictionary's share of the block, and a
-  plain text block past the value limit splits into parts.
-
-  Each block keeps its own dictionary, so a new value re-sorts and recodes
-  one block, which a write already rewrites, and writers to different
-  blocks share no dictionary key. A table-wide ordered dictionary would
-  make codes comparable across blocks, but every new value between two
-  others then relabels codes in many blocks; see order-maintenance labeling
-  (Dietz and Sleator, 1987), order-preserving dictionaries for column
-  stores (Binnig, Hildenbrand and Färber, SIGMOD 2009) and the delta merge
-  of SAP HANA.
 - **SQL schema conversion (lower priority).** Turn `CREATE TABLE` and
   `CREATE INDEX` statements into a `lent.graph` declaration, and report the
   parts that have no lent form so the user decides each case.

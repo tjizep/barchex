@@ -480,6 +480,9 @@ local function store(self: any, pk: any, old: any, r: any, counter: string?): an
         local value = rc.encode(self.fields, self.t.format, self.version, r)
         write = function() barch.store.set(lay.row(self.t, pk), value) end
     end
+    -- rows that MIGRATE has copied keep both copies the same
+    local also = col.copied(self.t, pk)
+        and col.copy(self.t, self.fields, self.version, pk, old, r, self.lock)
     local moves = {}
     for _, ix in self.t.indexes do
         local ids = old and lay.linked(self.allEdges, ix, pk)
@@ -498,6 +501,9 @@ local function store(self: any, pk: any, old: any, r: any, counter: string?): an
     end
     move_entries(moves)
     write()
+    if also then
+        also()
+    end
     r.id = pk
     return r
 end
@@ -1174,6 +1180,9 @@ function Table:delete(pk: any): boolean
         col.remove(self.t, self.fields, pk, old, self.lock)
     else
         barch.store.remove(lay.row(self.t, pk))
+    end
+    if col.copied(self.t, pk) then
+        col.uncopy(self.t, self.fields, pk, old, self.lock)
     end
     return true
 end

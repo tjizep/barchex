@@ -78,7 +78,9 @@ storage. JSON field validation applies in every row format.
 
 `encode` raises an error for a key the fields do not define, a missing value
 for a field that is not optional, a value of the wrong kind, NaN, and a
-version outside 0 to 2^32-1. `decode` reads every format and answers the
+version outside 0 to 2^32-1. To store a row read from the store as it is,
+pass `true` as a fifth argument: `encode` then skips these checks, and a
+field the row lacks stays nil. `decode` reads every format and answers the
 row, the schema version it was written with and the format. A row written
 with an older field list reads with the current one: added fields are nil,
 values for removed fields are skipped, an `int` value reads into a `float`
@@ -181,8 +183,8 @@ blocks](#split-blocks).
 `migrate` records the rows in the catalog when it creates the table or adds
 a field, and a field keeps them after that. A change of `block` on a stored
 table copies its rows into blocks of the new size in pages; see [changing
-a column table's block
-size](migrate.md#changing-a-column-tables-block-size). A table without
+a table's format or block
+size](migrate.md#changing-a-tables-format-or-block-size). A table without
 `block` keeps 1,024 rows in every block.
 
 On 409,600 rows of three fields, one `aggregate` call and one `update` of
@@ -309,12 +311,10 @@ These rules apply to a column table:
   create rows in one block, or write one field in one block, conflict in
   optimistic mode and wait for each other in pessimistic mode. Keep
   concurrent writers on different blocks, or batch their rows in one writer.
-- **Format changes.** `migrate` refuses a change to or from `column` with
-  `changes format from A to B; copy its rows into a new table to move them
-  to or from column`.
-- **Block changes.** `migrate` copies the rows into new blocks in pages,
-  and the table holds both copies until the old blocks are removed; see
-  [block size](#block-size).
+- **Format and block changes.** `migrate` copies the rows into the new
+  format or blocks in pages, and the table holds both copies until the old
+  ones are removed; see
+  [changing a table's format or block size](migrate.md#changing-a-tables-format-or-block-size).
 - **Dropped fields.** `migrate` removes a dropped field's blocks in pages,
   with a `drop Table.field blocks` step. Writes to the table continue while
   the step runs.

@@ -25,7 +25,8 @@
 --                                       analyze() writes
 --
 -- A column table's <store> is its table name, or after a change of block
--- size, the name and "@" and the schema version that started the change.
+-- size or a change of format to column, the name and "@" and the schema
+-- version that started the change.
 -- Table names are snake case, so no other table's keys start with it.
 --
 -- A pk is encoded with its table's id kind, "uuid" or "int", and takes the

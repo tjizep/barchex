@@ -2742,9 +2742,9 @@ end
 
 local targets: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
 
--- While MIGRATE copies table t into blocks of another size, the table whose
--- blocks it copies into: t with the store, block and rows of t.rebuild.
--- Answers nil when no copy runs.
+-- While MIGRATE copies table t into another format or blocks of another
+-- size, the table it copies into: t with the format, store, block and rows
+-- of t.rebuild. Answers nil when no copy runs.
 function target(t: any): any
     local m = t.rebuild
     if m == nil then
@@ -2755,7 +2755,7 @@ function target(t: any): any
         return n
     end
     n = table.clone(t)
-    n.store, n.block, n.rows, n.rebuild = m.store, m.block, m.rows, nil
+    n.format, n.store, n.block, n.rows, n.rebuild = m.format, m.store, m.block, m.rows, nil
     n.fields = {}
     for i, f in t.fields do
         local d = table.clone(f)
@@ -2766,9 +2766,9 @@ function target(t: any): any
     return n
 end
 
--- Whether a write to row pk of t also goes to the blocks MIGRATE copies
+-- Whether a write to row pk of t also goes to the table MIGRATE copies it
 -- into: rows up to the last one it copied keep both copies the same.
-local function copied(t: any, pk: number): boolean
+function copied(t: any, pk: number): boolean
     local m = t.rebuild
     return m ~= nil and m.upto ~= nil and pk <= m.upto
 end
@@ -2805,16 +2805,12 @@ local function put_row(t: any, fields: any, pk: number, old: any, r: any, lock: 
             end
         end
     end
-    local also = copied(t, pk) and put_row(target(t), fields, pk, old, r, lock)
     return function()
         if old == nil then
             mark(t, g, block, slot, true, lock)
         end
         for _, put in writes do
             put()
-        end
-        if also then
-            also()
         end
     end
 end
@@ -2828,10 +2824,29 @@ function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?
     return put_row(t, fields, pk, old, r, lock)
 end
 
--- Writes row r, as scan() reads it, at pk in the blocks MIGRATE copies
--- table t into. A field without a value stays without one.
-function copy(t: any, fields: any, pk: number, r: any)
-    put_row(target(t), fields, pk, nil, r)()
+-- Answers a function that writes row r, as the store holds it, at pk in
+-- the table MIGRATE copies table t into, given the row it replaces there
+-- (nil for a new row). A field without a value stays without one. `version`
+-- marks a row of a row format.
+function copy(t: any, fields: any, version: number, pk: number, old: any, r: any,
+              lock: boolean?): () -> ()
+    local to = target(t)
+    if to.format == "column" then
+        return put_row(to, fields, pk, old, r, lock)
+    end
+    local value = rc.encode(fields, to.format, version, r, true)
+    return function() barch.store.set(lay.row(to, pk), value) end
+end
+
+-- Removes the row at pk, which holds `old`, from the table MIGRATE copies
+-- table t into.
+function uncopy(t: any, fields: any, pk: number, old: any, lock: boolean?)
+    local to = target(t)
+    if to.format == "column" then
+        remove(to, fields, pk, old, lock)
+    else
+        barch.store.remove(lay.row(to, pk))
+    end
 end
 
 -- Removes the row at pk, which holds `old`. A field block whose last row
@@ -2866,9 +2881,6 @@ function remove(t: any, fields: any, pk: number, old: any, lock: boolean?)
                 put_number(t, f.name, fb, sp, k, fs, nil, was)
             end
         end
-    end
-    if copied(t, pk) then
-        remove(target(t), fields, pk, old, lock)
     end
 end
 

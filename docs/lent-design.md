@@ -236,9 +236,9 @@ the basics work.
 Each table names its row format. Every stored row records the schema
 version it was written with, and `ROWCODEC` reads `json`, `text` and
 `binary`, so a table can change between them and convert its rows over time.
-A `column` table stores fields in blocks with no row keys, so `migrate`
-refuses a change to or from `column`; see
-[Column tables](lent/codecs.md#column-tables-with-columns).
+A `column` table stores fields in blocks with no row keys, so a change to
+or from `column` copies the rows in pages; see
+[changing a table's format or block size](lent/migrate.md#changing-a-tables-format-or-block-size).
 
 | format | stored value | fields named by | use |
 |---|---|---|---|

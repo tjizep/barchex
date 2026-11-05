@@ -7,7 +7,9 @@ from .test_client import setup
 redis = pytest.importorskip("redis")
 
 # Cold keeps its rows in column blocks and Warm in binary rows. Each stage of
-# the schema migrates both, and both must then answer the same.
+# the schema migrates both, and both must then answer the same. The swapped
+# stages move Cold to binary rows, or json rows in swapped_json, and Warm to
+# column blocks.
 APP = """
 local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
@@ -28,7 +30,7 @@ local function table_of(stage, name, format, other)
     local indexes, edges = {}, {}
     if has("index", "unique") then indexes = { lent.index("qty") } end
     if has("unique") then indexes[2] = lent.index("name"):unique():name("by_name") end
-    if has("added", "sized_added") then
+    if has("added", "sized_added", "swapped_added") then
         table.insert(fields, f.int "rank":default(5))
         table.insert(fields, f.string "memo":default("new"))
         table.insert(fields, f.string "extra":optional())
@@ -53,15 +55,19 @@ local function table_of(stage, name, format, other)
     end } } or nil
     -- the block option of the column table: 1024 bytes in the sized stages
     local block = if format ~= "column" then nil
-        elseif has("sized", "sized_added", "sized_dropped") then 1024
+        elseif has("sized", "sized_added", "sized_dropped", "swapped_added") then 1024
         elseif has("resized") then 4096 else nil
     return lent.schema(name) { id = "int", format = format, block = block, fields = fields,
                                indexes = indexes, edges = edges, policy = policy }
 end
 
 local function app(stage)
+    local cold, warm = "column", "binary"
+    if string.find(stage, "^swapped") then
+        cold, warm = if stage == "swapped_json" then "json" else "binary", "column"
+    end
     local tables = {
-        table_of(stage, "Cold", "column", "colds"), table_of(stage, "Warm", "binary", "warms"),
+        table_of(stage, "Cold", cold, "colds"), table_of(stage, "Warm", warm, "warms"),
     }
     if stage == "edge" or stage == "through" then
         table.insert(tables, lent.schema "Shop" {
@@ -202,6 +208,13 @@ function call(step, stage, ...)
             return { tostring(t.block), tostring(t.store),
                      lay.walk(lay.present(from), function() end)
                          + lay.walk(lay.columns(from), function() end) }
+        end)
+    end
+    if step == "format" then
+        -- table args[1]'s format and store, and how many row keys it holds
+        return barch.tx.run(function()
+            local t = m.load().tables[args[1]]
+            return { t.format, tostring(t.store), lay.walk(lay.row(t), function() end) }
         end)
     end
     local db = client.open(app(stage))
@@ -396,26 +409,6 @@ def test_a_column_table_needs_int_ids(client, schema, want):
         client.execute_command("CALLF", "COLMU")
 
 
-@pytest.mark.parametrize("before, after", [("binary", "column"), ("column", "binary"),
-                                           ("json", "column")])
-def test_a_format_change_to_or_from_column_is_refused(client, request, before, after):
-    setup(client)
-    client.execute_command("USE", "colm_" + re.sub(r"\W", "_", request.node.name))
-    client.execute_command("SETF", "COLMF", """
-local lent = require("lent.SCHEMA")
-local m = require("lent.MIGRATE")
-function call(format)
-    return m.migrate(lent.graph {
-        lent.schema "T" { id = "int", format = format, fields = { lent.field.int "n" } },
-    }).version
-end
-""")
-    assert client.execute_command("CALLF", "COLMF", before) == 1
-    want = f"T changes format from {before} to {after}; copy its rows into a new table"
-    with pytest.raises(redis.ResponseError, match=re.escape(want)):
-        client.execute_command("CALLF", "COLMF", after)
-
-
 COPY = ["copy Cold blocks", "drop Cold old blocks"]
 
 
@@ -497,3 +490,57 @@ def test_apply_changes_the_block_in_one_transaction(run):
     assert run("apply", "sized") == "ok"
     same_rows(run, "sized")
     assert run("stored", "sized", "cold")[:3] == ["1024", "cold@2", 0]
+
+
+MOVE = ["copy Cold rows", "copy Warm blocks", "drop Cold old blocks", "drop Warm old rows"]
+
+
+def test_a_format_change_copies_rows_in_pages(run):
+    seeded(run, 2500)
+    done, processed, steps = run("migrate", "swapped", 1000)
+    assert (done, processed, steps) == (0, 1000, MOVE)
+    # rows stay readable and writable while the copy runs: one it copied,
+    # one it has not reached, a new one, and deletes on both sides
+    for pk in (5, 2400):
+        cold, warm = run("both", "swapped", "write", pk)
+        assert cold == warm
+    assert run("both", "swapped", "create", "late", 3) == [2501, 2501]
+    assert run("both", "swapped", "delete", 7) == ["true", "true"]
+    assert run("both", "swapped", "delete", 2300) == ["true", "true"]
+    same_rows(run, "swapped")
+    migrate(run, "swapped", 1000)
+    same_rows(run, "swapped")
+    assert run("both", "swapped", "by_qty", 100) == [[5, 2400], [5, 2400]]
+    assert run("format", "swapped", "cold") == ["binary", "nil", 2499]
+    assert run("stored", "swapped", "cold")[2] == 0
+    assert run("format", "swapped", "warm") == ["column", "warm@2", 0]
+
+
+@pytest.mark.parametrize("stage", ["swapped", "swapped_json", "swapped_added"])
+def test_a_format_change_goes_both_ways(run, stage):
+    seeded(run, 1100)
+    for pk in (3, 1000):
+        run("both", "base", "long", pk)
+    migrate(run, stage, 300)
+    same_rows(run, stage)
+    assert run("format", stage, "cold")[0] == ("json" if stage == "swapped_json" else "binary")
+    if stage == "swapped_added":
+        assert run("both", stage, "by_rank", 5) == [1100, 1100]
+    cold, warm = run("both", stage, "write", 9)
+    assert cold == warm
+    migrate(run, "base", 300)
+    same_rows(run, "base")
+    assert run("format", "base", "cold") == ["column", "cold@3", 0]
+    assert run("format", "base", "warm") == ["binary", "nil", 1100]
+    assert run("stored", "base", "warm@2")[2] == 0
+    cold, warm = run("both", "base", "long", 1050)
+    assert cold == warm
+
+
+def test_apply_changes_the_format_in_one_transaction(run):
+    seeded(run, 1100)
+    assert run("apply", "swapped") == "ok"
+    same_rows(run, "swapped")
+    assert run("format", "swapped", "cold") == ["binary", "nil", 1100]
+    assert run("format", "swapped", "warm") == ["column", "warm@2", 0]
+    assert run("stored", "swapped", "cold")[2] == 0
