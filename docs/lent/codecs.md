@@ -163,19 +163,18 @@ lent.schema "Trip" {
 
 lent fits each block close to the target size. The table and each field get
 the power of two of rows nearest to it. A presence block takes 1 byte per
-row, an `int` field 2 for the int16 of a short block, and other number
-fields 8. A text field is sized as a dictionary block that holds its most
-distinct values, half its rows: a 2-byte code per row, or 1 byte in blocks
-of up to 256 rows, and per value 4 bytes plus the field's `maxLen`, its
-longest `enum` choice, or 12 bytes, up to 33. A field never has more rows
+row, an `int` field 2, and other number fields 8. A text field is sized as
+a dictionary block that holds its most distinct values, half its rows: a
+2-byte code per row, or 1 byte in blocks of up to 256 rows, and per value
+4 bytes plus the field's `maxLen`, its longest `enum` choice, or 12 bytes,
+up to 33. A field never has more rows
 than the presence blocks. With `block = "htap"`, presence blocks hold 4,096
 rows, `int` fields 2,048, other number fields 512 and a `string` field
 without `maxLen` 512.
 
-An `int` block that holds a value outside -32,767 to 32,767 takes 4 bytes
-per row, or 8 with a value outside -2,147,483,647 to 2,147,483,647, and a
-plain text block takes each value's length plus 4 bytes, so these blocks
-can grow past the target size. A block that grows past
+An `int` block takes 1 to 8 bytes per row, depending on its values; see
+the kinds below. A plain text block takes each value's length plus 4 bytes,
+so these blocks can grow past the target size. A block that grows past
 barch's value limit is stored in parts; see [Split
 blocks](#split-blocks).
 
@@ -215,6 +214,7 @@ schema`.
 |---|---|---|
 | presence | a 16-byte header, then 1 byte per slot, 1 for a slot that holds a row; without `block`, the 1,024 bytes, then the row count as an int32 | every table |
 | number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
+| byte | with `block` only: an 8-byte header, then an int8 per slot, with -128 for nil | `int` |
 | short | with `block` only: an 8-byte header, then an int16 per slot, with -32,768 for nil | `int` |
 | wide | with `block` only: an 8-byte header, then an int32 per slot, with -2,147,483,648 for nil | `int` |
 | text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
@@ -243,11 +243,12 @@ blocks of 409,600 rows with 1,000 distinct values, dictionary blocks took
 2.0 MB where plain text took 4.9 MB, and a `groupBy` on the field ran 30%
 to 80% faster.
 
-With `block`, an `int` block takes the narrowest of three kinds that holds
+With `block`, an `int` block takes the narrowest of four kinds that holds
 its values:
 
 | kind | bytes per row | values |
 |---|---:|---|
+| byte | 1 | -127 to 127 |
 | short | 2 | -32,767 to 32,767 |
 | wide | 4 | -2,147,483,647 to 2,147,483,647 |
 | number | 8 | any |
@@ -256,12 +257,14 @@ A new `int` block starts as the kind its first value needs. A write that
 stores a value outside the block's range rewrites the block as the kind
 that holds it. An update or delete that removes the last value that needed
 the block's kind rewrites it as the narrowest kind its remaining values
-fit. Reads and query answers are the same for all three kinds. The rows
-sizing counts 2 bytes per row for every `int` field, so a short block fills
-the target block size, a wide block is twice that size, and a number block
-four times. On 409,600 rows with an `int` field of values 0 to 99, short
-blocks shrank that field from 3.3 MB to 0.83 MB, and a filter or `groupBy`
-on it ran 15% to 60% faster.
+fit. Reads and query answers are the same for all four kinds. The rows
+sizing counts 2 bytes per row for every `int` field, so a byte block is half
+the target block size, a short block fills it, a wide block is twice that
+size, and a number block four times. On 409,600 rows with an `int` field of
+values 0 to 99, short blocks shrank that field from 3.3 MB to 0.83 MB, and
+a filter or `groupBy` on it ran 15% to 60% faster. Byte blocks halve the
+field again, to about 0.41 MB, and ran a filter or `groupBy` on it up to 10%
+faster than short blocks.
 
 With `block`, a text block keeps the first 33 bytes of a value longer than
 32 bytes, and the whole value is stored under its own key. Reads, filters

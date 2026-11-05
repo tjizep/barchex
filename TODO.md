@@ -59,14 +59,14 @@ and privacy policies are built.
   TPC-H, the taxi data and Sakila, is in
   [docs/sql-survey.md](docs/sql-survey.md); its gaps section lists the
   features to add.
-- **Typed column blocks.** Tables with `block` store an `int` block whose
-  values fit in 16 bits as a short block of `i16` values, a quarter of the
-  bytes of an f64 block. On 409,600 rows that shrank a 0 to 99 field from
-  3.3 MB to 0.83 MB, and a filter or `groupBy` on it ran 15% to 60% faster.
-  The rows sizing takes 2 bytes per row for `int` fields. A block widens
-  to `i32` for values past 16 bits and to f64 past 32 bits, narrows when
-  its last such value goes, and splits into parts past the value limit.
-  The rest: `i8` blocks, if the `i16` savings justify a fourth width.
+- **Typed column blocks.** Tables with `block` store an `int` block in the
+  narrowest of `i8`, `i16`, `i32` and f64 that holds its values. On 409,600
+  rows a 0 to 99 field took 3.3 MB as f64, 0.83 MB as `i16` and about
+  0.41 MB as `i8`; `i16` ran a filter or `groupBy` on it 15% to 60% faster
+  than f64, and `i8` up to 10% faster than `i16`. The rows sizing takes
+  2 bytes per row for `int` fields. A block widens for a value outside its
+  range, narrows when its last such value goes, and splits into parts past
+  the value limit.
 - **Text blocks of 8,192 rows on `"scan"`.** Sizing text fields as
   dictionary blocks doubled a 10-value `string` field's blocks on `"scan"`
   from 4,096 to 8,192 rows, about 8.3 KB each. On 409,600 rows a `groupBy`

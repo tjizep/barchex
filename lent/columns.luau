@@ -23,16 +23,19 @@
 --              slot, an f64, for int, float and what ROWCODEC stores as
 --              those, and bool as 1 and 0. NaN is nil, since every row
 --              format refuses NaN as a value. Without `block`: no header.
---   short      an int field's block in a table with `block` while its
---              values fit in 16 bits: an 8-byte header (1, "h", 0, the
---              rows), then an int16 per slot, -32768 for nil.
+--   byte       an int field's block in a table with `block` while its
+--              values fit in 8 bits: an 8-byte header (1, "b", 0, the
+--              rows), then an int8 per slot, -128 for nil.
+--   short      an int field's block while its values fit in 16 bits: an
+--              8-byte header (1, "h", 0, the rows), then an int16 per slot,
+--              -32768 for nil.
 --   wide       an int field's block while its values fit in 32 bits: an
 --              8-byte header (1, "i", 0, the rows), then an int32 per slot,
 --              -2147483648 for nil. An int block takes the narrowest of
---              short, wide and number that holds its values: a new block
---              starts in the one its first value needs, a write of a value
---              outside its range widens it, and a write that removes the
---              last value that needed its width narrows it.
+--              byte, short, wide and number that holds its values: a new
+--              block starts in the one its first value needs, a write of a
+--              value outside its range widens it, and a write that removes
+--              the last value that needed its width narrows it.
 --   text       for string, enum, json and bytes: a 24-byte header (1, "t",
 --              0, the rows, the bytes in use, the slots in use, the values
 --              kept whole elsewhere, and at least how many distinct values
@@ -140,18 +143,21 @@ local function empty_numbers(data: number, rows: number, b: buffer): buffer
 end
 
 -- The formats of a number block in a table with `block`: f64s, or for
--- an int field the int16s of a short block or the int32s of a wide one.
+-- an int field the int8s of a byte block, the int16s of a short block or
+-- the int32s of a wide one.
 -- Each has an 8-byte header, then `width` bytes per slot from byte 8. An
 -- int format marks nil with `none` and holds whole numbers within +-most.
 -- `rank` orders them from the narrowest.
 local SHEAD = 8
 local STAG = string.byte("h")
 local NIL_SHORT = -32768
-local INT16 = { tag = "h", width = 2, kind = "i16", none = NIL_SHORT, most = 32767, rank = 1 }
+local INT8 = { tag = "b", width = 1, kind = "i8", none = -128, most = 127, rank = 1 }
+local INT16 = { tag = "h", width = 2, kind = "i16", none = NIL_SHORT, most = 32767, rank = 2 }
 local INT32 = { tag = "i", width = 4, kind = "i32", none = -2147483648, most = 2147483647,
-                rank = 2 }
-local F64 = { tag = "n", width = 8, kind = "f64", rank = 3 }
-local FORMATS = { [STAG] = INT16, [string.byte("i")] = INT32, [string.byte("n")] = F64 }
+                rank = 3 }
+local F64 = { tag = "n", width = 8, kind = "f64", rank = 4 }
+local FORMATS = { [string.byte("b")] = INT8, [STAG] = INT16, [string.byte("i")] = INT32,
+                  [string.byte("n")] = F64 }
 
 -- The int format of number block b, or nil for f64s.
 local function int_format(b: buffer): any
@@ -162,18 +168,21 @@ end
 -- The narrowest format that holds x, where nil fits every format.
 local function format_for(x: number?): any
     if x == nil or x ~= x then
-        return INT16
+        return INT8
     elseif x ~= math.floor(x) or math.abs(x) > INT32.most then
         return F64
     end
-    return if math.abs(x) <= INT16.most then INT16 else INT32
+    local a = math.abs(x)
+    return if a <= INT8.most then INT8 elseif a <= INT16.most then INT16 else INT32
 end
 
 -- The value in slot s of number block b of format f, NaN for nil.
 local function cell(b: buffer, f: any, s: number): number
     local at = SHEAD + s * f.width
     local x
-    if f == INT16 then
+    if f == INT8 then
+        x = buffer.readi8(b, at)
+    elseif f == INT16 then
         x = buffer.readi16(b, at)
     elseif f == INT32 then
         x = buffer.readi32(b, at)
@@ -191,7 +200,9 @@ local function set_cell(b: buffer, f: any, s: number, x: number?)
         return
     end
     local v = if x == nil or x ~= x then f.none else x
-    if f == INT16 then
+    if f == INT8 then
+        buffer.writei8(b, at, v)
+    elseif f == INT16 then
         buffer.writei16(b, at, v)
     else
         buffer.writei32(b, at, v)
@@ -217,7 +228,7 @@ end
 -- The narrowest format that holds every value of number block b, of
 -- format f and `rows` slots.
 local function narrowest(b: buffer, f: any, rows: number): any
-    local best = INT16
+    local best = INT8
     for s = 0, rows - 1 do
         local need = format_for(cell(b, f, s))
         if need.rank > best.rank then
@@ -2323,12 +2334,14 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
             if sp.short then
                 format, parts = number_block(k)
             end
-            if format == INT16 then
-                -- 4 bytes ending at the slot's int16, which follows the header
-                local w = barch.store.getInt32At(k, SHEAD + fs * 2 - 2)
-                local h = w and (w // 65536) % 65536
-                if h and h ~= 32768 then
-                    r[f.name] = if h > 32767 then h - 65536 else h
+            if format == INT8 or format == INT16 then
+                -- 4 bytes ending at the slot's cell, which follows the
+                -- header; their top bytes are the signed cell
+                local width = format.width
+                local w = barch.store.getInt32At(k, SHEAD + (fs + 1) * width - 4)
+                local x = w and w // 2 ^ (32 - 8 * width)
+                if x and x ~= format.none then
+                    r[f.name] = x
                 end
                 continue
             elseif format == INT32 then
@@ -2347,7 +2360,8 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
     return r
 end
 
-local SHORT_CELL = buffer.create(2)
+-- one cell of a byte or short block, to write with setBufferAt
+local CELLS = { [INT8] = buffer.create(1), [INT16] = buffer.create(2) }
 
 -- The empty block of format `to` of an int field's spec sp, made when
 -- first needed.
@@ -2412,9 +2426,14 @@ local function put_number(t: any, name: string, block: number, sp: any, k: strin
             end
         end
         local at, off = cell_at(k, parts, SHEAD + slot * format.width)
-        if format == INT16 then
-            buffer.writei16(SHORT_CELL, 0, x or NIL_SHORT)
-            barch.store.setBufferAt(at, SHORT_CELL, off)
+        local one = CELLS[format]
+        if one then
+            if format == INT8 then
+                buffer.writei8(one, 0, x or INT8.none)
+            else
+                buffer.writei16(one, 0, x or NIL_SHORT)
+            end
+            barch.store.setBufferAt(at, one, off)
         elseif format == INT32 then
             barch.store.setInt32At(at, x or INT32.none, off)
         else
@@ -2909,8 +2928,17 @@ function selftest(): (boolean, string?)
         or cell(wn, INT32, 1) == cell(wn, INT32, 1) or int_format(h) ~= INT16
         or buffer.readi16(h, SHEAD) ~= 3 or buffer.readi16(h, SHEAD + 2) ~= NIL_SHORT
         or buffer.readi16(h, SHEAD + 6) ~= 32767 or format_for(2 ^ 31) ~= F64
-        or format_for(-2147483647) ~= INT32 or format_for(0.5) ~= F64 then
+        or format_for(-2147483647) ~= INT32 or format_for(0.5) ~= F64
+        or format_for(-127) ~= INT8 or format_for(128) ~= INT16 or format_for(nil) ~= INT8 then
         return false, "int block formats"
+    end
+    buffer.writef64(nb, 8 + 2 * 8, -127)
+    buffer.writef64(nb, 8 + 3 * 8, 127)
+    local bb = reformat(nb, F64, 4, narrowest(nb, F64, 4))
+    if int_format(bb) ~= INT8 or buffer.len(bb) ~= SHEAD + 4 or cell(bb, INT8, 0) ~= 3
+        or cell(bb, INT8, 1) == cell(bb, INT8, 1) or buffer.readi8(bb, SHEAD + 1) ~= -128
+        or cell(bb, INT8, 2) ~= -127 or cell(bb, INT8, 3) ~= 127 then
+        return false, "byte block from a number block"
     end
     -- past 255 values a dictionary block takes int16 codes, and int8 codes
     -- again when its values fall back to 255

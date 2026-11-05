@@ -475,8 +475,8 @@ end
 
 -- how fields' blocks are stored, region's and note's by default: "d" for
 -- dictionary blocks with int8 codes, "D" with int16 codes, "t" for plain
--- text, "h" for int16, "i" for int32 and "n" for f64 numbers, and after
--- the letter the parts of a split block
+-- text, "b" for int8, "h" for int16, "i" for int32 and "n" for f64
+-- numbers, and after the letter the parts of a split block
 function steps.kinds(_, ...)
     local lay = require("lent.LAYOUT")
     local kc = require("lent.KEYCODEC")
@@ -982,60 +982,56 @@ def test_dictionary_blocks_past_255_values_take_int16_codes(large):
             assert len(set(answers)) == 1, (case, answers)
 
 
-def test_small_whole_numbers_use_short_blocks(run):
+def test_small_whole_numbers_use_narrow_blocks(run):
     if run.block == "fixed":
         pytest.skip("a fixed table keeps its number blocks as f64")
     assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
-    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    # qty holds 0 to 7 and rank its default, so each block takes int8s
+    assert run("kinds", "qty", "rank") == "qty=b rank=b"
     cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value",
              "defaults", "byRank", "ranked")
     for case in cases:
         same(run, "ask", case)
-    # nil and +-32,767 stay short; a value past them widens its block to
-    # int32, and one past +-2,147,483,647 to f64
+    # nil and +-127 stay in int8s
     write_both(run, "clear", 5, "rank")
-    for pk, qty in ((6, -32767), (7, 32767), (8, 0)):
+    for pk, qty in ((6, -127), (7, 127), (8, 0)):
         write_both(run, "update", pk, {"qty": qty})
     for case in cases:
         same(run, "ask", case)
-    assert run("kinds", "qty", "rank") == "qty=h rank=h"
-    for pk, qty in ((9, 40000), (300, -32768), (500, 2)):
+    assert run("kinds", "qty", "rank") == "qty=b rank=b"
+    # a value past a width widens its block to int16, int32 or f64; rows 9
+    # to 300 share a block, and rows from 512 keep int8s
+    for pk, qty, kinds in ((9, 128, "bh"), (300, -32767, "bh"), (10, 40000, "bi"),
+                           (11, -2147483647, "bi"), (12, 3000000000, "bn")):
         write_both(run, "update", pk, {"qty": qty})
+        assert run("kinds", "qty") == "qty=" + kinds
         for case in cases:
             same(run, "ask", case)
-    assert run("kinds", "qty") == "qty=hi"
-    for pk, qty in ((10, 2147483647), (11, -2147483647)):
-        write_both(run, "update", pk, {"qty": qty})
-    assert run("kinds", "qty") == "qty=hi"
-    for case in cases:
-        same(run, "ask", case)
-    # -2,147,483,648 marks nil in an int32 block, so it takes f64
-    for pk, qty in ((12, -2147483648), (13, 3000000000)):
-        write_both(run, "update", pk, {"qty": qty})
-        assert run("kinds", "qty") == "qty=hn"
-        for case in cases:
-            same(run, "ask", case)
-        write_both(run, "update", pk, {"qty": 4})
     # a block narrows when its last value past a width goes, by an update,
     # a delete or a cleared field, to the narrowest width its values fit
-    assert run("kinds", "qty") == "qty=hi"
+    for pk, kinds in ((12, "bi"), (11, "bi"), (10, "bh"), (300, "bh")):
+        write_both(run, "update", pk, {"qty": 1})
+        assert run("kinds", "qty") == "qty=" + kinds
+    write_both(run, "delete", 9, {})
+    assert run("kinds", "qty") == "qty=b"
     write_both(run, "update", 13, {"qty": 3000000000})
+    assert run("kinds", "qty") == "qty=bn"
     write_both(run, "update", 13, {"qty": 1})
-    assert run("kinds", "qty") == "qty=hi"
-    for pk in (10, 11):
-        write_both(run, "update", pk, {"qty": 3})
-    write_both(run, "update", 9, {"qty": 1})
-    assert run("kinds", "qty") == "qty=hi"
-    write_both(run, "update", 300, {"qty": -5})
-    assert run("kinds", "qty") == "qty=h"
-    write_both(run, "update", 9, {"qty": 40000})
+    assert run("kinds", "qty") == "qty=b"
     write_both(run, "update", 10, {"rank": 5000000000})
-    assert run("kinds", "qty", "rank") == "qty=hi rank=hn"
+    assert run("kinds", "rank") == "rank=bn"
     for case in cases:
         same(run, "ask", case)
-    write_both(run, "delete", 9, {})
     write_both(run, "clear", 10, "rank")
-    assert run("kinds", "qty", "rank") == "qty=h rank=h"
+    assert run("kinds", "rank") == "rank=b"
+    # each width's least value marks nil, so it takes the next width
+    for qty, kinds in ((-128, "bh"), (-32768, "bi"), (-2147483648, "bn")):
+        write_both(run, "update", 14, {"qty": qty})
+        assert run("kinds", "qty") == "qty=" + kinds
+        for case in cases:
+            same(run, "ask", case)
+        write_both(run, "update", 14, {"qty": 0})
+        assert run("kinds", "qty") == "qty=b"
     write_both(run, "delete", 7, {})
     write_both(run, "create", 2000, {"region": "n", "qty": 70000})
     write_both(run, "create", 2001, {"region": "n", "qty": -2147483648})
@@ -1048,10 +1044,11 @@ def test_small_whole_numbers_use_short_blocks(run):
 
 def test_int_blocks_split_past_the_value_limit(most):
     run = most
-    # 131,072 int16s fit in one key; as int32s they take 524,296 bytes,
-    # which split into three parts, and as f64s 1,048,584, which take five
+    # 131,072 int8s or int16s fit in one key; as int32s they take 524,296
+    # bytes, which split into three parts, and as f64s 1,048,584, which
+    # take five
     assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
-    assert run("kinds", "qty") == "qty=h"
+    assert run("kinds", "qty") == "qty=b"
     cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value", "all")
     # values either side of the first part's end, and in the last part
     write_both(run, "update", 9, {"qty": 40000})
@@ -1075,7 +1072,7 @@ def test_int_blocks_split_past_the_value_limit(most):
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
     # the block narrows to int32 when its last value past 32 bits goes,
-    # and turns short and whole when its last value past +-32767 goes
+    # and takes int8s whole when its last value past +-127 goes
     write_both(run, "update", 32767, {"qty": 2})
     assert run("kinds", "qty") == "qty=i3"
     assert run("parts") == 2
@@ -1083,20 +1080,20 @@ def test_int_blocks_split_past_the_value_limit(most):
         same(run, "ask", case)
     for pk in (9, 65534, 131071):
         write_both(run, "update", pk, {"qty": 2})
-    assert run("kinds", "qty") == "qty=h"
+    assert run("kinds", "qty") == "qty=b"
     assert run("parts") == 0
     for case in cases:
         same(run, "ask", case)
     # a block that starts with a value past 32 bits starts split, and goes
     # with its parts when its last row leaves
     write_both(run, "create", 200000, {"region": "n", "qty": 9000000000})
-    assert run("kinds", "qty") == "qty=hn5"
+    assert run("kinds", "qty") == "qty=bn5"
     assert run("parts") == 4
     same(run, "get", "200000")
     write_both(run, "delete", 200000, {})
     assert run("parts") == 0
     write_both(run, "create", 200000, {"region": "n", "qty": 90000})
-    assert run("kinds", "qty") == "qty=hi3"
+    assert run("kinds", "qty") == "qty=bi3"
     assert run("parts") == 2
     same(run, "get", "200000")
     write_both(run, "delete", 200000, {})
