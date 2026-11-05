@@ -2740,12 +2740,41 @@ local function mark(t: any, g: any, block: number, slot: number, on: boolean,
     return n, presence
 end
 
--- Checks row r for pk, given the row it replaces (nil for a new row), and
--- answers a function that stores it. Everything that can refuse the row
--- happens here, so a caller can check before its first write. `lock` is true
--- for a pessimistic caller.
-function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?): () -> ()
-    rc.validate(fields, r)
+local targets: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
+
+-- While MIGRATE copies table t into blocks of another size, the table whose
+-- blocks it copies into: t with the store, block and rows of t.rebuild.
+-- Answers nil when no copy runs.
+function target(t: any): any
+    local m = t.rebuild
+    if m == nil then
+        return nil
+    end
+    local n = targets[t]
+    if n then
+        return n
+    end
+    n = table.clone(t)
+    n.store, n.block, n.rows, n.rebuild = m.store, m.block, m.rows, nil
+    n.fields = {}
+    for i, f in t.fields do
+        local d = table.clone(f)
+        d.rows = m.fields[i]
+        n.fields[i] = d
+    end
+    targets[t] = n
+    return n
+end
+
+-- Whether a write to row pk of t also goes to the blocks MIGRATE copies
+-- into: rows up to the last one it copied keep both copies the same.
+local function copied(t: any, pk: number): boolean
+    local m = t.rebuild
+    return m ~= nil and m.upto ~= nil and pk <= m.upto
+end
+
+-- write() for a row already checked.
+local function put_row(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?): () -> ()
     local g = geometry(t)
     local block, slot = place(g.rows, pk)
     if lock then
@@ -2776,6 +2805,7 @@ function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?
             end
         end
     end
+    local also = copied(t, pk) and put_row(target(t), fields, pk, old, r, lock)
     return function()
         if old == nil then
             mark(t, g, block, slot, true, lock)
@@ -2783,7 +2813,25 @@ function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?
         for _, put in writes do
             put()
         end
+        if also then
+            also()
+        end
     end
+end
+
+-- Checks row r for pk, given the row it replaces (nil for a new row), and
+-- answers a function that stores it. Everything that can refuse the row
+-- happens here, so a caller can check before its first write. `lock` is true
+-- for a pessimistic caller.
+function write(t: any, fields: any, pk: number, old: any, r: any, lock: boolean?): () -> ()
+    rc.validate(fields, r)
+    return put_row(t, fields, pk, old, r, lock)
+end
+
+-- Writes row r, as scan() reads it, at pk in the blocks MIGRATE copies
+-- table t into. A field without a value stays without one.
+function copy(t: any, fields: any, pk: number, r: any)
+    put_row(target(t), fields, pk, nil, r)()
 end
 
 -- Removes the row at pk, which holds `old`. A field block whose last row
@@ -2818,6 +2866,9 @@ function remove(t: any, fields: any, pk: number, old: any, lock: boolean?)
                 put_number(t, f.name, fb, sp, k, fs, nil, was)
             end
         end
+    end
+    if copied(t, pk) then
+        remove(target(t), fields, pk, old, lock)
     end
 end
 

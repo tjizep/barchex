@@ -10,9 +10,9 @@
 -- keys that start with it:
 --
 --   lent.r<table><pk>                   the row, as ROWCODEC wrote it
---   lent.p<table><block>                which rows of a column block exist
---   lent.c<table><field id><block>      one field of a column block's rows
---   lent.c<table><field id>x<pk>        a column text value longer than its
+--   lent.p<store><block>                which rows of a column block exist
+--   lent.c<store><field id><block>      one field of a column block's rows
+--   lent.c<store><field id>x<pk>        a column text value longer than its
 --                                       block keeps, whole
 --   lent.i<table><index><values><pk>    "" for each row of a plain index
 --   lent.u<table><index><values>        the pk, for each row of a unique index
@@ -23,6 +23,10 @@
 --                                       which CLIENT writes and removes
 --   lent.s<table>                       the planner statistics that MIGRATE's
 --                                       analyze() writes
+--
+-- A column table's <store> is its table name, or after a change of block
+-- size, the name and "@" and the schema version that started the change.
+-- Table names are snake case, so no other table's keys start with it.
 --
 -- A pk is encoded with its table's id kind, "uuid" or "int", and takes the
 -- same number of bytes in every key of the table, so a key's pk is read
@@ -69,10 +73,15 @@ function row(t: any, pk: any): string
     return pk == nil and key or key .. kc.encode(id_kind(t), pk)
 end
 
+-- The name a column table's blocks are stored under.
+local function store(t: any): string
+    return name(t.store or t.key)
+end
+
 -- The key of a column block's presence, or with block nil, the prefix of
 -- them all.
 function present(t: any, block: number?): string
-    local key = "lent.p" .. name(t.key)
+    local key = "lent.p" .. store(t)
     return block == nil and key or key .. kc.encode("int", block)
 end
 
@@ -84,7 +93,12 @@ end
 -- The prefix of the blocks of the field with id `field`, which a block's
 -- encoded number completes.
 function column(t: any, field: number): string
-    return "lent.c" .. name(t.key) .. kc.encode("int", field)
+    return columns(t) .. kc.encode("int", field)
+end
+
+-- The prefix of the blocks of every field of a column table.
+function columns(t: any): string
+    return "lent.c" .. store(t)
 end
 
 -- The key of the whole value of field `field` at row `pk` of a column table,
@@ -423,6 +437,13 @@ function selftest(): (boolean, string?)
     if k ~= index(t, linkedIx, { 41, 3 }) or v ~= "7"
         or entry(t, linkedIx, r, 7, {}) ~= nil or entry(t, linkedIx, r, 7) ~= nil then
         return false, "edge entry"
+    end
+    -- a store keeps its blocks apart from the table's first ones
+    local moved = { key = "user", store = "user@3" }
+    if string.sub(present(moved, 1), 1, #present(t)) == present(t)
+        or string.sub(column(moved, 2), 1, #columns(t)) == columns(t)
+        or string.sub(column(moved, 2), 1, #columns(moved)) ~= columns(moved) then
+        return false, "column stores"
     end
     local ut = { key = "doc", id = "uuid", fields = t.fields }
     k, v = entry(ut, uniq, r, u)

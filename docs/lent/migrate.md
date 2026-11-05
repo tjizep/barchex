@@ -24,9 +24,9 @@ row, including rows whose missing values leave them out of a unique index.
 |---|---|
 | `version` | the active schema version; it advances on the first committed page and stays the same while the migration resumes |
 | `changed` | `true` when this call installs a schema or advances pending work |
-| `done` | `true` when every index drop, fill and build is complete |
+| `done` | `true` when every step is complete |
 | `processed` | row visits plus removed index entries and column blocks in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges and `drop Table.field blocks` for a field dropped from a `column` table; empty for an unchanged, completed schema |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges, `drop Table.field blocks` for a field dropped from a `column` table, and `copy Table blocks` and `drop Table old blocks` for a change of a `column` table's `block`; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
@@ -80,13 +80,31 @@ changes or a unique-index conflict:
   the field for a stored row;
 - a change to a table's `id` kind;
 - a change of a table's format to or from `column`;
-- a change of a `column` table's `block`;
 - an `edge.to` or `edge.from` that takes the name of a stored path edge in
   the same migration.
 
 Adding enum choices preserves stored rows and their indexes. Byte and JSON
 defaults are preserved in the catalog, including binary bytes, JSON null
 and empty arrays; `m.load()` returns their Luau values.
+
+## Changing a column table's block size
+
+Change `block` on a stored `column` table and run `migrate` as for any
+other change. The migration copies the table's rows into blocks of the new
+size with a `copy Table blocks` step, which runs after the migration's
+other steps, then removes the old blocks with a `drop Table old blocks`
+step. Each copied row counts as one row visit toward the page size, and
+each removed block as one key. The copy writes rows at about the
+`createMany` rate for the new block size: on one machine, it copied
+102,400 rows of three fields in 3 seconds into `"htap"` blocks and in 8
+seconds into `"scan"` blocks, with a page size of 5,000.
+
+Reads use the old blocks until the page that copies the last row. That
+page switches the table to the new blocks when it commits, and `m.load()`
+then answers the new `block`. The table stays writable during the copy. A
+write to a row that the copy has already reached also updates the new
+blocks, so it costs about twice as much until the copy finishes. The table
+holds both copies of its rows until the old blocks are removed.
 
 ## Planner statistics
 

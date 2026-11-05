@@ -555,7 +555,7 @@ function steps.catalog()
     return out
 end
 
--- the schemas and migrations a block option refuses
+-- the schemas a block option refuses, and the plan of a block change
 function steps.refused_blocks()
     local function declare(spec)
         return function()
@@ -568,7 +568,14 @@ function steps.refused_blocks()
         err(declare { id = "int", format = "column", block = "huge" }),
         err(declare { id = "int", format = "column", block = 512 }),
         err(declare { id = "int", format = "column", block = 2048.5 }),
-        err(function() m.plan(m.load(), graph(if BLOCK then nil else "scan")) end),
+        -- a change of block copies the rows, then drops the blocks it copied
+        (function()
+            local ops = {}
+            for _, s in m.plan(m.load(), graph(if BLOCK then nil else "scan")).steps do
+                ops[#ops + 1] = s.op .. (if s.store then " " .. s.store else "")
+            end
+            return table.concat(ops, ",")
+        end)(),
         lent.schema "Fine" { id = "int", format = "column", block = "balanced",
                              fields = { f.int "a" } }.block,
     }
@@ -863,7 +870,7 @@ def test_block_options_refused(run):
     assert "got huge" in got[1]
     assert "got 512" in got[2]
     assert "got 2048.5" in got[3]
-    assert "table Sale changes block from" in got[4]
+    assert got[4] == "copy,drop sale"
     assert got[5] == 8192
 
 

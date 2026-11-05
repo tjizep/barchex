@@ -179,10 +179,11 @@ barch's value limit is stored in parts; see [Split
 blocks](#split-blocks).
 
 `migrate` records the rows in the catalog when it creates the table or adds
-a field, and a field keeps them after that. `migrate` refuses a change of
-`block` on a stored table with `changes block from A to B; copy its rows
-into a new table to change its block size`. A table without `block` keeps
-1,024 rows in every block.
+a field, and a field keeps them after that. A change of `block` on a stored
+table copies its rows into blocks of the new size in pages; see [changing
+a column table's block
+size](migrate.md#changing-a-column-tables-block-size). A table without
+`block` keeps 1,024 rows in every block.
 
 On 409,600 rows of three fields, one `aggregate` call and one `update` of
 one row per transaction ran at these rates on one machine:
@@ -311,7 +312,8 @@ These rules apply to a column table:
 - **Format changes.** `migrate` refuses a change to or from `column` with
   `changes format from A to B; copy its rows into a new table to move them
   to or from column`.
-- **Block changes.** `migrate` refuses a change of `block`; see
+- **Block changes.** `migrate` copies the rows into new blocks in pages,
+  and the table holds both copies until the old blocks are removed; see
   [block size](#block-size).
 - **Dropped fields.** `migrate` removes a dropped field's blocks in pages,
   with a `drop Table.field blocks` step. Writes to the table continue while

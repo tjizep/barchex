@@ -19,8 +19,9 @@
 --   /lent/version                           the version, bumped by each change
 --   /lent/compiled                          the whole schema as JSON, which
 --                                          load() reads: one GRAPH GET
---   /lent/tables/<table>/table              name, format, id kind and next
---                                          field id
+--   /lent/tables/<table>/table              name, format, id kind, next
+--                                          field id, and a column table's
+--                                          block, rows and store
 --   /lent/tables/<table>/fields/<field>     kind, id, optional, unique, default
 --                                          and the value rules: immutable,
 --                                          min, max, minLen, maxLen, match
@@ -54,6 +55,12 @@
 -- the drops and before the builds. A new stored edge.through, or one whose
 -- path changed, adds a drop step for its store and a fill step that counts
 -- each row's paths; one that is removed or no longer stored adds a drop.
+-- A change of a column table's block adds a copy step after the others,
+-- which copies each row into blocks of the new size under a new store, and
+-- a drop step for the old store's blocks. Until the copy ends, the catalog
+-- table keeps the block, rows and store it reads and holds the new ones in
+-- `rebuild`, with `upto`, the last row copied: COLUMNS writes rows up to it
+-- to both stores. The copy's last page switches the table to the new store.
 -- apply() refuses a unique index that two rows' values already break, and
 -- a fill whose function answers a value that does not fit its field.
 
@@ -200,6 +207,14 @@ end
 local function load_fields(t: any)
     t.next = num(t.next)
     t.block, t.rows = num(t.block), num(t.rows)
+    local m = t.rebuild
+    if m then
+        m.block, m.rows, m.upto = num(m.block), num(m.rows), num(m.upto)
+        m.fields = m.fields or {}
+        for i, rows in m.fields do
+            m.fields[i] = num(rows)
+        end
+    end
     for _, f in t.fields or {} do
         f.id = num(f.id)
         f.rows = num(f.rows)
@@ -345,19 +360,30 @@ function plan(prev: any, app: any): any
             fail(where .. " changes format from " .. old.format .. " to " .. t.format
                 .. "; copy its rows into a new table to move them to or from column")
         end
-        if old and old.format == "column" and old.block ~= t.block then
-            fail(where .. " changes block from " .. tostring(old.block) .. " to "
-                .. tostring(t.block) .. "; copy its rows into a new table to change its"
-                .. " block size")
-        end
+        -- a column table whose block changes keeps reading its stored blocks
+        -- until a copy step has copied every row into blocks of the new size
+        local moving = old and old.format == "column"
+            and (old.rebuild ~= nil or old.block ~= t.block)
+        local block = if moving then old.block else t.block
         local before = by_name(old and old.fields)
         local fields, ver = check_fields(where, old, t, before)
         -- a field keeps the block rows its values were stored with
-        if t.block then
+        if block then
             for i, f in fields do
                 local d = t.fields[i]
                 local was = before[d.name] or (d.was and before[d.was])
-                f.rows = if was and was.rows then was.rows else col.block_rows(t.block, f)
+                f.rows = if was and was.rows then was.rows else col.block_rows(block, f)
+            end
+        end
+        local rebuild
+        if moving and old.rebuild and old.rebuild.block == t.block then
+            rebuild = old.rebuild
+        elseif moving then
+            -- the version this migration gives the catalog names the new store
+            rebuild = { store = t.key .. "@" .. (prev.version + 1), block = t.block,
+                        rows = t.block and col.block_rows(t.block), fields = {} }
+            for i, f in fields do
+                rebuild.fields[i] = t.block and col.block_rows(t.block, f)
             end
         end
         local after = by_name(fields)
@@ -376,7 +402,8 @@ function plan(prev: any, app: any): any
         local c = {
             name = name, key = t.key, format = t.format, id = t.id, next = ver.next, ids = ver.ids,
             jsonRows = (old and old.jsonRows) or t.format == "json",
-            block = t.block, rows = if old then old.rows else t.block and col.block_rows(t.block),
+            block = block, rows = if old then old.rows else block and col.block_rows(block),
+            store = old and old.store, rebuild = rebuild,
             fields = fields, indexes = {}, edges = {},
         }
         for i, ix in t.indexes do c.indexes[i] = index_spec(ix) end
@@ -385,6 +412,10 @@ function plan(prev: any, app: any): any
                            store = e.store, via = e.via }
         end
         tables[t.key] = c
+        if rebuild and rebuild ~= (old and old.rebuild) then
+            steps[#steps + 1] = { op = "copy", table = c }
+            steps[#steps + 1] = { op = "drop", table = c, store = c.store or c.key }
+        end
 
         local had = {}
         if old then
@@ -454,11 +485,15 @@ function plan(prev: any, app: any): any
             steps[#steps + 1] = { op = "drop", edge = store, label = old.from .. "." .. old.edge }
         end
     end
-    -- drops first, so an index rebuilt under its own name starts empty, and
-    -- fills before builds, so a build reads the computed values
-    local rank = { drop = 1, fill = 2, build = 3 }
+    -- drops first, so an index rebuilt under its own name starts empty,
+    -- fills before builds, so a build reads the computed values, and copies
+    -- last, followed by the drops of the blocks they copied
+    local rank = { drop = 1, fill = 2, build = 3, copy = 4 }
+    local function order(s: any): number
+        return if s.store then 5 else rank[s.op]
+    end
     table.sort(steps, function(a, b)
-        return rank[a.op] < rank[b.op]
+        return order(a) < order(b)
     end)
 
     local compiled = { tables = tables, edges = edges }
@@ -511,10 +546,25 @@ local function drop(prefix: string)
     end)
 end
 
--- The keys a drop step removes: an index's entries, or the column blocks of
--- a dropped field.
+-- The keys a drop step removes: an index's entries, the column blocks of a
+-- dropped field, or the blocks a copy step copied, the presence blocks
+-- first.
 local function drop_prefix(t: any, step: any): string
+    if step.store then
+        local from = { key = t.key, store = step.store }
+        local prefix = lay.present(from)
+        if #barch.store.range(prefix, kc.after(prefix), 1) > 0 then
+            return prefix
+        end
+        return lay.columns(from)
+    end
     return if step.field then lay.column(t, step.field.id) else lay.index(t, step.index)
+end
+
+-- Copies the row at key k of column table t, which `stored` holds, into
+-- the blocks of t.rebuild.
+local function copy_row(t: any, fields: any, k: string, stored: any)
+    col.copy(t, fields, lay.row_pk(t, k), stored)
 end
 
 -- Stores index ix's entry for the row at key k, whose value is `stored`.
@@ -610,6 +660,12 @@ local function mkdir(path: string)
     end
 end
 
+-- The record at /lent/tables/<table>/table.
+local function table_data(t: any): string
+    return simdjson.encode({ name = t.name, format = t.format, id = t.id, next = t.next,
+                             block = t.block, rows = t.rows, store = t.store })
+end
+
 local function write_catalog(c: any)
     local g = barch.graph
     mkdir("/lent")
@@ -623,9 +679,7 @@ local function write_catalog(c: any)
     for key, t in c.tables do
         local base = "/lent/tables/" .. key
         g.mkdir(base)
-        g.put(base .. "/table", simdjson.encode({ name = t.name, format = t.format, id = t.id,
-                                                  next = t.next, block = t.block,
-                                                  rows = t.rows }), "json")
+        g.put(base .. "/table", table_data(t), "json")
         nodes[t.name] = g.stat(base .. "/table").id
         g.mkdir(base .. "/fields")
         local fieldNode = {}
@@ -680,11 +734,19 @@ function apply(p: any)
             end)
         elseif s.op == "drop" then
             drop(drop_prefix(s.table, s))
+            -- a store drop's prefix moves on to the column blocks
+            if s.store then drop(drop_prefix(s.table, s)) end
         elseif s.op == "fill" then
             local fields = row_fields(s.table)
             each_row(s.table, function(k, v)
                 fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k, v)
             end)
+        elseif s.op == "copy" then
+            local fields = row_fields(s.table)
+            each_row(s.table, function(k, v)
+                copy_row(s.table, fields, k, v)
+            end)
+            p.compiled.tables[s.table.key] = col.target(s.table)
         else
             build(s.table, s.index, p.compiled.edges)
         end
@@ -743,6 +805,10 @@ local function advance(c: any, budget: number, app: any): number
         else
             keys = barch.store.range(lo, hi, limit)
         end
+        -- writes to rows the copy has reached go to both copies
+        if step.op == "copy" and keys[1] then
+            t.rebuild.upto = lay.row_pk(t, keys[#keys])
+        end
         local fields = rows and row_fields(t)
         local fns = step.op == "fill" and fill_fns(app, t, step.fields)
         for i, k in keys do
@@ -750,14 +816,23 @@ local function advance(c: any, budget: number, app: any): number
                 barch.store.remove(k)
             elseif step.op == "fill" then
                 fill_row(t, step.fields, fns, fields, c.version, k, values[i])
+            elseif step.op == "copy" then
+                copy_row(t, fields, k, values[i])
             else
                 build_row(t, ix, c.edges, fields, k, values[i])
             end
         end
         processed += #keys
-        local nextKey = rows and keys[#keys] and keys[#keys] .. "\2" or prefix
-        local done = #keys < limit
-            or #(if rows then row_page(t, nextKey, hi, 1) else barch.store.range(nextKey, hi, 1)) == 0
+        local done
+        if rows then
+            local nextKey = keys[#keys] and keys[#keys] .. "\2" or prefix
+            done = #keys < limit or #row_page(t, nextKey, hi, 1) == 0
+        else
+            -- a store drop moves on to the column blocks once the presence
+            -- blocks are gone
+            local rest = drop_prefix(t, step)
+            done = #barch.store.range(rest, kc.after(rest), 1) == 0
+        end
         if done then
             if step.op == "build" then ix.state = nil end
             if step.op == "fill" then
@@ -765,6 +840,8 @@ local function advance(c: any, budget: number, app: any): number
                     if table.find(step.fields, f.name) then f.state = nil end
                 end
             end
+            -- the table reads the new blocks from the commit of this page
+            if step.op == "copy" then c.tables[step.table] = col.target(t) end
             work.at += 1
             work.cursor = nil
         elseif rows then
@@ -777,6 +854,8 @@ end
 
 local function write_progress(c: any)
     for key, t in c.tables do
+        -- a copy step's last page switches the table to its new blocks
+        barch.graph.put("/lent/tables/" .. key .. "/table", table_data(t), "json")
         for _, f in t.fields do
             barch.graph.put("/lent/tables/" .. key .. "/fields/" .. f.name,
                 simdjson.encode(field_data(f)), "json")
@@ -825,7 +904,7 @@ function migrate(app: any, pageSize: number?): any
                     end
                 else
                     work.steps[i] = { op = s.op, table = s.table.key, field = s.field,
-                                      index = s.index and index_spec(s.index) }
+                                      store = s.store, index = s.index and index_spec(s.index) }
                 end
                 if s.op == "build" then s.index.state = "building" end
             end
@@ -836,9 +915,16 @@ function migrate(app: any, pageSize: number?): any
             if s.edge then
                 steps[i] = s.op .. " " .. s.label
             else
-                local what = if s.op == "fill" then table.concat(s.fields, ",")
-                    elseif s.field then s.field.name .. " blocks" else s.index.name
-                steps[i] = s.op .. " " .. c.tables[s.table].name .. "." .. what
+                local name = c.tables[s.table].name
+                if s.op == "copy" then
+                    steps[i] = "copy " .. name .. " blocks"
+                elseif s.store then
+                    steps[i] = "drop " .. name .. " old blocks"
+                else
+                    local what = if s.op == "fill" then table.concat(s.fields, ",")
+                        elseif s.field then s.field.name .. " blocks" else s.index.name
+                    steps[i] = s.op .. " " .. name .. "." .. what
+                end
             end
         end
         local processed = advance(c, pageSize, app)

@@ -24,9 +24,6 @@ and privacy policies are built.
   conflicts and locks across each block. Without `block`, a field's values
   of one block stay within 524,032 bytes. `migrate` refuses a format change
   to or from `column`. See `docs/lent/codecs.md`.
-- **Changing a column table's block size.** `migrate` refuses a change of
-  `block`. A paged rebuild would copy each block's rows into blocks of the
-  new rows, the way index builds page, and switch the catalog when it ends.
 
 ## Needed from barch
 

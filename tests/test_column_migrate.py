@@ -28,13 +28,13 @@ local function table_of(stage, name, format, other)
     local indexes, edges = {}, {}
     if has("index", "unique") then indexes = { lent.index("qty") } end
     if has("unique") then indexes[2] = lent.index("name"):unique():name("by_name") end
-    if has("added") then
+    if has("added", "sized_added") then
         table.insert(fields, f.int "rank":default(5))
         table.insert(fields, f.string "memo":default("new"))
         table.insert(fields, f.string "extra":optional())
     end
     if has("renamed") then fields[5] = f.string "remark":was("note"):optional() end
-    if has("dropped") then table.remove(fields, 5) end
+    if has("dropped", "sized_dropped") then table.remove(fields, 5) end
     if has("computed") then
         table.insert(fields, f.int "total":computed(total):stored())
         table.insert(fields, f.string "label":computed(function(r)
@@ -51,7 +51,11 @@ local function table_of(stage, name, format, other)
     local policy = has("guarded") and { query = { function(c, v, q)
         q:where(function(r) return r.qty % 2 == 0 end)
     end } } or nil
-    return lent.schema(name) { id = "int", format = format, fields = fields,
+    -- the block option of the column table: 1024 bytes in the sized stages
+    local block = if format ~= "column" then nil
+        elseif has("sized", "sized_added", "sized_dropped") then 1024
+        elseif has("resized") then 4096 else nil
+    return lent.schema(name) { id = "int", format = format, block = block, fields = fields,
                                indexes = indexes, edges = edges, policy = policy }
 end
 
@@ -136,6 +140,15 @@ function steps.write(c, t, pk)
     return show(t:get(pk))
 end
 
+function steps.long(c, t, pk)
+    t:update(pk, { note = string.rep("long ", 10) .. pk })
+    return show(t:get(pk))
+end
+
+function steps.delete(c, t, pk)
+    return tostring(t:delete(pk))
+end
+
 function steps.create(c, t, name, qty)
     return t:create({ name = name, qty = qty }).id
 end
@@ -179,6 +192,16 @@ function call(step, stage, ...)
         -- how many blocks field id args[1] of Cold holds
         return barch.tx.run(function()
             return lay.walk(lay.column(m.load().tables.cold, args[1]), function() end)
+        end)
+    end
+    if step == "stored" then
+        -- Cold's block, store, and the keys under store args[1]
+        return barch.tx.run(function()
+            local t = m.load().tables.cold
+            local from = { key = "cold", store = args[1] }
+            return { tostring(t.block), tostring(t.store),
+                     lay.walk(lay.present(from), function() end)
+                         + lay.walk(lay.columns(from), function() end) }
         end)
     end
     local db = client.open(app(stage))
@@ -391,3 +414,86 @@ end
     want = f"T changes format from {before} to {after}; copy its rows into a new table"
     with pytest.raises(redis.ResponseError, match=re.escape(want)):
         client.execute_command("CALLF", "COLMF", after)
+
+
+COPY = ["copy Cold blocks", "drop Cold old blocks"]
+
+
+def test_a_block_change_copies_rows_in_pages(run):
+    seeded(run, 2500)
+    old = run("stored", "base", "cold")[2]
+    done, processed, steps = run("migrate", "sized", 1000)
+    assert (done, processed, steps) == (0, 1000, COPY)
+    # rows stay readable and writable while the copy runs: one it copied,
+    # one it has not reached, a new one, and deletes on both sides
+    for pk in (5, 2400):
+        cold, warm = run("both", "sized", "write", pk)
+        assert cold == warm
+    assert run("both", "sized", "create", "late", 3) == [2501, 2501]
+    assert run("both", "sized", "delete", 7) == ["true", "true"]
+    assert run("both", "sized", "delete", 2300) == ["true", "true"]
+    same_rows(run, "sized")
+    assert migrate(run, "sized", 1000) == 2
+    same_rows(run, "sized")
+    assert run("both", "sized", "by_qty", 100) == [[5, 2400], [5, 2400]]
+    block, store, kept = run("stored", "sized", "cold")
+    assert (block, store, kept) == ("1024", "cold@2", 0)
+    assert old > 0 and run("stored", "sized", "cold@2")[2] > 0
+
+
+def test_a_block_change_goes_back_to_fixed_blocks(run):
+    seeded(run, 1100)
+    migrate(run, "sized", 300)
+    migrate(run, "base", 300)
+    same_rows(run, "base")
+    assert run("stored", "base", "cold@2")[:2] == ["nil", "cold@3"]
+    assert run("stored", "base", "cold@2")[2] == 0
+    cold, warm = run("both", "base", "write", 1050)
+    assert cold == warm
+
+
+def test_a_block_change_keeps_long_text(run):
+    seeded(run, 1100)
+    migrate(run, "sized")
+    for pk in (3, 1000):
+        run("both", "sized", "long", pk)
+    assert run("migrate", "resized", 500)[0] == 0
+    # one long value the copy reached and one it has not
+    for pk in (4, 1001):
+        cold, warm = run("both", "resized", "long", pk)
+        assert cold == warm
+    migrate(run, "resized", 500)
+    same_rows(run, "resized")
+    assert run("stored", "resized", "cold@2")[2] == 0
+
+
+@pytest.mark.parametrize("stage, steps", [
+    ("sized_added", COPY), ("sized_dropped", ["drop Cold.note blocks"] + COPY)])
+def test_a_block_change_with_field_changes(run, stage, steps):
+    seeded(run, 1100)
+    assert run("migrate", stage, 400)[2] == steps
+    migrate(run, stage, 400)
+    same_rows(run, stage)
+    assert run("stored", stage, "cold")[2] == 0
+    if stage == "sized_added":
+        assert run("both", stage, "by_rank", 5) == [1100, 1100]
+        cold, warm = run("both", stage, "write", 9)
+        assert cold == warm
+    else:
+        assert "note" not in run("dump", stage)[0][0]
+
+
+def test_a_schema_change_waits_for_the_copy(run):
+    seeded(run, 1100)
+    assert run("migrate", "sized", 300)[0] == 0
+    with pytest.raises(redis.ResponseError, match="a migration is in progress"):
+        run("migrate", "resized", 300)
+    migrate(run, "sized", 300)
+    same_rows(run, "sized")
+
+
+def test_apply_changes_the_block_in_one_transaction(run):
+    seeded(run, 1100)
+    assert run("apply", "sized") == "ok"
+    same_rows(run, "sized")
+    assert run("stored", "sized", "cold")[:3] == ["1024", "cold@2", 0]
