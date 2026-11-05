@@ -475,8 +475,8 @@ end
 
 -- how fields' blocks are stored, region's and note's by default: "d" for
 -- dictionary blocks with int8 codes, "D" with int16 codes, "t" for plain
--- text, "h" for short and "n" for f64 numbers, and after the letter the
--- parts of a split block
+-- text, "h" for int16, "i" for int32 and "n" for f64 numbers, and after
+-- the letter the parts of a split block
 function steps.kinds(_, ...)
     local lay = require("lent.LAYOUT")
     local kc = require("lent.KEYCODEC")
@@ -991,7 +991,8 @@ def test_small_whole_numbers_use_short_blocks(run):
              "defaults", "byRank", "ranked")
     for case in cases:
         same(run, "ask", case)
-    # nil and +-32,767 stay short; a value past them turns its block to f64
+    # nil and +-32,767 stay short; a value past them widens its block to
+    # int32, and one past +-2,147,483,647 to f64
     write_both(run, "clear", 5, "rank")
     for pk, qty in ((6, -32767), (7, 32767), (8, 0)):
         write_both(run, "update", pk, {"qty": qty})
@@ -1002,16 +1003,34 @@ def test_small_whole_numbers_use_short_blocks(run):
         write_both(run, "update", pk, {"qty": qty})
         for case in cases:
             same(run, "ask", case)
-    assert run("kinds", "qty") == "qty=hn"
-    # a block turns short again when its last value past them goes, by an
-    # update, a delete or a cleared field
+    assert run("kinds", "qty") == "qty=hi"
+    for pk, qty in ((10, 2147483647), (11, -2147483647)):
+        write_both(run, "update", pk, {"qty": qty})
+    assert run("kinds", "qty") == "qty=hi"
+    for case in cases:
+        same(run, "ask", case)
+    # -2,147,483,648 marks nil in an int32 block, so it takes f64
+    for pk, qty in ((12, -2147483648), (13, 3000000000)):
+        write_both(run, "update", pk, {"qty": qty})
+        assert run("kinds", "qty") == "qty=hn"
+        for case in cases:
+            same(run, "ask", case)
+        write_both(run, "update", pk, {"qty": 4})
+    # a block narrows when its last value past a width goes, by an update,
+    # a delete or a cleared field, to the narrowest width its values fit
+    assert run("kinds", "qty") == "qty=hi"
+    write_both(run, "update", 13, {"qty": 3000000000})
+    write_both(run, "update", 13, {"qty": 1})
+    assert run("kinds", "qty") == "qty=hi"
+    for pk in (10, 11):
+        write_both(run, "update", pk, {"qty": 3})
     write_both(run, "update", 9, {"qty": 1})
-    assert run("kinds", "qty") == "qty=hn"
+    assert run("kinds", "qty") == "qty=hi"
     write_both(run, "update", 300, {"qty": -5})
     assert run("kinds", "qty") == "qty=h"
     write_both(run, "update", 9, {"qty": 40000})
-    write_both(run, "update", 10, {"rank": 50000})
-    assert run("kinds", "qty", "rank") == "qty=hn rank=hn"
+    write_both(run, "update", 10, {"rank": 5000000000})
+    assert run("kinds", "qty", "rank") == "qty=hi rank=hn"
     for case in cases:
         same(run, "ask", case)
     write_both(run, "delete", 9, {})
@@ -1019,6 +1038,7 @@ def test_small_whole_numbers_use_short_blocks(run):
     assert run("kinds", "qty", "rank") == "qty=h rank=h"
     write_both(run, "delete", 7, {})
     write_both(run, "create", 2000, {"region": "n", "qty": 70000})
+    write_both(run, "create", 2001, {"region": "n", "qty": -2147483648})
     for case in cases:
         same(run, "ask", case)
         answers = same(run, "paths", case)
@@ -1028,37 +1048,56 @@ def test_small_whole_numbers_use_short_blocks(run):
 
 def test_int_blocks_split_past_the_value_limit(most):
     run = most
-    # 131,072 int16s fit in one key; as f64s they take 1,048,584 bytes,
-    # which split into five parts
+    # 131,072 int16s fit in one key; as int32s they take 524,296 bytes,
+    # which split into three parts, and as f64s 1,048,584, which take five
     assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
     assert run("kinds", "qty") == "qty=h"
     cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value", "all")
     # values either side of the first part's end, and in the last part
     write_both(run, "update", 9, {"qty": 40000})
-    for pk, qty in ((32766, 5), (32767, -70000), (131071, 3)):
+    for pk, qty in ((65533, 5), (65534, -70000), (131071, 3)):
+        write_both(run, "create", pk, {"region": "n", "qty": qty})
+    assert run("kinds", "qty") == "qty=i3"
+    assert run("parts") == 2
+    for pk in (9, 65533, 65534, 131071):
+        same(run, "get", str(pk))
+    for case in cases:
+        same(run, "ask", case)
+    for pk, qty in ((32766, 5), (32767, -7000000000)):
         write_both(run, "create", pk, {"region": "n", "qty": qty})
     assert run("kinds", "qty") == "qty=n5"
     assert run("parts") == 4
     write_both(run, "update", 131071, {"qty": 80000})
-    for pk in (9, 32766, 32767, 131071):
+    for pk in (9, 32766, 32767, 65534, 131071):
         same(run, "get", str(pk))
     for case in cases:
         same(run, "ask", case)
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
-    # the block turns short and whole again when its last value past
-    # +-32767 goes
-    for pk in (9, 32767, 131071):
+    # the block narrows to int32 when its last value past 32 bits goes,
+    # and turns short and whole when its last value past +-32767 goes
+    write_both(run, "update", 32767, {"qty": 2})
+    assert run("kinds", "qty") == "qty=i3"
+    assert run("parts") == 2
+    for case in cases:
+        same(run, "ask", case)
+    for pk in (9, 65534, 131071):
         write_both(run, "update", pk, {"qty": 2})
     assert run("kinds", "qty") == "qty=h"
     assert run("parts") == 0
     for case in cases:
         same(run, "ask", case)
-    # a block that starts with a value past +-32767 starts split, and goes
+    # a block that starts with a value past 32 bits starts split, and goes
     # with its parts when its last row leaves
-    write_both(run, "create", 200000, {"region": "n", "qty": 90000})
+    write_both(run, "create", 200000, {"region": "n", "qty": 9000000000})
     assert run("kinds", "qty") == "qty=hn5"
     assert run("parts") == 4
+    same(run, "get", "200000")
+    write_both(run, "delete", 200000, {})
+    assert run("parts") == 0
+    write_both(run, "create", 200000, {"region": "n", "qty": 90000})
+    assert run("kinds", "qty") == "qty=hi3"
+    assert run("parts") == 2
     same(run, "get", "200000")
     write_both(run, "delete", 200000, {})
     assert run("parts") == 0

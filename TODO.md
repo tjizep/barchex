@@ -63,10 +63,10 @@ and privacy policies are built.
   values fit in 16 bits as a short block of `i16` values, a quarter of the
   bytes of an f64 block. On 409,600 rows that shrank a 0 to 99 field from
   3.3 MB to 0.83 MB, and a filter or `groupBy` on it ran 15% to 60% faster.
-  The rows sizing takes 2 bytes per row for `int` fields, and a block that
-  widens to f64 past the value limit splits into parts. The rest: `i32`
-  blocks for wider whole numbers, which would split less often, and `i8`
-  blocks if the `i16` savings justify a third width.
+  The rows sizing takes 2 bytes per row for `int` fields. A block widens
+  to `i32` for values past 16 bits and to f64 past 32 bits, narrows when
+  its last such value goes, and splits into parts past the value limit.
+  The rest: `i8` blocks, if the `i16` savings justify a fourth width.
 - **Text blocks of 8,192 rows on `"scan"`.** Sizing text fields as
   dictionary blocks doubled a 10-value `string` field's blocks on `"scan"`
   from 4,096 to 8,192 rows, about 8.3 KB each. On 409,600 rows a `groupBy`

@@ -24,11 +24,15 @@
 --              those, and bool as 1 and 0. NaN is nil, since every row
 --              format refuses NaN as a value. Without `block`: no header.
 --   short      an int field's block in a table with `block` while its
---              values fit: an 8-byte header (1, "h", 0, the rows), then an
---              int16 per slot, -32768 for nil. A new int block starts short
---              when its first value fits, becomes a number block when a
---              write gives it a value outside +-32767, and turns short again
---              when a write removes the last such value.
+--              values fit in 16 bits: an 8-byte header (1, "h", 0, the
+--              rows), then an int16 per slot, -32768 for nil.
+--   wide       an int field's block while its values fit in 32 bits: an
+--              8-byte header (1, "i", 0, the rows), then an int32 per slot,
+--              -2147483648 for nil. An int block takes the narrowest of
+--              short, wide and number that holds its values: a new block
+--              starts in the one its first value needs, a write of a value
+--              outside its range widens it, and a write that removes the
+--              last value that needed its width narrows it.
 --   text       for string, enum, json and bytes: a 24-byte header (1, "t",
 --              0, the rows, the bytes in use, the slots in use, the values
 --              kept whole elsewhere, and at least how many distinct values
@@ -53,12 +57,12 @@
 --              when a write that replaces or clears a value leaves it fit
 --              for one.
 --
--- In the number, text and dictionary headers, the uint16 after the tag
+-- In the number, wide, text and dictionary headers, the uint16 after the tag
 -- holds the parts of a split block, 0 for a block stored whole. A block of
 -- a table with `block` whose key and value would pass MAX_ENTRY splits
--- into parts of PART bytes; see put_block. Only an int field's number
--- block and a text block grow that large, since block_rows sizes them as
--- short and dictionary blocks.
+-- into parts of PART bytes; see put_block. Only an int field's wide and
+-- number blocks and a text block grow that large, since block_rows sizes
+-- them as short and dictionary blocks.
 --
 -- A field with no key has no value in that block, so a new field costs
 -- nothing to add. A number field changes in place. A text field rewrites
@@ -135,53 +139,101 @@ local function empty_numbers(data: number, rows: number, b: buffer): buffer
     return b
 end
 
--- short blocks: the header's bytes, its tag, the int16 of nil, and the
--- most a short block holds either side of 0
+-- The formats of a number block in a table with `block`: f64s, or for
+-- an int field the int16s of a short block or the int32s of a wide one.
+-- Each has an 8-byte header, then `width` bytes per slot from byte 8. An
+-- int format marks nil with `none` and holds whole numbers within +-most.
+-- `rank` orders them from the narrowest.
 local SHEAD = 8
 local STAG = string.byte("h")
 local NIL_SHORT = -32768
-local SHORT_MOST = 32767
+local INT16 = { tag = "h", width = 2, kind = "i16", none = NIL_SHORT, most = 32767, rank = 1 }
+local INT32 = { tag = "i", width = 4, kind = "i32", none = -2147483648, most = 2147483647,
+                rank = 2 }
+local F64 = { tag = "n", width = 8, kind = "f64", rank = 3 }
+local FORMATS = { [STAG] = INT16, [string.byte("i")] = INT32, [string.byte("n")] = F64 }
 
-local function is_short(b: buffer): boolean
-    return buffer.len(b) > 1 and buffer.readu8(b, 1) == STAG
+-- The int format of number block b, or nil for f64s.
+local function int_format(b: buffer): any
+    local f = buffer.len(b) > 1 and FORMATS[buffer.readu8(b, 1)]
+    return if f and f ~= F64 then f else nil
 end
 
-local function fits_short(x: number?): boolean
-    return x == nil or (x >= -SHORT_MOST and x <= SHORT_MOST and x == math.floor(x))
+-- The narrowest format that holds x, where nil fits every format.
+local function format_for(x: number?): any
+    if x == nil or x ~= x then
+        return INT16
+    elseif x ~= math.floor(x) or math.abs(x) > INT32.most then
+        return F64
+    end
+    return if math.abs(x) <= INT16.most then INT16 else INT32
 end
 
--- The number block holding the values of short block b, of `rows` slots,
--- written into `out` when it is given.
-local function widen(b: buffer, rows: number, out: buffer?): buffer
-    local w = out or header(8 + rows * 8, "n", rows)
+-- The value in slot s of number block b of format f, NaN for nil.
+local function cell(b: buffer, f: any, s: number): number
+    local at = SHEAD + s * f.width
+    local x
+    if f == INT16 then
+        x = buffer.readi16(b, at)
+    elseif f == INT32 then
+        x = buffer.readi32(b, at)
+    else
+        return buffer.readf64(b, at)
+    end
+    return if x == f.none then NAN else x
+end
+
+-- Writes x, nil or NaN for nil, into slot s of number block b of format f.
+local function set_cell(b: buffer, f: any, s: number, x: number?)
+    local at = SHEAD + s * f.width
+    if f == F64 then
+        buffer.writef64(b, at, x or NAN)
+        return
+    end
+    local v = if x == nil or x ~= x then f.none else x
+    if f == INT16 then
+        buffer.writei16(b, at, v)
+    else
+        buffer.writei32(b, at, v)
+    end
+end
+
+-- The block of format `to` holding the values of number block b, of
+-- format `from` and `rows` slots, written into `out` when it is given.
+local function reformat(b: buffer, from: any, rows: number, to: any, out: buffer?): buffer
+    local w = out or header(SHEAD + rows * to.width, to.tag, rows)
     if out then
         buffer.writeu8(w, 0, 1)
-        buffer.writeu8(w, 1, string.byte("n"))
+        buffer.writeu8(w, 1, string.byte(to.tag))
         buffer.writeu16(w, 2, 0)
         buffer.writeu32(w, 4, rows)
     end
     for s = 0, rows - 1 do
-        local h = buffer.readi16(b, SHEAD + s * 2)
-        buffer.writef64(w, 8 + s * 8, if h == NIL_SHORT then NAN else h)
+        set_cell(w, to, s, cell(b, from, s))
     end
     return w
 end
 
--- The short block holding the values of number block b, of `rows` slots
--- from byte `data`, or nil when a value doesn't fit in a short block.
-local function narrow(b: buffer, rows: number, data: number): buffer?
-    local h = header(SHEAD + rows * 2, "h", rows)
+-- The narrowest format that holds every value of number block b, of
+-- format f and `rows` slots.
+local function narrowest(b: buffer, f: any, rows: number): any
+    local best = INT16
     for s = 0, rows - 1 do
-        local x = buffer.readf64(b, data + s * 8)
-        if x ~= x then
-            buffer.writei16(h, SHEAD + s * 2, NIL_SHORT)
-        elseif fits_short(x) then
-            buffer.writei16(h, SHEAD + s * 2, x)
-        else
-            return nil
+        local need = format_for(cell(b, f, s))
+        if need.rank > best.rank then
+            best = need
+            if best.rank >= f.rank then
+                break
+            end
         end
     end
-    return h
+    return best
+end
+
+-- The f64 number block holding the values of int block b, of format f
+-- and `rows` slots, written into `out` when it is given.
+local function widen(b: buffer, f: any, rows: number, out: buffer?): buffer
+    return reformat(b, f, rows, F64, out)
 end
 
 local LEGACY_NUMBER = { rows = LEGACY, data = 0,
@@ -270,8 +322,8 @@ end
 -- value its length (its maxLen, its longest enum value, or a guess of 12
 -- bytes, up to the CAP + 1 bytes a block keeps) and 4 bytes. Each count is
 -- a power of two, and a field's is at most the presence's. A block that
--- grows past barch's limit, as plain text or as an int block with a value
--- outside +-32767, splits into parts.
+-- grows past barch's limit, as plain text or as a wide or number int
+-- block, splits into parts.
 function block_rows(bytes: number, f: any?): number
     if f == nil then
         return power(bytes, 64, 262144)
@@ -469,7 +521,7 @@ end
 -- split blocks: a block whose value and key pass MAX_ENTRY splits into
 -- parts of PART bytes. Part 0 stays at the block's key and keeps the
 -- header, whose uint16 holds the number of parts, 0 for a whole block.
--- PART is a multiple of 8, so no f64 or int16 lies across two parts.
+-- PART is a multiple of 8, so no cell lies across two parts.
 local PART = 262144
 
 -- Whether a value of `size` bytes fits whole at key k. barch counts the
@@ -510,8 +562,9 @@ local function joined(t: any, name: string, block: number, k: string, stored: st
 end
 
 -- Stores block value v at k, in parts when it doesn't fit whole, and
--- removes the parts past its last of the `was` that k held.
-local function put_block(k: string, v: string, was: number)
+-- removes the parts past its last of the `was` that k held. Answers the
+-- parts it takes, 0 for a whole block.
+local function put_block(k: string, v: string, was: number): number
     local n = if fits(k, #v) then 0 else (#v + PART - 1) // PART
     if string.unpack("<I2", v, 3) ~= n then
         v = string.sub(v, 1, 2) .. string.pack("<I2", n) .. string.sub(v, 5)
@@ -526,6 +579,7 @@ local function put_block(k: string, v: string, was: number)
     for p = math.max(n, 1), was - 1 do
         barch.store.remove(part_key(k, p))
     end
+    return n
 end
 
 -- Removes block k and its parts.
@@ -654,7 +708,7 @@ local function hold(t: any, c: any, fb: number)
         check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), sp.rows)
     end
     c.dict = nil
-    c.short = b and not c.text and sp.short ~= nil and is_short(b)
+    c.int = b and not c.text and sp.short ~= nil and int_format(b)
     if b and c.text then
         if sp.head and is_dict(b) then
             c.dict, c.cw = dict_of(b, sp.rows), code_width(b)
@@ -694,9 +748,9 @@ local function field_at(t: any, c: any, pk: number): any
         local v = if len - 1 > sp.cap then long_value(t, c.name, c.okey, pk)
             else buffer.readstring(b, c.starts[fs + 1], len - 1)
         return if c.json then VALUES.parse_json(v) else v
-    elseif c.short then
-        local h = buffer.readi16(b, SHEAD + fs * 2)
-        return if h ~= NIL_SHORT then h else nil
+    elseif c.int then
+        local x = cell(b, c.int, fs)
+        return if x == x then x else nil
     end
     local x = buffer.readf64(b, sp.data + fs * 8)
     if x ~= x then
@@ -985,7 +1039,7 @@ local function load(t: any, c: any, first: number)
             c.cw = code_width(b :: buffer)
             c.cnil = nil_code(c.cw)
         end
-        c.short = not c.text and b ~= nil and c.spec.short ~= nil and is_short(b)
+        c.int = not c.text and b ~= nil and c.spec.short ~= nil and int_format(b :: buffer)
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
@@ -1043,9 +1097,9 @@ local function value_at(c: any, s: number): any
         end
         return buffer.readstring(b, c.starts[fs + 1], len - 1)
     end
-    if c.short then
-        local h = buffer.readi16(b, SHEAD + (c.off + s) * 2)
-        return if h == NIL_SHORT then c.default else h
+    if c.int then
+        local x = cell(b, c.int, c.off + s)
+        return if x ~= x then c.default else x
     end
     local x = buffer.readf64(b, c.at + s * 8)
     if x ~= x then
@@ -1424,7 +1478,7 @@ function start_fold(t: any, fields: any, spec: any): any
     room(unit)
     local job = { t = t, g = g, unit = unit, sources = list, conds = conds, keys = keys,
                   aggs = aggs, group = spec.group, budget = spec.budget, seen = 0,
-                  records = {}, tree = {}, short = {},
+                  records = {}, tree = {}, short = {}, lanes = {},
                   sel = table.create(unit, 0), gids = table.create(unit, 1) }
     if vec and vectors(conds, keys, aggs) then
         -- each aggregate adds to records that grouper id i keeps at 32 * i,
@@ -1634,7 +1688,7 @@ local function elements(v: any, c: any): buffer
 end
 
 -- Makes room in each aggregate's records for `size` grouper ids, of the
--- job's grouper, or of the short lane's when `lane` is given.
+-- job's grouper, or of an int lane's when `lane` is given.
 local function grow(job: any, size: number, lane: any?)
     local l = lane or job
     local was = l.capacity
@@ -1642,7 +1696,7 @@ local function grow(job: any, size: number, lane: any?)
         return
     end
     local cap = math.max(size, was * 2, 16)
-    local field = if lane then "srecs" else "recs"
+    local field = if lane then lane.field else "recs"
     for _, a in job.aggs do
         local r = new_records(cap)
         if a[field] then
@@ -1654,7 +1708,7 @@ local function grow(job: any, size: number, lane: any?)
 end
 
 -- Gives the grouper's ids from #gis to size - 1 their groups, for the job's
--- grouper, or the short lane's when `lane` is given.
+-- grouper, or an int lane's when `lane` is given.
 local function new_ids(job: any, size: number, lane: any?)
     local l = lane or job
     local g, gis, tree = l.grouper, l.gis, job.tree
@@ -1677,9 +1731,9 @@ end
 local function luau_rows(job: any, sel: { number }, n: number, full: boolean)
     -- the Luau loops read f64s
     for _, c in job.sources do
-        if c.short then
-            c.wide = widen(c.b, c.rows, c.wide)
-            c.b, c.short = c.wide, false
+        if c.int then
+            c.wide = widen(c.b, c.int, c.rows, c.wide)
+            c.b, c.int = c.wide, nil
         end
     end
     local fuse = job.fuse
@@ -1935,8 +1989,9 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
             local kind, b, at, stride, none = "f64", c.b, c.at, 8, nil
             if c.text then
                 kind, b, at = "str", elements(v, c), c.off * 8
-            elseif c.short then
-                kind, at, stride, none = "i16", SHEAD + c.off * 2, 2, NIL_SHORT
+            elseif c.int then
+                local f = c.int
+                kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, f.none
             end
             n = v.filter(kind, b, at, stride, cd.op, cd.value, none, sel, n, selb)
             sel = selb
@@ -1946,6 +2001,8 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
         end
     end
     local gids: buffer? = nil
+    -- the int format's lane that groups this chunk, when its key is in one
+    local lane = nil
     -- the grouper ids in use and their groups, for fold_text
     local ids, gis = 1, job.gis
     local k = job.keys[1]
@@ -1973,16 +2030,17 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
             end
             job.ccap = cap
         end
-    elseif k and k.short then
-        -- short blocks group on their own grouper; add_records joins the
-        -- groups by value
-        local lane = job.slane
+    elseif k and k.int then
+        -- int blocks group on a grouper of their format, a lane with its
+        -- own records; add_records joins the groups by value
+        local f = k.int
+        lane = job.lanes[f.kind]
         if lane == nil then
-            lane = { grouper = v.grouper("i16"), gis = {}, capacity = 0 }
-            job.slane = lane
+            lane = { grouper = v.grouper(f.kind), gis = {}, capacity = 0, field = "recs" .. f.kind }
+            job.lanes[f.kind] = lane
         end
         gids = job.gidb
-        local size = lane.grouper:ids(k.b, SHEAD + k.off * 2, 2, NIL_SHORT, sel, n, gids)
+        local size = lane.grouper:ids(k.b, SHEAD + k.off * f.width, f.width, f.none, sel, n, gids)
         if size > #lane.gis then
             new_ids(job, size, lane)
         end
@@ -2009,15 +2067,16 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     end
     for _, ag in job.aggs do
         local c = ag.source
-        local recs = if coded then ag.crecs elseif k and k.short then ag.srecs else ag.recs
+        local recs = if coded then ag.crecs elseif lane then ag[lane.field] else ag.recs
         if ag.text then
             if c.b ~= nil then
                 fold_text(job, ag, sel, n, gids, ids, gis)
             end
         elseif c == nil then
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
-        elseif c.short then
-            v.fold("i16", c.b, SHEAD + c.off * 2, 2, NIL_SHORT, sel, n, gids, recs)
+        elseif c.int then
+            local f = c.int
+            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, f.none, sel, n, gids, recs)
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
@@ -2135,11 +2194,10 @@ local function add_records(job: any)
             add_record(a, r, (id - 1) * 32, gi)
         end
     end
-    local lane = job.slane
-    if lane then
+    for _, lane in job.lanes do
         for _, a in job.aggs do
             for id, gi in lane.gis do
-                add_record(a, a.srecs, (id - 1) * 32, gi)
+                add_record(a, a[lane.field], (id - 1) * 32, gi)
             end
         end
     end
@@ -2212,19 +2270,20 @@ local function text_at(sp: any, stored: string, slot: number): string?
     return buffer.readstring(b, text_start(sp, b, slot), len - 1)
 end
 
--- Whether number block k is short, or nil when there is no block k, and
--- how many parts it is split into.
-local function short_block(k: string): (boolean?, number)
+-- The format of number block k, or nil when there is no block k, and how
+-- many parts it is split into.
+local function number_block(k: string): (any, number)
     -- the header's first 4 bytes: 1, the tag, then the parts
     local w = barch.store.getInt32At(k, 0)
     if w == nil then
         return nil, 0
     end
-    return (w // 256) % 256 == STAG, parts_in(w)
+    return FORMATS[(w // 256) % 256] or F64, parts_in(w)
 end
 
--- The key and offset of the f64 at `at` in a number block at k of `parts`.
-local function f64_at(k: string, parts: number, at: number): (string, number)
+-- The key and offset of the cell at `at` in a number block at k of
+-- `parts`.
+local function cell_at(k: string, parts: number, at: number): (string, number)
     if parts == 0 then
         return k, at
     end
@@ -2260,11 +2319,11 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
                 r[f.name] = if f.kind == "json" then VALUES.parse_json(v) else v
             end
         else
-            local short, parts = false, 0
+            local format, parts = F64, 0
             if sp.short then
-                short, parts = short_block(k)
+                format, parts = number_block(k)
             end
-            if short then
+            if format == INT16 then
                 -- 4 bytes ending at the slot's int16, which follows the header
                 local w = barch.store.getInt32At(k, SHEAD + fs * 2 - 2)
                 local h = w and (w // 65536) % 65536
@@ -2272,8 +2331,14 @@ function read(t: any, fields: any, pk: number, lock: boolean?): any
                     r[f.name] = if h > 32767 then h - 65536 else h
                 end
                 continue
+            elseif format == INT32 then
+                local x = barch.store.getInt32At(cell_at(k, parts, SHEAD + fs * 4))
+                if x and x ~= INT32.none then
+                    r[f.name] = x
+                end
+                continue
             end
-            local x = barch.store.getF64At(f64_at(k, parts, sp.data + fs * 8))
+            local x = barch.store.getF64At(cell_at(k, parts, sp.data + fs * 8))
             if x and x == x then
                 r[f.name] = if f.kind == "bool" then x == 1 else x
             end
@@ -2284,67 +2349,77 @@ end
 
 local SHORT_CELL = buffer.create(2)
 
--- The empty number block of an int field's spec sp, made when first needed.
-local function empty_of(sp: any): buffer
-    if sp.empty == nil then
-        sp.empty = empty_numbers(8, sp.rows, header(8 + sp.rows * 8, "n", sp.rows))
+-- The empty block of format `to` of an int field's spec sp, made when
+-- first needed.
+local function empty_of(sp: any, to: any): buffer
+    if to == INT16 then
+        return sp.short
     end
-    return sp.empty
+    local key = "empty" .. to.kind
+    if sp[key] == nil then
+        sp[key] = reformat(sp.short, INT16, sp.rows, to)
+    end
+    return sp[key]
 end
 
--- Stores number block b at k, which holds a short block or none, and
--- answers the parts it takes.
-local function numbers(k: string, b: buffer): number
-    if fits(k, buffer.len(b)) then
+-- The whole number block at k of `parts`, block `block` of table t's
+-- field `name`.
+local function whole_numbers(t: any, name: string, block: number, k: string,
+                             parts: number): buffer
+    if parts == 0 then
+        return barch.store.getBufferAt(k, 0)
+    end
+    return buffer.fromstring(joined(t, name, block, k, barch.store.get(k)))
+end
+
+-- Stores number block b at k, which held `was` parts, and answers the
+-- parts it takes.
+local function numbers(k: string, b: buffer, was: number): number
+    if was == 0 and fits(k, buffer.len(b)) then
         barch.store.setBufferAt(k, b, 0)
         return 0
     end
-    put_block(k, buffer.tostring(b), 0)
-    return (buffer.len(b) + PART - 1) // PART
+    return put_block(k, buffer.tostring(b), was)
 end
 
--- Stores number `x` in `slot` of number block k, nil as NaN, or as
--- NIL_SHORT in a short block. `was` is the value x replaces, and k is block
--- `block` of table t's field `name`.
+-- Stores number `x` in `slot` of number block k, nil as NaN, or as the
+-- format's none in an int block. `was` is the value x replaces, and k is
+-- block `block` of table t's field `name`. An int field's block takes the
+-- narrowest format that holds its values: a write widens it, and a write
+-- that replaces the last value that needed its format narrows it.
 local function put_number(t: any, name: string, block: number, sp: any, k: string,
                           slot: number, x: number?, was: number?)
     if sp.short then
-        local short, parts = short_block(k)
-        if short == nil then
+        local format, parts = number_block(k)
+        local need = format_for(x)
+        if format == nil then
             if x == nil then
                 return
             end
-            short = fits_short(x)
-            if short then
-                barch.store.setBufferAt(k, sp.short, 0)
-            else
-                parts = numbers(k, empty_of(sp))
-            end
-        end
-        if short then
-            if fits_short(x) then
-                buffer.writei16(SHORT_CELL, 0, x or NIL_SHORT)
-                barch.store.setBufferAt(k, SHORT_CELL, SHEAD + slot * 2)
-                return
-            end
-            -- a value outside +-32767 makes it a number block
-            parts = numbers(k, widen(barch.store.getBufferAt(k, 0), sp.rows))
-        elseif fits_short(x) and not fits_short(was) then
-            -- the block turns short again when x replaces its last value
-            -- outside +-32767
-            local b = barch.store.getBufferAt(k, 0)
-            if parts > 0 then
-                b = buffer.fromstring(joined(t, name, block, k, buffer.tostring(b)))
-            end
-            buffer.writef64(b, sp.data + slot * 8, x or NAN)
-            local h = narrow(b, sp.rows, sp.data)
-            if h then
-                put_block(k, buffer.tostring(h), parts)
+            format = need
+            parts = numbers(k, empty_of(sp, format), 0)
+        elseif need.rank > format.rank then
+            local b = whole_numbers(t, name, block, k, parts)
+            parts = numbers(k, reformat(b, format, sp.rows, need), parts)
+            format = need
+        elseif need.rank < format.rank and format_for(was) == format then
+            local b = whole_numbers(t, name, block, k, parts)
+            set_cell(b, format, slot, x)
+            local to = narrowest(b, format, sp.rows)
+            if to ~= format then
+                put_block(k, buffer.tostring(reformat(b, format, sp.rows, to)), parts)
                 return
             end
         end
-        local at, off = f64_at(k, parts, sp.data + slot * 8)
-        barch.store.setF64At(at, x or NAN, off)
+        local at, off = cell_at(k, parts, SHEAD + slot * format.width)
+        if format == INT16 then
+            buffer.writei16(SHORT_CELL, 0, x or NIL_SHORT)
+            barch.store.setBufferAt(at, SHORT_CELL, off)
+        elseif format == INT32 then
+            barch.store.setInt32At(at, x or INT32.none, off)
+        else
+            barch.store.setF64At(at, x or NAN, off)
+        end
         return
     end
     if not barch.store.exists(k) then
@@ -2821,17 +2896,21 @@ function selftest(): (boolean, string?)
         or string.unpack("<I4", b, 9) ~= dict_most(64) then
         return false, "dictionary block from plain text"
     end
-    -- a number block whose values all fit makes a short block
+    -- an int block takes the narrowest format that holds its values
     local nb = header(8 + 4 * 8, "n", 4)
     for i, x in { 3, NAN, -32767, 40000 } do
         buffer.writef64(nb, 8 + (i - 1) * 8, x)
     end
-    local wide_n = narrow(nb, 4, 8) == nil
+    local wide_n = narrowest(nb, F64, 4)
+    local wn = reformat(nb, F64, 4, INT32)
     buffer.writef64(nb, 8 + 3 * 8, 32767)
-    local h = narrow(nb, 4, 8)
-    if not wide_n or h == nil or not is_short(h) or buffer.readi16(h, SHEAD) ~= 3
-        or buffer.readi16(h, SHEAD + 2) ~= NIL_SHORT or buffer.readi16(h, SHEAD + 6) ~= 32767 then
-        return false, "short block from a number block"
+    local h = reformat(nb, F64, 4, narrowest(nb, F64, 4))
+    if wide_n ~= INT32 or int_format(wn) ~= INT32 or cell(wn, INT32, 3) ~= 40000
+        or cell(wn, INT32, 1) == cell(wn, INT32, 1) or int_format(h) ~= INT16
+        or buffer.readi16(h, SHEAD) ~= 3 or buffer.readi16(h, SHEAD + 2) ~= NIL_SHORT
+        or buffer.readi16(h, SHEAD + 6) ~= 32767 or format_for(2 ^ 31) ~= F64
+        or format_for(-2147483647) ~= INT32 or format_for(0.5) ~= F64 then
+        return false, "int block formats"
     end
     -- past 255 values a dictionary block takes int16 codes, and int8 codes
     -- again when its values fall back to 255

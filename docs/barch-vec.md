@@ -49,9 +49,9 @@ as code 0 of a dictionary column. Pass `nil` when the column has no nil.
 `f64` ignores `none` and treats NaN as nil. `str` ignores it too.
 
 lent uses `i16` for the short blocks of `int` columns whose values fit in
-16 bits, and for the codes of dictionary blocks with more than 255
-distinct values. It follows the same rules as the other integer kinds in
-every function.
+16 bits, `i32` for their wide blocks whose values fit in 32 bits, and `i16`
+for the codes of dictionary blocks with more than 255 distinct values. Both
+kinds follow the same rules as the other integer kinds in every function.
 
 Most functions take candidates as `sel, n`. When `sel` is a buffer, the
 candidates are the u32 indexes `sel[0..n)`, in that order. When `sel` is

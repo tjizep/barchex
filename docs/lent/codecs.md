@@ -172,9 +172,10 @@ than the presence blocks. With `block = "htap"`, presence blocks hold 4,096
 rows, `int` fields 2,048, other number fields 512 and a `string` field
 without `maxLen` 512.
 
-An `int` block that holds a value outside -32,767 to 32,767 takes 8 bytes
-per row, and a plain text block takes each value's length plus 4 bytes, so
-these blocks can grow past the target size. A block that grows past
+An `int` block that holds a value outside -32,767 to 32,767 takes 4 bytes
+per row, or 8 with a value outside -2,147,483,647 to 2,147,483,647, and a
+plain text block takes each value's length plus 4 bytes, so these blocks
+can grow past the target size. A block that grows past
 barch's value limit is stored in parts; see [Split
 blocks](#split-blocks).
 
@@ -215,6 +216,7 @@ schema`.
 | presence | a 16-byte header, then 1 byte per slot, 1 for a slot that holds a row; without `block`, the 1,024 bytes, then the row count as an int32 | every table |
 | number | an 8-byte header, then an f64 per slot, with NaN for nil; without `block`, no header | `int`, `float`, `decimal`, `time`, `bool` |
 | short | with `block` only: an 8-byte header, then an int16 per slot, with -32,768 for nil | `int` |
+| wide | with `block` only: an 8-byte header, then an int32 per slot, with -2,147,483,648 for nil | `int` |
 | text | a 24-byte header with the bytes in use, the slots in use and the count of long values, a u32 per slot holding its length plus 1 or 0 for nil, then the values in slot order; without `block`, the bytes and slots in use, then the same | `string`, `enum`, `json`, `bytes` |
 | dictionary | with `block` only: a 24-byte header with the count of distinct values, a code per slot (an int8 for up to 255 values, otherwise an int16), then the distinct values sorted by byte, each with its length | `string`, `enum`, `json`, `bytes` |
 
@@ -241,17 +243,25 @@ blocks of 409,600 rows with 1,000 distinct values, dictionary blocks took
 2.0 MB where plain text took 4.9 MB, and a `groupBy` on the field ran 30%
 to 80% faster.
 
-With `block`, an `int` block whose values lie within -32,767 to 32,767 is
-stored as a short block, which takes a quarter of the bytes of a number
-block. A new `int` block starts short when its first value fits. It becomes
-a number block when a write stores a value outside that range, and short
-again when an update or delete removes the last such value. Reads and
-query answers are the same for both kinds. The rows sizing counts 2 bytes
-per row for every `int` field, so a short block fills the target block
-size, and a number block, at 8 bytes per row, is four times that size. On
-409,600 rows with an `int` field of values 0 to 99, short blocks shrank
-that field from 3.3 MB to 0.83 MB, and a filter or `groupBy` on it ran 15%
-to 60% faster.
+With `block`, an `int` block takes the narrowest of three kinds that holds
+its values:
+
+| kind | bytes per row | values |
+|---|---:|---|
+| short | 2 | -32,767 to 32,767 |
+| wide | 4 | -2,147,483,647 to 2,147,483,647 |
+| number | 8 | any |
+
+A new `int` block starts as the kind its first value needs. A write that
+stores a value outside the block's range rewrites the block as the kind
+that holds it. An update or delete that removes the last value that needed
+the block's kind rewrites it as the narrowest kind its remaining values
+fit. Reads and query answers are the same for all three kinds. The rows
+sizing counts 2 bytes per row for every `int` field, so a short block fills
+the target block size, a wide block is twice that size, and a number block
+four times. On 409,600 rows with an `int` field of values 0 to 99, short
+blocks shrank that field from 3.3 MB to 0.83 MB, and a filter or `groupBy`
+on it ran 15% to 60% faster.
 
 With `block`, a text block keeps the first 33 bytes of a value longer than
 32 bytes, and the whole value is stored under its own key. Reads, filters
@@ -261,18 +271,18 @@ text field runs the Luau loops for each block that holds a long value of it.
 
 #### Split blocks
 
-With `block`, a number block of an `int` field or a text block whose value
-and key would pass barch's limit of 524,032 bytes is stored in parts of
-262,144 bytes. Part 0 stays at the block's key and keeps the header, whose
-uint16 at bytes 2 and 3 holds the number of parts, or 0 for a block stored
-whole. Part p is stored at the block's key followed by `/` and p. A block
+With `block`, a wide or number block of an `int` field or a text block
+whose value and key would pass barch's limit of 524,032 bytes is stored in
+parts of 262,144 bytes. Part 0 stays at the block's key and keeps the
+header, whose uint16 at bytes 2 and 3 holds the number of parts, or 0 for a
+block stored whole. Part p is stored at the block's key followed by `/` and p. A block
 returns to one key when a write shrinks it under the limit, and deleting
 the block's last row removes all its parts. Reads and query answers are the
 same for split and whole blocks.
 
 A block splits only when it outgrows its sizing. With `block = 262144`, an
-`int` block of 131,072 rows splits into 5 parts when it holds a value
-outside -32,767 to 32,767. A text block of 32,768 rows splits as a plain
+`int` block of 131,072 rows splits into 3 parts as a wide block, and into 5
+as a number block. A text block of 32,768 rows splits as a plain
 block of about 12,000 values of 40 bytes, or as a dictionary block of
 about 13,000 distinct values of 32 bytes. Scans read every part, and a
 text write rewrites every part, so each costs as much as on a whole block
