@@ -67,15 +67,6 @@ and privacy policies are built.
   2 bytes per row for `int` fields. A block widens for a value outside its
   range, narrows when its last such value goes, and splits into parts past
   the value limit.
-- **Text blocks of 8,192 rows on `"scan"`.** Sizing text fields as
-  dictionary blocks doubled a 10-value `string` field's blocks on `"scan"`
-  from 4,096 to 8,192 rows, about 8.3 KB each. On 409,600 rows a `groupBy`
-  on that field fell from 3.1 ms to 4.6 ms, and a sum of a `float` field
-  that does not read it from 1.7 ms to 2.0 ms. With the old text sizing on
-  the same code both return, and fold chunks capped at 4,096 slots do not
-  help, so the cost follows the block's stored size. Find out whether
-  barch reads or keeps values past 8 KB more slowly, and then either fix
-  that or cap text fields at 4,096 rows.
 - **Dictionary text blocks.** Tables with `block` store a text block whose
   values repeat as a dictionary block: its distinct values sorted by byte,
   then an `i8` code per slot, or an `i16` code past 255 values. A
