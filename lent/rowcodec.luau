@@ -18,7 +18,8 @@
 -- Fields support string, int (an integer in +-2^53), float, decimal, bool,
 -- time, enum, json and bytes. Time uses int storage. Decimal uses float
 -- storage for the value lent.CLIENT rounded to the field's scale. Enum uses
--- strings and a required `values` list. Bytes are Luau strings, stored as hex in JSON and
+-- strings and a required `values` list; the removed choices that the keys of
+-- an optional `replaces` map name stay readable too. Bytes are Luau strings, stored as hex in JSON and
 -- text rows and raw bytes in binary rows. JSON values preserve nulls and
 -- array/object distinctions through lent.VALUES. A field's id is 1 to 65535 and stays
 -- with the field for the table's life: text and binary rows name fields by
@@ -78,7 +79,13 @@ function fields(list: { any }): any
         end
         local kind = STORED_AS[f.kind] or f.kind
         local field = { name = f.name, kind = kind, id = f.id, optional = f.optional == true }
-        if kind == "enum" then field.values = VALUES.enum_values(f.values, where) end
+        if kind == "enum" then
+            field.values = VALUES.enum_values(f.values, where)
+            -- rows MIGRATE has yet to rewrite keep removed choices readable
+            for from in f.replaces or {} do
+                table.insert(field.values, from)
+            end
+        end
         byName[f.name] = field
         byId[f.id] = field
         out[i] = field

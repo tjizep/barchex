@@ -74,7 +74,8 @@ changes or a unique-index conflict:
 - a kind change other than `int` to `float`, `decimal` to `float`, `int`
   to or from `time`, or `enum` to `string`;
 - a change to a `decimal` field's scale;
-- removing a value from an enum's choices;
+- removing a value from an enum's choices without `:replaces`, or from an
+  edge field's choices; see [removing enum choices](#removing-enum-choices);
 - a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
 - a stored computed field whose function answers a value that does not fit
@@ -86,6 +87,47 @@ changes or a unique-index conflict:
 Adding enum choices preserves stored rows and their indexes. Byte and JSON
 defaults are preserved in the catalog, including binary bytes, JSON null
 and empty arrays; `m.load()` returns their Luau values.
+
+## Removing enum choices
+
+To remove a choice from a stored enum field, list the remaining choices in
+`:values` and name the choice that each removed one's rows take with
+`:replaces`:
+
+```lua
+lent.field.enum "state"
+    :values("new", "done")
+    :replaces { old = "done" }
+```
+
+`migrate` rewrites the rows that hold `"old"` to `"done"` with a fill step
+and rebuilds the indexes on the field around it. For a `Task` table with a
+`by_state` index on `state`, the steps are `drop Task.by_state`,
+`fill Task.state` and `build Task.by_state`. The fill visits every row and
+writes only the rows it changes. Each row visit and each removed index entry
+counts as one toward the page size.
+
+While the fill runs:
+
+- creating, updating or deleting rows raises a `LENT` error until the
+  index drops finish, as described above;
+- reads answer the removed choice for each row the fill has not reached;
+- writing a removed choice raises `LENT table Task field state wants one of
+  ["new","done"], got "old"`;
+- `m.load()` lists the field's `replaces` map, which leaves the catalog when
+  the fill finishes.
+
+If a replacement gives two rows the same values in a unique index, the
+index build stops with the unique-index error; correct one of the rows and
+resume. Remove the `:replaces` entry once `report.done` is `true`; later
+migrations ignore it while the field's choices stay the same.
+
+`migrate` refuses a removed choice that `:replaces` leaves out, with
+`MIGRATE table Task field state removes enum value "old"; name the choice
+its rows take with :replaces`. It refuses every removed choice of an edge
+field, since stored links may hold it. `lent.graph` checks the map itself:
+each key must be a choice missing from `:values`, and each value one of the
+choices in `:values`.
 
 ## Dropping a table
 

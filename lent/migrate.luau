@@ -55,6 +55,9 @@
 -- the drops and before the builds. A new stored edge.through, or one whose
 -- path changed, adds a drop step for its store and a fill step that counts
 -- each row's paths; one that is removed or no longer stored adds a drop.
+-- An enum choice removed with :replaces adds a fill step that rewrites the
+-- rows that hold it. Until the fill ends, the catalog field keeps the
+-- `replaces` map, so the rows not yet rewritten stay readable.
 -- A change of format to or from column, or of a column table's block, adds
 -- a copy step after the others and then a drop step. The copy writes each
 -- row in the new format, and new column blocks go under a new store. The
@@ -276,6 +279,7 @@ end
 -- is new) to the declared `t`, and answers the catalog's fields for `t` and
 -- the field ids SCHEMA.ids gave out.
 local function check_fields(where: string, old: any, t: any, before: any): (any, any)
+    local replaced = {}
     for _, f in t.fields do
         local was = before[f.name] or (f.was and before[f.was])
         if old and was == nil and not f.optional and f.default == nil then
@@ -295,11 +299,20 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
         if was and was.kind == "enum" and f.kind == "enum" then
             local allowed = {}
             for _, value in f.values do allowed[value] = true end
+            -- a removal whose fill is still running keeps its replacements
+            local map = was.replaces and table.clone(was.replaces)
             for _, value in was.values do
-                if not allowed[value] then
-                    fail(where .. " field " .. f.name .. " removes enum value " .. VALUES.json(value))
+                local to = not t.dir and f.replaces and f.replaces[value]
+                if not allowed[value] and not to then
+                    fail(where .. " field " .. f.name .. " removes enum value " .. VALUES.json(value)
+                        .. (if t.dir then ", which stored links may hold"
+                            else "; name the choice its rows take with :replaces"))
+                elseif not allowed[value] then
+                    map = map or {}
+                    map[value] = to
                 end
             end
+            replaced[f.name] = map
         end
         if was and was.name ~= f.name and old.jsonRows then
             fail(where .. " field " .. f.name .. " renames " .. was.name .. ", but the"
@@ -312,7 +325,7 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
         fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
                       unique = f.unique, default = f.default, immutable = f.immutable,
                       match = f.match, values = f.values and table.clone(f.values),
-                      scale = f.scale, computed = f.computed }
+                      replaces = replaced[f.name], scale = f.scale, computed = f.computed }
         for _, k in RULES do
             fields[i][k] = f[k]
         end
@@ -341,6 +354,15 @@ local function edge_record(s: any, old: any): any
         c.ids, c.next = old.ids, old.next
     end
     return c
+end
+
+-- The fill function of enum field `f`, which answers a row's value with
+-- each removed choice replaced.
+local function replacer(f: any): (any) -> any
+    return function(r)
+        local v = r[f.name]
+        return if v ~= nil and f.replaces[v] then f.replaces[v] else v
+    end
 end
 
 -- The keys of map `m`, in order.
@@ -421,7 +443,8 @@ function plan(prev: any, app: any): any
         end
         local after = by_name(fields)
         -- stored computed fields that rows stored before need computed:
-        -- new ones, and ones whose revision changed
+        -- new ones, and ones whose revision changed, and enum fields whose
+        -- rows need a removed choice replaced
         local fill, fns, refill = {}, {}, {}
         for i, f in fields do
             local d = t.fields[i]
@@ -430,6 +453,12 @@ function plan(prev: any, app: any): any
                 fill[#fill + 1] = f.name
                 fns[f.name] = d.code.computed
                 if was then refill[f.name] = true end
+            end
+            -- removed enum choices that rows take a replacement for
+            if f.replaces and not was.replaces then
+                fill[#fill + 1] = f.name
+                fns[f.name] = replacer(f)
+                refill[f.name] = true
             end
         end
         local c = {
@@ -638,12 +667,14 @@ local function build_row(t: any, ix: any, edges: any, fields: any, k: string, st
     barch.store.set(key, value)
 end
 
--- Computes the stored computed fields `names` of the row at key k, whose
--- value is `stored`, with their functions `fns`, and stores the row again.
+-- Computes the fields `names` of the row at key k, whose value is
+-- `stored`, with their functions `fns`, and stores the row again when a
+-- value changed.
 local function fill_row(t: any, names: { string }, fns: any, fields: any, version: number,
                         k: string, stored: any)
     local old = if type(stored) == "table" then table.clone(stored) else nil
     local r = lay.fill(t, decoded(fields, stored))
+    local same = true
     for _, name in names do
         local v = fns[name](table.clone(r))
         for _, f in t.fields do
@@ -653,7 +684,11 @@ local function fill_row(t: any, names: { string }, fns: any, fields: any, versio
                     .. tostring(lay.row_pk(t, k)))
             end
         end
+        same = same and v == r[name]
         r[name] = v
+    end
+    if same then
+        return
     end
     if t.format == "column" then
         col.write(t, fields, lay.row_pk(t, k), old, r)()
@@ -663,11 +698,15 @@ local function fill_row(t: any, names: { string }, fns: any, fields: any, versio
 end
 
 -- The functions of the stored computed fields `names` of catalog table t,
--- from the graph `app`.
+-- from the graph `app`, and of the enum fields among them whose removed
+-- choices are replaced.
 local function fill_fns(app: any, t: any, names: { string }): any
     local fns = {}
     for _, f in app.tables[t.name].fields do
         if table.find(names, f.name) then fns[f.name] = f.code.computed end
+    end
+    for _, f in t.fields do
+        if f.replaces and table.find(names, f.name) then fns[f.name] = replacer(f) end
     end
     return fns
 end
@@ -812,6 +851,9 @@ function apply(p: any)
             each_row(s.table, function(k, v)
                 fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k, v)
             end)
+            for _, f in s.table.fields do
+                if table.find(s.fields, f.name) then f.replaces = nil end
+            end
         elseif s.op == "copy" then
             local fields = row_fields(s.table)
             each_row(s.table, function(k, v)
@@ -915,7 +957,7 @@ local function advance(c: any, budget: number, app: any): number
             if step.op == "build" then ix.state = nil end
             if step.op == "fill" then
                 for _, f in t.fields do
-                    if table.find(step.fields, f.name) then f.state = nil end
+                    if table.find(step.fields, f.name) then f.state, f.replaces = nil, nil end
                 end
             end
             -- the table reads the new blocks from the commit of this page

@@ -39,7 +39,7 @@ A `column` table also takes `block`, the size of its blocks: `"htap"`,
 |---|---|
 | `lent.field.string`, `.int`, `.float`, `.bool`, `.time` | `:optional()`, `:unique()`, `:default(v)`, `:was("old_name")`, and the value rules below |
 | `lent.field.decimal` | the same modifiers, plus required `:scale(n)` |
-| `lent.field.enum` | the same modifiers, plus required `:values("choice", ...)` |
+| `lent.field.enum` | the same modifiers, plus required `:values("choice", ...)` and `:replaces { removed = "choice" }` for a migration that removes choices |
 | `lent.field.bytes` | the same modifiers and byte-length rules |
 | `lent.field.json` | `:optional()`, `:default(v)`, `:was("old_name")`, `:immutable()`, `:validate(fn)` and `:updateDefault(fn)` |
 | any field builder | `:computed(fn)`, and `:stored(revision)` to store it; see computed fields below |
@@ -66,7 +66,7 @@ local Post = lent.schema "Post" {
 
 | plain table | keys |
 |---|---|
-| field | `kind` and `name` (required), `values` (required for `enum`), `scale` (required for `decimal`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
+| field | `kind` and `name` (required), `values` (required for `enum`), `replaces`, `scale` (required for `decimal`), `optional`, `unique`, `default`, `was`, `computed`, and the value rules below; `validate` takes a function or a list of them |
 | index | `on`, a list of field names (required), `edges`, a list of edge names, `unique`, `name` |
 | edge | `dir`, `"to"`, `"from"` or `"through"`, `name` and `target` (required), `ref`, `unique`, `fields`, `via` (a dotted string or a list of names), `stored` |
 
@@ -194,6 +194,11 @@ distinct, non-empty UTF-8 strings. Enum fields support indexes, unique
 constraints, comparisons and cursor pages. Their order is the byte order
 of their labels, so changing the declaration order leaves query ordering
 the same.
+
+`migrate` adds choices to a stored enum field as declared. To remove a
+choice, map it to a remaining choice with `:replaces`, and `migrate`
+rewrites the rows that hold it; see
+[removing enum choices](migrate.md#removing-enum-choices).
 
 Bytes fields hold Luau strings containing arbitrary bytes, including NUL
 and invalid UTF-8. They support indexes, unique constraints, comparisons,

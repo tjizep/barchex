@@ -185,8 +185,10 @@ logged, so a default of `lent.now` stores the same value on every member.
 
 Enum and bytes fields share string key encoding, so their indexes and
 cursor pages follow byte order. Enums carry their allowed strings in the
-catalog. A migration can add choices or relax an enum to a string; removing
-choices is refused to keep existing rows readable.
+catalog. A migration can add choices or relax an enum to a string. It
+removes a choice that `:replaces` maps to a remaining one with a fill step
+that rewrites the rows holding it; until the fill ends, the catalog field
+keeps the map so those rows stay readable.
 
 JSON fields preserve structured values, including the distinction between
 null and a missing field, and between empty arrays and objects. Applications

@@ -345,6 +345,13 @@ function Field:values(...: string)
     return self
 end
 
+-- Maps each enum choice removed from :values to the remaining choice that
+-- MIGRATE rewrites its stored rows to: :replaces { old = "done" }.
+function Field:replaces(map: { [string]: string })
+    self.replaces_ = map
+    return self
+end
+
 local function builder(kind: string)
     return function(name: string)
         ident(name, kind .. " field")
@@ -551,6 +558,7 @@ local FIELD_KEYS = {
     default = "any", was = "string", immutable = "boolean", min = "number",
     max = "number", minLen = "number", maxLen = "number", notEmpty = "boolean",
     match = "string", validate = "any", updateDefault = "function", values = "table",
+    replaces = "table",
     computed = "function", stored = "any", scale = "number",
 }
 
@@ -564,6 +572,7 @@ local function plain_field(where: string, t: any): any
     end
     local f = field[t.kind](t.name)
     if t.values ~= nil then f.values_ = t.values end
+    if t.replaces ~= nil then f:replaces(t.replaces) end
     if t.scale ~= nil then f:scale(t.scale) end
     if t.optional then f:optional() end
     if t.unique then f:unique() end
@@ -765,6 +774,36 @@ local function scale(where: string, f: any, out: any)
     out.scale = n
 end
 
+-- Checks the :replaces map of enum field `f` and copies it into `out`:
+-- each key a removed choice, each value one of the field's choices.
+local function replaces(where: string, f: any, out: any)
+    local map = f.replaces_
+    if map == nil then
+        return
+    end
+    if f.kind ~= "enum" then
+        fail(where .. " is a " .. f.kind .. " field, which takes no replaces")
+    end
+    if type(map) ~= "table" then
+        fail(where .. " replaces takes a table of removed choice = choice, got " .. type(map))
+    end
+    out.replaces = {}
+    for from, to in map do
+        if type(from) ~= "string" or utf8.len(from) == nil or from == "" then
+            fail(where .. " replaces needs removed choices that are non-empty UTF-8 strings, got "
+                .. tostring(from))
+        end
+        if table.find(out.values, from) then
+            fail(where .. " replaces " .. VALUES.json(from) .. ", which is still one of its values")
+        end
+        if not table.find(out.values, to) then
+            fail(where .. " replaces " .. VALUES.json(from) .. " with " .. tostring(to)
+                .. ", which is not one of its values")
+        end
+        out.replaces[from] = to
+    end
+end
+
 -- Checks computed field f and answers { name, kind, values?, scale?, fn }.
 local function computed_field(where: string, f: any): any
     if type(f.computed_) ~= "function" then
@@ -803,6 +842,7 @@ local function stored_field(where: string, f: any): any
     elseif f.values_ ~= nil then
         fail(where .. " field " .. fname .. " is a " .. f.kind .. " field, which takes no values")
     end
+    replaces(where .. " field " .. fname, f, out)
     scale(where .. " field " .. fname, f, out)
     if fn then
         out.code.default = f.default_

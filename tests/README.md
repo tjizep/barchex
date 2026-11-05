@@ -35,6 +35,13 @@ beside a development server.
   index entries, counters, statistics and edges leave while other tables keep
   theirs, that a table declared again starts empty, and that a table missing
   from the graph without `lent.drop` is refused.
+- `test_enum_replaces.py` removes an enum choice with `:replaces` from
+  `binary`, `json` and `column` tables, in pages and with `apply`, and checks
+  that rows take the replacement, that indexes on the field are rebuilt, that
+  rows keep the removed choice until the fill reaches them while writes of it
+  are refused, that a unique conflict stops the build until it is corrected,
+  and that a removal without `:replaces`, a removal from an edge field and
+  invalid `:replaces` maps are refused.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

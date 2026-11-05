@@ -13,8 +13,6 @@ and privacy policies are built.
 
 - **Renaming a field of a `json` table.** Stored `json` rows name their
   fields, so `migrate` refuses the rename until those rows are rewritten.
-- **Removing enum choices.** `migrate` accepts added choices and refuses
-  removing a choice, so stored enum values stay readable.
 - **Unique edges in pessimistic transactions.** Two `link` calls to one row
   at once can deadlock on the shared lock of the unique check.
   `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
