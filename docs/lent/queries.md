@@ -1,24 +1,55 @@
 # lent queries
 
-Queries read through the best index for their filters:
+Filter a query with an expression over the row's fields, and combine
+conditions with `and`, `or`, `not` and parentheses. Queries read through the
+best index for their filters:
 
 ```lua
+-- 1. a page of users, oldest first
 c.User:query()
-    :where("name", "=", "ann")            -- = ~= < <= > >=
-    :where("age", ">", 30)
-    :where(function(r) return r.age % 2 == 0 end)
-    :where("age <= max or name == 'bo'", { max = 60 })  -- an expression
+    :where("(age >= min and name ~= 'ann') or name == 'bo'", { min = 30 })
     :order("age", "desc"):offset(10):limit(10)
     :all()                                -- or first, ids, count
-c.User:query():where("id", "=", u.id):queryPosts():all()  -- follow an edge
-c.Customer:query():follow("orders.lines.product"):all()   -- follow several
+-- 2. how many users are 60 or younger, or have no age
+c.User:query():where("not (age > 60)"):count()
+-- 3. the Post rows of one user, through the User edge posts
+c.User:query():where(`id == {u.id}`):queryPosts():all()
+-- 4. each Product that a Customer ordered, through three edges
+c.Customer:query():follow("orders.lines.product"):all()
 ```
+
+The same queries in SQL, with each edge written as a foreign key column,
+such as `posts.author_id` for the `posts` edge:
+
+```sql
+-- 1.
+SELECT * FROM users
+WHERE (age >= 30 AND name <> 'ann') OR name = 'bo'
+ORDER BY age DESC NULLS LAST, id DESC LIMIT 10 OFFSET 10;
+-- 2. lent compares a missing value as nil, so `not (age > 60)` keeps it
+SELECT count(*) FROM users WHERE age IS NULL OR age <= 60;
+-- 3.
+SELECT * FROM posts WHERE author_id = 1;  -- u.id
+-- 4. each product once, however many lines name it
+SELECT DISTINCT products.* FROM customers
+JOIN orders ON orders.customer_id = customers.id
+JOIN lines ON lines.order_id = orders.id
+JOIN products ON products.id = lines.product_id;
+```
+
+`queryPosts()` and `follow` answer a query over the rows at the far end of
+the edges, so `all()` answers `Post` or `Product` rows, each once. Chain
+`where`, `order` and `limit` onto that query to filter and page them.
+
+Each `where` call adds a condition that rows must also meet. `where` also
+takes a single comparison, `where("age", ">", 30)`, and a Luau function of
+the row, `where(function(r) return r.age % 2 == 0 end)`.
 
 | method | effect |
 |---|---|
-| `where(field, op, value)` | keeps rows where the comparison holds; a missing field equals `nil`, differs from non-`nil` values and fails range comparisons |
+| `where(expr, params)` | keeps rows for which the expression string `expr` is true; `params` is an optional table of named values; see [expression filters](#expression-filters) |
+| `where(field, op, value)` | keeps rows where the comparison holds, `op` being one of `=`, `~=`, `<`, `<=`, `>`, `>=`; a missing field equals `nil`, differs from non-`nil` values and fails range comparisons |
 | `where(fn)` | keeps rows for which `fn(row)` is true |
-| `where(expr, params)` | keeps rows for which the expression string `expr` is true; `params` is an optional table of named values |
 | `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
 | `limit(n)`, `offset(n)` | applied after the order |
 | `cursor(row)` | a string that marks `row`'s place in the query's order |
@@ -63,6 +94,38 @@ that is both a field and a parameter is an error, and so is a name that is
 neither. Pass values through `params` to keep them out of the expression
 text. A parameter set to `nil` is missing from its table, so compare with
 the literal `nil` instead.
+
+### Values in expressions
+
+Put a program's value into an expression with Luau string interpolation or
+with a parameter:
+
+```lua
+c.User:query():where(`id == {u.id}`)              -- interpolation
+c.User:query():where("name == n", { n = name })   -- a parameter
+```
+
+Interpolation needs a backtick string; Luau keeps `{u.id}` in a `"..."` or
+`'...'` string as literal text. It writes the value into the expression
+text, which suits numbers, `true`, `false` and `nil`: a number's text reads
+back as the same number, so `` `score == {s}` `` matches a stored `0.1`.
+
+Pass strings, JSON tables and any value that comes from outside the program
+in `params`. An interpolated string becomes part of the expression's
+syntax:
+
+- `` `name == {name}` `` reads `ann` as a name and raises
+  `has no field or parameter ann`;
+- `` `name == '{name}'` `` and `` `name == "{name}"` `` work until a value
+  holds the quote, such as `o'brien`, which raises
+  `has an unfinished string`;
+- a value such as `x' or name ~= 'x` turns
+  `` `name == '{name}'` `` into an expression that matches every row.
+
+A parameter is always one value, whatever its text holds. lent keeps the
+parsed form of the 256 most recent expression texts, and each interpolated
+value makes a new text, so a query run in a loop parses its expression on
+every call. With a parameter, the text stays the same and is parsed once.
 
 A call on a value or parameter is worked out once, so
 `placed >= date('1995-01-01')` compares the field with a number, and an
