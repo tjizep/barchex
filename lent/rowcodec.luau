@@ -23,7 +23,9 @@
 -- text rows and raw bytes in binary rows. JSON values preserve nulls and
 -- array/object distinctions through lent.VALUES. A field's id is 1 to 65535 and stays
 -- with the field for the table's life: text and binary rows name fields by
--- id, so a field can be renamed without rewriting them.
+-- id, so a field can be renamed without rewriting them. A json row that
+-- predates a rename names the field by the old name, which an optional
+-- `renames` string holds until MIGRATE rewrites the row.
 --
 --   format    stored value                                      fields named by
 --   "json"    a JSON object, with the schema version in "_v"    name
@@ -86,6 +88,8 @@ function fields(list: { any }): any
                 table.insert(field.values, from)
             end
         end
+        -- json rows MIGRATE has yet to rewrite name a renamed field by its old name
+        field.renames = f.renames
         byName[f.name] = field
         byId[f.id] = field
         out[i] = field
@@ -200,6 +204,7 @@ local function dec_json(schema: any, value: string): (any, number)
     local row = {}
     for _, f in schema.list do
         local v = doc[f.name]
+        if v == nil and f.renames then v = doc[f.renames] end
         if v ~= nil and (f.kind == "json" or v ~= simdjson.null) then
             if f.kind == "bytes" then
                 local ok, decoded = pcall(VALUES.unhex, v)

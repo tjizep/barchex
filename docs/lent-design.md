@@ -101,7 +101,8 @@ Every field gets a row codec id. `lent.ids` keeps the ids an earlier version
 gave out, follows `:was("old_name")` across a rename, and numbers new fields
 after the highest id ever used, so a dropped field's old values are skipped
 rather than read as a new field. The catalog will store each table's ids and
-next id.
+next id. `json` rows name their fields, so a rename in a table that has
+stored `json` rows adds a fill step that rewrites them with the new name.
 
 `MIGRATE` writes the declared schema into the graph as the catalog, so the
 schema can be browsed and linked:

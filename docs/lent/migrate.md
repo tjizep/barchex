@@ -76,7 +76,6 @@ changes or a unique-index conflict:
 - a change to a `decimal` field's scale;
 - removing a value from an enum's choices without `:replaces`, or from an
   edge field's choices; see [removing enum choices](#removing-enum-choices);
-- a field rename in a table that has stored `json` rows;
 - a unique index whose values two stored rows already share;
 - a stored computed field whose function answers a value that does not fit
   the field for a stored row;
@@ -128,6 +127,27 @@ its rows take with :replaces`. It refuses every removed choice of an edge
 field, since stored links may hold it. `lent.graph` checks the map itself:
 each key must be a choice missing from `:values`, and each value one of the
 choices in `:values`.
+
+## Renaming a field
+
+Rename a stored field with `:was`, which names the field's previous name:
+
+```lua
+lent.field.string "headline":was("title")
+```
+
+The field keeps its row codec id, so `text`, `binary` and `column` rows
+need no rewrite. `json` rows name their fields, so a table that has stored
+`json` rows, under its current format or an earlier one, gets a
+`fill Table.headline` step that rewrites each `json` row with the new name.
+The fill writes each row in the table's current format, so a rename made
+with a change from `json` to `binary` or `text` converts the rows too. In
+every format, `migrate` rebuilds the indexes on a renamed field.
+
+While the fill runs, reads answer every row's value under the new name, and
+a write stores the row with the new name. `m.load()` lists the old name in
+the field's `renames` entry until the fill finishes. Remove `:was` once
+`report.done` is `true`; later migrations ignore it.
 
 ## Dropping a table
 

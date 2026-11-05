@@ -42,6 +42,10 @@ beside a development server.
   are refused, that a unique conflict stops the build until it is corrected,
   and that a removal without `:replaces`, a removal from an edge field and
   invalid `:replaces` maps are refused.
+- `test_json_rename.py` renames a field of a `json` table, in pages, with
+  `apply` and with a move to `binary` rows, and checks that every stored row
+  takes the new name, that rows read the new name and accept writes before
+  the fill reaches them, and that the index on the field is rebuilt.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid
