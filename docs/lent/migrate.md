@@ -26,7 +26,7 @@ row, including rows whose missing values leave them out of a unique index.
 | `changed` | `true` when this call installs a schema or advances pending work |
 | `done` | `true` when every step is complete |
 | `processed` | row visits plus removed index entries and column blocks in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges, `drop Table.field blocks` for a field dropped from a `column` table, and `copy Table blocks` or `copy Table rows` with `drop Table old blocks` or `drop Table old rows` for a change of format or `block`; empty for an unchanged, completed schema |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges, `drop Table.field blocks` for a field dropped from a `column` table, `drop Table` and `drop Table.edge` for a dropped table and its edges, and `copy Table blocks` or `copy Table rows` with `drop Table old blocks` or `drop Table old rows` for a change of format or `block`; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
@@ -68,7 +68,8 @@ complete, calling it with the same schema writes nothing and answers
 `migrate` raises an error that starts with `MIGRATE` for unsupported schema
 changes or a unique-index conflict:
 
-- a table missing from the schema;
+- a table missing from the schema that `lent.drop` does not name; see
+  [dropping a table](#dropping-a-table);
 - a new field that is neither `:optional()` nor has a value `:default()`;
 - a kind change other than `int` to `float`, `decimal` to `float`, `int`
   to or from `time`, or `enum` to `string`;
@@ -85,6 +86,44 @@ changes or a unique-index conflict:
 Adding enum choices preserves stored rows and their indexes. Byte and JSON
 defaults are preserved in the catalog, including binary bytes, JSON null
 and empty arrays; `m.load()` returns their Luau values.
+
+## Dropping a table
+
+To drop a stored table and everything it stores, remove its `lent.schema`
+declaration and the edges of other tables that name it, add
+`lent.drop "Table"` to the graph, and run `migrate`:
+
+```lua
+local app = lent.graph {
+    User,
+    lent.drop "Session",
+}
+```
+
+The first page removes the table from the catalog, so `m.load()` and new
+clients no longer list it. A client opened with a graph that still declares
+the table raises `LENT table Session is declared, and this space's catalog
+lacks it; run MIGRATE`. Drop steps then remove the table's keys in pages:
+
+| step | removes |
+|---|---|
+| `drop Table` | the table's rows or column blocks, index entries, id counter and planner statistics |
+| `drop Table.edge` | the links of each edge to or from the table, one step per edge |
+
+Each removed key counts as one toward the page size.
+
+Remove the `lent.drop` entry once `report.done` is `true`. While the entry
+stays, `migrate` answers `changed = false` for a table that is already gone.
+To declare a table of the same name again, finish the drop first:
+`lent.graph` raises `SCHEMA table Session is declared and dropped; migrate
+with the drop, then declare the table again` for a graph that does both.
+The new table starts empty, and an `id = "int"` table numbers its rows from
+1 again.
+
+A stored table that is missing from the graph and that `lent.drop` does not
+name stops the migration with `MIGRATE table Session is missing from the
+schema; declare it, or name it with lent.drop to drop it and its rows`. The
+table keeps its rows, so a declaration left out by mistake loses nothing.
 
 ## Changing a table's format or block size
 

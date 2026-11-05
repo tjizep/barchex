@@ -30,6 +30,11 @@ beside a development server.
   leave in pages, copies both tables to and from `column` and into a new
   block size in pages while rows are written, and checks that `uuid` ids
   are refused.
+- `test_drop_table.py` drops a `binary` and a `column` table named with
+  `lent.drop`, in pages and with `apply`, and checks that their rows, blocks,
+  index entries, counters, statistics and edges leave while other tables keep
+  theirs, that a table declared again starts empty, and that a table missing
+  from the graph without `lent.drop` is refused.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

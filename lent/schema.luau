@@ -48,6 +48,12 @@
 --       rows = function(c, params) return { ... } end,
 --   }
 --
+-- lent.drop names a table that MIGRATE drops with its rows, indexes, column
+-- blocks, counter, statistics and edges. Remove the entry once the drop is
+-- done; until then, a table missing from the graph stops MIGRATE:
+--
+--   lent.graph { User, lent.drop "Session" }
+--
 -- schema() checks one table and graph() checks the tables together: every
 -- edge names a declared table, every edge.from names the edge.to it is the
 -- inverse of, and every edge.through's hops reach its target. Both raise an
@@ -1131,6 +1137,13 @@ end
 
 -- the whole schema ------------------------------------------------------------
 
+-- A table for MIGRATE to drop, which graph() takes with the tables:
+-- { name, drop = true }.
+function drop(name: string)
+    ident(name, "drop")
+    return { name = name, drop = true }
+end
+
 -- Checks tables together and answers { tables = { [name] = table },
 -- order = { names }, edges = { [store name] = { name, from, to, fromId,
 -- toId, unique, inverseUnique, fields? } } }, where fromId and toId are the
@@ -1140,14 +1153,23 @@ end
 -- every hop is unique. A stored one gets a store named as an edge.to's,
 -- whose record adds edge, its name, and path = { { store, forward } }, the
 -- stored edges it follows with their direction. Views made with lent.view
--- go in `views = { [name] = view }`. An index with edges gets links = {
+-- go in `views = { [name] = view }`, and the names of tables made with
+-- lent.drop in `dropped = { [name] = true }`. An index with edges gets links = {
 -- { name, store, forward, id } }, one per edge: its store, whether this
 -- table is the store's from end, and the id kind of the linked table.
 function graph(list: { any })
-    local tables, order, keys, views = {}, {}, {}, {}
+    local tables, order, keys, views, dropped = {}, {}, {}, {}, {}
     for _, t in list do
+        if type(t) == "table" and t.drop == true and type(t.name) == "string" then
+            if dropped[t.name] then
+                fail("table " .. t.name .. " is dropped twice")
+            end
+            dropped[t.name] = true
+            continue
+        end
         if type(t) ~= "table" or type(t.fields) ~= "table" then
-            fail("graph takes tables made with lent.schema and views made with lent.view")
+            fail("graph takes tables made with lent.schema, views made with lent.view"
+                .. " and drops made with lent.drop")
         end
         if t.view then
             if views[t.name] then
@@ -1280,7 +1302,13 @@ function graph(list: { any })
             fail("view " .. name .. " has the name of a table")
         end
     end
-    return { tables = tables, order = order, edges = stored, views = views }
+    for name in dropped do
+        if tables[name] then
+            fail("table " .. name .. " is declared and dropped; migrate with the drop,"
+                .. " then declare the table again")
+        end
+    end
+    return { tables = tables, order = order, edges = stored, views = views, dropped = dropped }
 end
 
 -- field ids -------------------------------------------------------------------

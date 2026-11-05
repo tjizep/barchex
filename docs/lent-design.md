@@ -134,7 +134,9 @@ indexes while unfinished indexes carry `state = "building"`. Writes keep
 building indexes current; a building unique index checks the table for
 duplicates, including rows beyond its cursor. Old entries are removed
 before a replacement builds, and row writes to an affected table are
-refused until its pending drops finish. The last build page commits its
+refused until its pending drops finish. A table named with `lent.drop`
+leaves the catalog on the first page, and drop steps remove its keys and
+edges. The last build page commits its
 entries and readiness together. See the [migration reference](lent/migrate.md)
 for limits and recovery.
 

@@ -11,7 +11,6 @@ and privacy policies are built.
 
 ## Limits of what is built
 
-- **Dropping a table.** `migrate` refuses a table missing from the schema.
 - **Renaming a field of a `json` table.** Stored `json` rows name their
   fields, so `migrate` refuses the rename until those rows are rewritten.
 - **Removing enum choices.** `migrate` accepts added choices and refuses

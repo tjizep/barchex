@@ -39,7 +39,7 @@
 -- its path, and state = "filling" until its links are filled.
 --
 -- plan() refuses a change that would leave stored rows unreadable or wrong:
---   - dropping a table;
+--   - a table missing from the schema that lent.drop does not name;
 --   - changing a table's id kind, which its stored keys are written in;
 --   - a new field that is neither optional nor has a default;
 --   - changing a field's kind, except int to float, int to or from time,
@@ -63,6 +63,9 @@
 -- and holds the new ones in `rebuild`, with `upto`, the last row copied:
 -- CLIENT writes rows up to it to both copies. The copy's last page switches
 -- the table to the new copy.
+-- A table that lent.drop names adds a drop step for its rows, column
+-- blocks, index entries, counter and statistics, and one for each edge
+-- store to or from it. The catalog loses the table at once.
 -- apply() refuses a unique index that two rows' values already break, and
 -- a fill whose function answers a value that does not fit its field.
 
@@ -340,11 +343,35 @@ local function edge_record(s: any, old: any): any
     return c
 end
 
+-- The keys of map `m`, in order.
+local function sorted(m: any): { string }
+    local keys = {}
+    for k in m do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys
+end
+
+-- "Table.edge", the edge of catalog `c` that edge store `store` holds.
+local function edge_label(c: any, store: string): string
+    local s = c.edges[store]
+    if s.path then
+        return s.from .. "." .. s.edge
+    end
+    for _, t in c.tables do
+        for _, e in t.edges do
+            if e.store == store and e.dir == "to" then
+                return t.name .. "." .. e.name
+            end
+        end
+    end
+    return store
+end
+
 -- What a migration from `prev` (load()'s answer, or nil) to `app` would do:
 -- { version, changed, compiled, steps = { { op = "build" | "drop", table,
 -- index } | { op = "fill", table, fields, fns } | { op = "drop", edge, label }
--- | { op = "fill", table, edge, label } } }. Raises an error for a change it
--- refuses.
+-- | { op = "fill", table, edge, label } | { op = "drop", gone = { key, name,
+-- store } } } }. Raises an error for a change it refuses.
 function plan(prev: any, app: any): any
     prev = prev or { version = 0, tables = {}, edges = {} }
     local tables, steps = {}, {}
@@ -468,10 +495,19 @@ function plan(prev: any, app: any): any
             end
         end
     end
-    for key, old in prev.tables do
+    -- a table leaves the catalog only when lent.drop names it, so a table
+    -- left out by mistake keeps its rows. Drops go in key order.
+    local gone = {}
+    for _, key in sorted(prev.tables) do
+        local old = prev.tables[key]
         if tables[key] == nil then
-            fail("table " .. old.name .. " is missing from the schema; dropping a table"
-                .. " is not supported yet")
+            if not (app.dropped and app.dropped[old.name]) then
+                fail("table " .. old.name .. " is missing from the schema; declare it, or"
+                    .. " name it with lent.drop to drop it and its rows")
+            end
+            gone[old.name] = true
+            steps[#steps + 1] = { op = "drop",
+                                  gone = { key = old.key, name = old.name, store = old.store } }
         end
     end
     local edges = {}
@@ -490,9 +526,10 @@ function plan(prev: any, app: any): any
                                   edge = store, label = label }
         end
     end
-    for store, old in prev.edges do
-        if old.path and edges[store] == nil then
-            steps[#steps + 1] = { op = "drop", edge = store, label = old.from .. "." .. old.edge }
+    for _, store in sorted(prev.edges) do
+        local old = prev.edges[store]
+        if edges[store] == nil and (old.path or gone[old.from] or gone[old.to]) then
+            steps[#steps + 1] = { op = "drop", edge = store, label = edge_label(prev, store) }
         end
     end
     -- drops first, so an index rebuilt under its own name starts empty,
@@ -635,11 +672,11 @@ local function fill_fns(app: any, t: any, names: { string }): any
     return fns
 end
 
--- Removes up to `limit` keys of edge store `store`, forward keys first, and
--- answers how many it removed.
-local function drop_edge(store: string, limit: number): number
+-- Removes up to `limit` keys under `prefixes`, in their order, and answers
+-- how many it removed.
+local function drop_keys(prefixes: { string }, limit: number): number
     local n = 0
-    for _, prefix in { lay.edge_store({ name = store }) } do
+    for _, prefix in prefixes do
         for _, k in barch.store.range(prefix, kc.after(prefix), limit - n) do
             barch.store.remove(k)
             n += 1
@@ -647,6 +684,21 @@ local function drop_edge(store: string, limit: number): number
         if n == limit then break end
     end
     return n
+end
+
+-- Removes up to `limit` keys of edge store `store`, forward keys first, and
+-- answers how many it removed.
+local function drop_edge(store: string, limit: number): number
+    return drop_keys({ lay.edge_store({ name = store }) }, limit)
+end
+
+-- The prefixes of the keys of dropped table `t`, a { key, name, store }:
+-- its rows, column blocks, index entries, counter and statistics. A single
+-- key is its own prefix.
+local function table_prefixes(t: any): { string }
+    local unique, plain = lay.indexes(t)
+    return { lay.row(t), lay.present(t), lay.columns(t), unique, plain,
+             lay.counter(t), lay.stats(t) }
 end
 
 -- Writes the links of stored edge.through `p` from the row at key k of
@@ -742,7 +794,9 @@ function apply(p: any)
         fail("a migration is in progress; use migrate to resume it")
     end
     for _, s in p.steps do
-        if s.edge and s.op == "drop" then
+        if s.gone then
+            while drop_keys(table_prefixes(s.gone), 1000) == 1000 do end
+        elseif s.edge and s.op == "drop" then
             while drop_edge(s.edge, 1000) == 1000 do end
         elseif s.edge then
             local store = p.compiled.edges[s.edge]
@@ -786,6 +840,13 @@ local function advance(c: any, budget: number, app: any): number
     while work.at <= #work.steps and processed < budget do
         local step = work.steps[work.at]
         local t = c.tables[step.table]
+        if step.gone then
+            local limit = budget - processed
+            local n = drop_keys(table_prefixes(step.gone), limit)
+            processed += n
+            if n < limit then work.at += 1 end
+            continue
+        end
         if step.edge then
             local limit = budget - processed
             local n, done
@@ -910,7 +971,9 @@ function migrate(app: any, pageSize: number?): any
         if not resuming then
             local work = { steps = {}, at = 1 }
             for i, s in p.steps do
-                if s.edge then
+                if s.gone then
+                    work.steps[i] = { op = s.op, gone = s.gone }
+                elseif s.edge then
                     work.steps[i] = { op = s.op, table = s.table and s.table.key, edge = s.edge,
                                       label = s.label }
                     if s.op == "fill" then c.edges[s.edge].state = "filling" end
@@ -930,7 +993,9 @@ function migrate(app: any, pageSize: number?): any
         end
         local steps = {}
         for i, s in c.migration.steps do
-            if s.edge then
+            if s.gone then
+                steps[i] = "drop " .. s.gone.name
+            elseif s.edge then
                 steps[i] = s.op .. " " .. s.label
             else
                 local name = c.tables[s.table].name
@@ -1454,8 +1519,14 @@ function selftest(): (boolean, string?)
     end
 
     local other = lent.graph { lent.schema "Post" { fields = { lent.field.string "t" } } }
-    if not raises(function() plan(stored, other) end, "dropping a table") then
-        return false, "dropped a table"
+    if not raises(function() plan(stored, other) end, "name it with lent.drop") then
+        return false, "dropped a table lent.drop did not name"
+    end
+    local dropped = plan(stored, lent.graph {
+        lent.schema "Post" { fields = { lent.field.string "t" } }, lent.drop "User" })
+    if not dropped.changed or dropped.compiled.tables.user ~= nil
+        or dropped.steps[1].gone == nil or dropped.steps[1].gone.name ~= "User" then
+        return false, "lent.drop planned no drop"
     end
     return true
 end

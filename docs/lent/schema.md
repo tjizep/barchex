@@ -27,7 +27,9 @@ local version, fields = lent.ids(User, previous)   -- fields for rc.fields
 ```
 
 `lent.graph` also takes views made with `lent.view`, which name a query
-that the client reads like a table; see [views](queries.md#views).
+that the client reads like a table; see [views](queries.md#views). It
+takes `lent.drop "Table"` to drop a stored table and its rows; see
+[dropping a table](migrate.md#dropping-a-table).
 
 A `column` table also takes `block`, the size of its blocks: `"htap"`,
 `"balanced"`, `"scan"` or a byte count; see

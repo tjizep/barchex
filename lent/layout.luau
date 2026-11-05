@@ -222,6 +222,11 @@ function edge_from(s: any, key: string): any
     return tail(s.fromId or "int", key)
 end
 
+-- The prefixes of every unique and every other index key of table `t`.
+function indexes(t: any): (string, string)
+    return "lent.u" .. name(t.key), "lent.i" .. name(t.key)
+end
+
 -- The key that holds a table's next pk.
 function counter(t: any): string
     return "lent.n" .. name(t.key)
