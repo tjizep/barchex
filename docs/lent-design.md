@@ -102,7 +102,11 @@ gave out, follows `:was("old_name")` across a rename, and numbers new fields
 after the highest id ever used, so a dropped field's old values are skipped
 rather than read as a new field. The catalog will store each table's ids and
 next id. `json` rows name their fields, so a rename in a table that has
-stored `json` rows adds a fill step that rewrites them with the new name.
+stored `json` rows adds a fill step that rewrites them with the new name. In
+such a table, the catalog records the schema version at which each new or
+renamed field took its name, and a `json` row written before that version
+reads nothing under the name, so a dropped field's values are skipped there
+too.
 
 `MIGRATE` writes the declared schema into the graph as the catalog, so the
 schema can be browsed and linked:

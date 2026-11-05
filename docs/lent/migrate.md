@@ -149,6 +149,11 @@ a write stores the row with the new name. `m.load()` lists the old name in
 the field's `renames` entry until the fill finishes. Remove `:was` once
 `report.done` is `true`; later migrations ignore it.
 
+A dropped field's values stay in `json` rows until those rows are written
+again. A new field that later takes the dropped name reads no value from
+the rows written before its migration, and a field renamed to that name
+reads those rows under its old name.
+
 ## Dropping a table
 
 To drop a stored table and everything it stores, remove its `lent.schema`

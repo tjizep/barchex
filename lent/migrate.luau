@@ -231,6 +231,7 @@ local function load_fields(t: any)
         f.rows = num(f.rows)
         f.computed = num(f.computed)
         f.scale = num(f.scale)
+        f.since, f.renamesSince = num(f.since), num(f.renamesSince)
         f.default = num(f.default)
         if f.defaultEncoding == "json" then
             f.default = VALUES.parse_json(f.default)
@@ -279,8 +280,9 @@ end
 -- Checks the change from `old` (the catalog's table or edge, or nil when it
 -- is new) to the declared `t`, and answers the catalog's fields for `t` and
 -- the field ids SCHEMA.ids gave out.
-local function check_fields(where: string, old: any, t: any, before: any): (any, any)
-    local replaced, renamed = {}, {}
+local function check_fields(where: string, old: any, t: any, before: any,
+                            version: number?): (any, any)
+    local replaced, renamed, since = {}, {}, {}
     for _, f in t.fields do
         local was = before[f.name] or (f.was and before[f.was])
         if old and was == nil and not f.optional and f.default == nil then
@@ -316,10 +318,14 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
             replaced[f.name] = map
         end
         -- stored json rows name their fields, so a fill rewrites them with
-        -- the new name, and a rename whose fill is still running keeps it
-        renamed[f.name] = was and was.renames
-        if was and was.name ~= f.name and old.jsonRows then
-            renamed[f.name] = was.name
+        -- the new name, and a rename whose fill is still running keeps it.
+        -- A value under a field's name in a json row older than the field's
+        -- `since` version belongs to a dropped field.
+        renamed[f.name] = was and was.renames and { was.renames, was.renamesSince }
+        since[f.name] = was and was.since
+        if old and old.jsonRows and (was == nil or was.name ~= f.name) then
+            since[f.name] = version
+            if was then renamed[f.name] = { was.name, was.since } end
         end
     end
     local ver, list = SCHEMA.ids(t, old and { ids = old.ids, next = old.next })
@@ -328,8 +334,10 @@ local function check_fields(where: string, old: any, t: any, before: any): (any,
         fields[i] = { name = f.name, kind = f.kind, id = list[i].id, optional = f.optional,
                       unique = f.unique, default = f.default, immutable = f.immutable,
                       match = f.match, values = f.values and table.clone(f.values),
-                      replaces = replaced[f.name], renames = renamed[f.name], scale = f.scale,
-                      computed = f.computed }
+                      replaces = replaced[f.name], since = since[f.name],
+                      renames = renamed[f.name] and renamed[f.name][1],
+                      renamesSince = renamed[f.name] and renamed[f.name][2],
+                      scale = f.scale, computed = f.computed }
         for _, k in RULES do
             fields[i][k] = f[k]
         end
@@ -429,7 +437,7 @@ function plan(prev: any, app: any): any
         local format = if moving then old.format else t.format
         local block = if moving then old.block else t.block
         local before = by_name(old and old.fields)
-        local fields, ver = check_fields(where, old, t, before)
+        local fields, ver = check_fields(where, old, t, before, num(prev.version) + 1)
         -- a field keeps the block rows its values were stored with
         if block then
             for i, f in fields do
@@ -871,7 +879,9 @@ function apply(p: any)
                 fill_row(s.table, s.fields, s.fns, fields, p.compiled.version, k, v)
             end)
             for _, f in s.table.fields do
-                if table.find(s.fields, f.name) then f.replaces, f.renames = nil, nil end
+                if table.find(s.fields, f.name) then
+                    f.replaces, f.renames, f.renamesSince = nil, nil, nil
+                end
             end
         elseif s.op == "copy" then
             local fields = row_fields(s.table)
@@ -977,7 +987,7 @@ local function advance(c: any, budget: number, app: any): number
             if step.op == "fill" then
                 for _, f in t.fields do
                     if table.find(step.fields, f.name) then
-                        f.state, f.replaces, f.renames = nil, nil, nil
+                        f.state, f.replaces, f.renames, f.renamesSince = nil, nil, nil, nil
                     end
                 end
             end
@@ -1531,7 +1541,9 @@ function selftest(): (boolean, string?)
         ops[#ops + 1] = s.op .. " " .. (s.index and s.index.name or table.concat(s.fields, ","))
     end
     if table.concat(ops, ",") ~= "drop by_name,fill full,build by_name"
-        or renamed.compiled.tables.user.fields[2].renames ~= "name" then
+        or renamed.compiled.tables.user.fields[2].renames ~= "name"
+        or renamed.compiled.tables.user.fields[2].since ~= 2
+        or renamed.compiled.tables.user.fields[1].since ~= nil then
         return false, "a json rename planned " .. table.concat(ops, ",")
     end
     local ints = lent.graph { lent.schema "User" { id = "int", fields = {

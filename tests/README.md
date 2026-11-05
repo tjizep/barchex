@@ -45,7 +45,9 @@ beside a development server.
 - `test_json_rename.py` renames a field of a `json` table, in pages, with
   `apply` and with a move to `binary` rows, and checks that every stored row
   takes the new name, that rows read the new name and accept writes before
-  the fill reaches them, and that the index on the field is rebuilt.
+  the fill reaches them, and that the index on the field is rebuilt. It
+  also checks that a field added again under a dropped name, or a rename to
+  a dropped name, skips the dropped field's values in old rows.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid

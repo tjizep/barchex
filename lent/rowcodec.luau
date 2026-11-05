@@ -23,9 +23,12 @@
 -- text rows and raw bytes in binary rows. JSON values preserve nulls and
 -- array/object distinctions through lent.VALUES. A field's id is 1 to 65535 and stays
 -- with the field for the table's life: text and binary rows name fields by
--- id, so a field can be renamed without rewriting them. A json row that
--- predates a rename names the field by the old name, which an optional
--- `renames` string holds until MIGRATE rewrites the row.
+-- id, so a field can be renamed without rewriting them. Json rows name
+-- fields, and record the schema version they were written with. A field's
+-- optional `since` version is when it took its name: a json row older than
+-- that holds a dropped field's value under the name, which decode() skips.
+-- Until MIGRATE rewrites them, json rows that predate a rename name the
+-- field by the old name in `renames`, used since version `renamesSince`.
 --
 --   format    stored value                                      fields named by
 --   "json"    a JSON object, with the schema version in "_v"    name
@@ -88,8 +91,10 @@ function fields(list: { any }): any
                 table.insert(field.values, from)
             end
         end
-        -- json rows MIGRATE has yet to rewrite name a renamed field by its old name
-        field.renames = f.renames
+        -- json rows MIGRATE has yet to rewrite name a renamed field by its old
+        -- name; a json row older than `since` holds a dropped field's value
+        -- under the field's name
+        field.renames, field.renamesSince, field.since = f.renames, f.renamesSince, f.since
         byName[f.name] = field
         byId[f.id] = field
         out[i] = field
@@ -203,8 +208,11 @@ local function dec_json(schema: any, value: string): (any, number)
     end
     local row = {}
     for _, f in schema.list do
-        local v = doc[f.name]
-        if v == nil and f.renames then v = doc[f.renames] end
+        local older = f.since and version < f.since
+        local v = if older then nil else doc[f.name]
+        if v == nil and older and f.renames and version >= (f.renamesSince or 0) then
+            v = doc[f.renames]
+        end
         if v ~= nil and (f.kind == "json" or v ~= simdjson.null) then
             if f.kind == "bytes" then
                 local ok, decoded = pcall(VALUES.unhex, v)

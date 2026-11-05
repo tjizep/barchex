@@ -179,3 +179,24 @@ def test_a_rename_with_a_move_to_binary_rewrites_rows_as_binary(run):
     assert json.loads(run("titles", "binary", "headline")) == [titles, 1]
     assert run("raw", "binary") == [0, "b"]
 
+
+@pytest.mark.parametrize("how", ["migrate", "apply"])
+def test_a_field_added_again_skips_the_dropped_fields_values(run, how):
+    seeded(run)
+    migrate(run, "nonote")
+    if how == "apply":
+        assert run("apply", "intnote") == "ok"
+    else:
+        assert migrate(run, "intnote") == (1, [])
+    # the old rows hold note = "s1" ... under the name the int field takes
+    notes = json.loads(run("notes", "intnote"))
+    assert notes == {str(i): (5 if i == 0 else False) for i in range(31)}
+
+
+def test_a_rename_to_a_dropped_name_reads_the_renamed_values(run):
+    titles = seeded(run)
+    migrate(run, "nonote")
+    calls, steps = migrate(run, "renote", 4)
+    assert steps == ["drop Doc.by_title", "fill Doc.note", "build Doc.by_title"]
+    assert json.loads(run("titles", "renote", "note")) == [titles, 1]
+    assert run("raw", "renote") == [0, "{"]
