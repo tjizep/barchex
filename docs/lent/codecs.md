@@ -371,7 +371,7 @@ The loop uses `barch.vec` when the call also meets these:
 - Each filter compares `id` or an `int`, `float`, `decimal` or `time`
   field with a number, or a `string`, `enum` or `bytes` field with a
   string.
-- The call has at most one `groupBy` key.
+- The call has at most 3 `groupBy` keys.
 - Each aggregate counts rows, or counts, sums, averages or finds the least
   or greatest of an `int`, `float`, `time` or `decimal` field, or finds the
   least or greatest of a `string`, `enum` or `bytes` field. A `decimal` sum

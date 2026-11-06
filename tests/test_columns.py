@@ -305,6 +305,35 @@ function cases.vRegion(t)
         :groupBy("region"):aggregate(STATS))
 end
 
+-- groups by 2 and 3 keys, which barch.vec folds as one key
+function cases.vPair(t) return rows_text(t:query():groupBy("region", "state"):aggregate(STATS)) end
+function cases.vNumbers(t)
+    return rows_text(t:query():where("id < 600"):groupBy("score", "at"):aggregate(STATS))
+end
+function cases.vTriple(t)
+    return rows_text(t:query():where("score", ">", 1):groupBy("qty", "note", "state")
+        :aggregate(STATS))
+end
+function cases.vTripleText(t)
+    return rows_text(t:query():groupBy("raw", "qty", "region"):aggregate({
+        n = { fn = "count" }, lo = { fn = "min", field = "raw" }, hi = { fn = "max", field = "note" },
+        sum = { fn = "sum", field = "score" } }))
+end
+function cases.vPairPaged(t)
+    local out = {}
+    for _, size in { 300, 5000 } do
+        local state, pages, r = nil, 0, nil
+        repeat
+            r = t:query():where("score", ">", 1):groupBy("state", "qty")
+                :aggregatePage(STATS, state, size)
+            state, pages = r.state, pages + 1
+        until r.done
+        out[#out + 1] = pages
+        out[#out + 1] = rows_text(r.result)
+    end
+    return out
+end
+
 -- arithmetic in where and value expressions over number fields, which a
 -- column table folds by computing the expression for each block
 function cases.xWhere(t) return row_text(t:query():where("qty + 1 > 3"):aggregate(STATS)) end
@@ -335,6 +364,20 @@ function steps.fails(c, tname, name)
     local ok, err = pcall(cases[name], c[tname])
     assert(not ok, "case " .. name .. " answered")
     return err
+end
+
+-- whether each block fold case `name` ran used vector kernels
+function steps.vectored(c, tname, name)
+    local all, was = true, col.start_fold
+    col.start_fold = function(...)
+        local job = was(...)
+        all = all and job.vec ~= nil
+        return job
+    end
+    local ok, err = pcall(cases[name], c[tname])
+    col.start_fold = was
+    assert(ok, err)
+    return all
 end
 
 -- how many block folds case `name` ran
@@ -720,7 +763,8 @@ CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "regio
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
          "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
          "byQty", "byRaw", "byId", "scaled", "cheap", "early", "byBytes", "byRegion",
-         "xWhere", "xFields", "xNot", "xNeg", "xEven", "xDefault", "xFlip", "xValues"]
+         "xWhere", "xFields", "xNot", "xNeg", "xEven", "xDefault", "xFlip", "xValues",
+         "vPair", "vNumbers", "vTriple", "vTripleText"]
 ORDERED = ["o_region", "o_state", "o_score", "o_paid", "o_raw", "o_rank", "o_note", "o_at"]
 
 
@@ -798,7 +842,8 @@ def test_column_answers_what_binary_answers(run, seed):
 VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
                 "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged",
                 "vRegion", "regionOps", "vTextEnds", "xWhere", "xFields", "xNot", "xNeg", "xEven",
-                "xDefault", "xFlip", "xValues"]
+                "xDefault", "xFlip", "xValues", "vPair", "vNumbers", "vTriple", "vTripleText",
+                "vPairPaged"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -815,6 +860,8 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
     for case in VECTOR_CASES:
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
+    for case in ["vPair", "vNumbers", "vTriple", "vTripleText", "vPairPaged"]:
+        assert run("vectored", "Sale", case) == 1, case
 
 
 def test_expressions_fold_over_column_blocks(run):

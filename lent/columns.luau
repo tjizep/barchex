@@ -1673,8 +1673,8 @@ local function plain_text(c: any): boolean
 end
 
 -- Whether barch.vec can run every step of a fold: conditions that compare
--- ids or plain numbers with a number or plain text with a string, at most
--- one plain key, count, sum, avg, min and max of plain numbers or rows, and
+-- ids or plain numbers with a number or plain text with a string, up to 3
+-- plain keys, count, sum, avg, min and max of plain numbers or rows, and
 -- min and max of plain text.
 local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
     for _, c in conds do
@@ -1684,8 +1684,13 @@ local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
             return false
         end
     end
-    if #keys > 1 or (#keys == 1 and not (plain(keys[1]) or plain_text(keys[1]))) then
+    if #keys > 3 then
         return false
+    end
+    for _, k in keys do
+        if not (plain(k) or plain_text(k)) then
+            return false
+        end
     end
     for _, a in aggs do
         local c = a.source
@@ -1813,6 +1818,21 @@ function start_fold(t: any, fields: any, spec: any): any
                 job.csize, job.ccap = 0, 256
                 for _, a in aggs do
                     a.crecs = new_records(256)
+                end
+            end
+        end
+        if #keys > 1 then
+            -- see packed_ids
+            job.grouper, job.packb = vec.grouper("f64"), buffer.create(unit * 8)
+            if #keys == 3 then
+                job.pairs, job.pairb = vec.grouper("f64"), buffer.create(unit * 4)
+            end
+            job.kstate = {}
+            for i, k in keys do
+                job.kstate[i] = { ids = {}, vals = {}, size = 0, groupers = {},
+                                  out = buffer.create(unit * 4) }
+                if k.text and k.spec.over then
+                    texts[#texts + 1] = k
                 end
             end
         end
@@ -2217,6 +2237,144 @@ local function fold_text(job: any, a: any, sel: buffer?, n: number, gids: buffer
     clear_records(r, 0, ids)
 end
 
+-- Group keys of 2 or 3 fields fold on barch.vec as one f64 key. Each field
+-- numbers its values from 0 in the order the fold meets them, the first
+-- field's number and R times the second's make one value, and a grouper
+-- numbers those; with a third field, that number and R times the third's
+-- make the value of the job's grouper. Numbers stay below R, so each value
+-- holds them exactly.
+local PACK = 2 ^ 26
+
+-- The number of value v among a key's values, kept in key state ks.
+local function key_number(ks: any, v: any): number
+    local k = if v == nil then NIL_KEY else v
+    local id = ks.ids[k]
+    if id == nil then
+        id = ks.size
+        if id >= PACK then
+            error("lent.columns: a groupBy key has more than " .. PACK .. " values", 0)
+        end
+        ks.size = id + 1
+        ks.ids[k] = id
+        ks.vals[id + 1] = v
+    end
+    return id
+end
+
+-- Sets the u32s of ks.out to the numbers of key c's values for the chunk's
+-- candidates `sel, n`.
+local function key_numbers(job: any, c: any, ks: any, sel: buffer?, n: number)
+    local v, out: buffer = job.vec, ks.out
+    if c.b == nil then
+        local id = key_number(ks, nil)
+        for i = 0, n - 1 do
+            buffer.writeu32(out, i * 4, id)
+        end
+        return
+    end
+    -- a grouper for each way the blocks store the key: its ids, and what
+    -- each id's value stands for
+    local name, kind, b, at, stride, none = nil, "f64", c.b, c.at, 8, nil
+    if c.coded then
+        if not c.located then
+            locate(c)
+        end
+        kind, at, stride, none = code_kind(c.cw), DHEAD + c.off * c.cw, c.cw, c.cnil
+        name = "codes"
+    elseif c.text then
+        kind, b, at = "str", elements(v, c), c.off * 8
+    elseif c.int then
+        local f = c.int
+        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, f.none
+    end
+    name = name or kind
+    local e = ks.groupers[name]
+    if e == nil or (c.coded and (e.dict ~= c.dictkey or e.cw ~= c.cw)) then
+        e = { g = v.grouper(kind), tr = {}, same = true, dict = c.dictkey, cw = c.cw,
+              map = c.dict, cnil = c.cnil }
+        ks.groupers[name] = e
+    end
+    local size = e.g:ids(b, at, stride, none, sel, n, out)
+    local tr = e.tr
+    for id = #tr, size - 1 do
+        local x = e.g:key(id)
+        if c.coded and x ~= nil then
+            x = e.map[x - e.cnil]
+        end
+        local kn = key_number(ks, x)
+        tr[id + 1] = kn
+        e.same = e.same and kn == id
+    end
+    if not e.same then
+        for i = 0, n - 1 do
+            buffer.writeu32(out, i * 4, tr[buffer.readu32(out, i * 4) + 1])
+        end
+    end
+end
+
+-- The group of the rows whose key values are values[1..nk].
+local function values_group(job: any, values: { any }, nk: number): number
+    local node = job.tree
+    for i = 1, nk do
+        local v = values[i]
+        local k = if v == nil then NIL_KEY else v
+        local next = node[k]
+        if next == nil then
+            next = if i == nk then new_group(job, values) else {}
+            node[k] = next
+        end
+        node = next
+    end
+    return node :: any
+end
+
+-- Writes the job's grouper ids of the chunk's candidates `sel, n` to
+-- job.gidb, by the values of its 2 or 3 keys, and answers how many ids the
+-- grouper holds.
+local function packed_ids(job: any, sel: buffer?, n: number): number
+    local states, packb: buffer = job.kstate, job.packb
+    for i, c in job.keys do
+        key_numbers(job, c, states[i], sel, n)
+    end
+    local low: buffer = states[1].out
+    for i = 2, #states do
+        local high: buffer = states[i].out
+        for j = 0, n - 1 do
+            buffer.writef64(packb, j * 8, buffer.readu32(low, j * 4)
+                + PACK * buffer.readu32(high, j * 4))
+        end
+        local g = if i == #states then job.grouper else job.pairs
+        local out = if i == #states then job.gidb else job.pairb
+        local size = g:ids(packb, 0, 8, nil, nil, n, out)
+        if i == #states then
+            return size
+        elseif size > PACK then
+            error("lent.columns: groupBy keys have more than " .. PACK .. " pairs of values", 0)
+        end
+        low = out
+    end
+    return 0
+end
+
+-- Gives the grouper's ids from #gis to size - 1 their groups, for a job
+-- with 2 or 3 keys.
+local function packed_new_ids(job: any, size: number)
+    local states, gis = job.kstate, job.gis
+    local nk = #states
+    for id = #gis, size - 1 do
+        local values = table.create(nk)
+        local x = job.grouper:key(id)
+        for i = nk, 2, -1 do
+            local low = x % PACK
+            values[i] = states[i].vals[(x - low) / PACK + 1]
+            x = if i == 3 then job.pairs:key(low) else low
+        end
+        values[1] = states[1].vals[x + 1]
+        gis[id + 1] = values_group(job, values, nk)
+    end
+    grow(job, size)
+end
+
 -- fold_chunk with barch.vec: the selection, group ids and running values
 -- stay in buffers, and each step is one kernel call over the chunk. A text
 -- block with a value it keeps only the start of runs luau_rows.
@@ -2311,9 +2469,16 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     local lane = nil
     -- the grouper ids in use and their groups, for fold_text
     local ids, gis = 1, job.gis
-    local k = job.keys[1]
+    local k = if job.kstate then nil else job.keys[1]
     local coded = k and k.coded
-    if coded then
+    if job.kstate then
+        gids = job.gidb
+        local size = packed_ids(job, sel, n)
+        if size > #gis then
+            packed_new_ids(job, size)
+        end
+        ids = size
+    elseif coded then
         if not k.located then
             locate(k)
         end
