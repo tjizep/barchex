@@ -176,8 +176,9 @@ item it belongs to.
    String and composite keys still need a unique field and a key-to-id map
    when loading.
 4. **Decimal values.** Done: a `decimal` field rounds each value to its
-   scale and sums it exactly. A `sum` with a `value` function, such as
-   TPC-H revenue `l_extendedprice * (1 - l_discount)`, still adds floats.
+   scale and sums it exactly. A `sum` or `avg` with a `value` function,
+   such as TPC-H revenue `l_extendedprice * (1 - l_discount)`, sums exactly
+   with `scale = 4`.
 5. **Dates and their parts.** Done: `lent.date("1995-03-15")`,
    `lent.year`, `lent.month`, `lent.day` and `lent.addMonths` cover `DATE`
    literals, `EXTRACT` and `INTERVAL` months in computed fields, and

@@ -2489,16 +2489,17 @@ end
 local AGGREGATES = { count = true, sum = true, avg = true, min = true, max = true }
 local DISTINCT = { count = true, sum = true, avg = true }
 
--- Checks the aggregate `name` = { fn, field?, distinct? } or { fn, value,
--- distinct? }. Its kind is the lent kind of its result, or "any" when only
--- the rows can tell.
+-- Checks the aggregate `name` = { fn, field?, distinct?, scale? } or { fn,
+-- value, distinct?, scale? }. Its kind is the lent kind of its result, or
+-- "any" when only the rows can tell. A sum or avg with a scale adds each
+-- value as whole units of that scale, as a decimal field's does.
 local function aggregate_spec(tbl: any, name: any, spec: any): any
     if type(name) ~= "string" or type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
     end
     local at = tbl.where .. " query aggregate " .. name
     for k in spec do
-        if k ~= "fn" and k ~= "field" and k ~= "value" and k ~= "distinct" then
+        if k ~= "fn" and k ~= "field" and k ~= "value" and k ~= "distinct" and k ~= "scale" then
             fail(at .. " has no option " .. tostring(k))
         end
     end
@@ -2513,6 +2514,15 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
         fail(at .. " is " .. fn .. ", which takes no distinct; use it with count, sum or avg")
     end
     distinct = distinct or nil
+    local scale = num(spec.scale)
+    if scale ~= nil then
+        if fn ~= "sum" and fn ~= "avg" then
+            fail(at .. " is " .. fn .. ", which takes no scale; use it with sum or avg")
+        end
+        if type(scale) ~= "number" or scale ~= math.floor(scale) or scale < 0 or scale > 15 then
+            fail(at .. " scale must be a whole number from 0 to 15, got " .. tostring(spec.scale))
+        end
+    end
     if value ~= nil then
         if field ~= nil then
             fail(at .. " has both field and value; give one")
@@ -2521,9 +2531,13 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
             fail(at .. " value must be a function, got " .. tostring(value))
         end
         local kind = fn == "count" and "int" or (fn == "min" or fn == "max") and "any" or "float"
-        return { name = name, fn = fn, value = value, at = at, distinct = distinct, kind = kind }
+        return { name = name, fn = fn, value = value, at = at, distinct = distinct, kind = kind,
+                 scale = scale }
     end
     if field == nil then
+        if scale ~= nil then
+            fail(at .. " needs a field or value for " .. fn)
+        end
         if fn ~= "count" then
             fail(at .. " needs a field or value for " .. fn)
         end
@@ -2541,8 +2555,14 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
         fail(tbl.where .. " field " .. field .. " is json, which has no order")
     end
     local f = tbl.byName[field] or tbl.computedByName[field]
+    if scale ~= nil and kind ~= "float" then
+        fail(at .. " sets a scale, which takes a value function or a float field; field "
+            .. field .. " is " .. kind .. ", which " .. fn .. " adds exactly already")
+    end
     -- a decimal sum adds whole units of its scale, so it is exact
-    local scale = (fn == "sum" or fn == "avg") and kind == "decimal" and f.scale or nil
+    if kind == "decimal" and (fn == "sum" or fn == "avg") then
+        scale = f.scale
+    end
     local result = fn == "count" and "int" or fn == "avg" and "float" or kind
     return { name = name, fn = fn, field = field, scale = scale, distinct = distinct,
              kind = result }
@@ -2564,6 +2584,10 @@ local function fold_value(a: any, acc: any, r: any): any
     if a.fn == "sum" or a.fn == "avg" then
         if t ~= "number" then
             fail(a.at .. " value answered " .. tostring(v) .. ", so " .. a.fn .. " needs a number")
+        end
+        if a.scale and not (math.abs(VALUES.decimal_units(v, a.scale)) < 1e15) then
+            fail(a.at .. " value answered " .. tostring(v) .. ", which does not fit in 15 digits"
+                .. " with " .. a.scale .. " after the point")
         end
     elseif not ORDERED[t] then
         fail(a.at .. " value answered a " .. t .. ", which has no order")
@@ -3159,6 +3183,7 @@ local function page_mark(q: any, p: any, agg: any): string
     for _, a in agg.aggs do
         parts[#parts + 1] = a.name .. " " .. a.fn .. " "
             .. (a.field or (a.value and "(value)") or "") .. (a.distinct and " distinct" or "")
+            .. (a.scale and " scale " .. a.scale or "")
     end
     for _, c in q.conds do
         parts[#parts + 1] = c.field .. " " .. c.op .. " " .. mark_value(c.value)

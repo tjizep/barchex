@@ -1443,7 +1443,7 @@ end
 --   conds    { field, op, value } with op one of = ~= < <= > >=
 --   keys     the field names to group by, or none for one group
 --   aggs     { name, fn, field?, distinct?, scale? }, fn one of count, sum,
---            avg, min and max; a decimal sum or avg passes its scale
+--            avg, min and max; a sum or avg with a scale passes it
 --   group    a function of a group's key values that answers its record,
 --            { acc, seen }, with the running values by aggregate name as
 --            the client's fold keeps them

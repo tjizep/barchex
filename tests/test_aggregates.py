@@ -126,6 +126,25 @@ function steps.values(c)
     return out
 end
 
+-- three tenths of each post's stars, added as floats and as whole tenths
+function steps.exact(c)
+    local function tenth(p) return p.stars * 0.3 end
+    local t = c.Post:query():aggregate {
+        float = { fn = "sum", value = tenth },
+        exact = { fn = "sum", value = tenth, scale = 1 },
+        mean = { fn = "avg", value = tenth, scale = 1 },
+        score = { fn = "sum", field = "score", scale = 2 },
+        cents = { fn = "sum", value = function(p) return p.stars / 3 end, scale = 2 },
+    }
+    local out = { rows({ t }, { "float", "exact", "mean", "score", "cents" })[1] }
+    for _, line in rows(c.Post:query():groupBy("kind"):aggregate {
+        exact = { fn = "sum", value = tenth, scale = 1, distinct = true },
+    }, { "kind", "exact" }) do
+        out[#out + 1] = line
+    end
+    return out
+end
+
 function steps.groups(c)
     local out = {}
     local spec = { n = { fn = "count" }, stars = { fn = "sum", field = "stars" },
@@ -262,6 +281,19 @@ local bad = {
         end } }
     end,
     clash = function(c) c.Post:query():groupBy("kind"):aggregate { kind = { fn = "count" } } end,
+    scalefn = function(c)
+        c.Post:query():aggregate { n = { fn = "max", field = "score", scale = 2 } }
+    end,
+    scalerange = function(c)
+        c.Post:query():aggregate { n = { fn = "sum", field = "score", scale = 1.5 } }
+    end,
+    scaleint = function(c)
+        c.Post:query():aggregate { n = { fn = "sum", field = "stars", scale = 2 } }
+    end,
+    scalerows = function(c) c.Post:query():aggregate { n = { fn = "sum", scale = 2 } } end,
+    scalebig = function(c)
+        c.Post:query():aggregate { n = { fn = "sum", value = function() return 1e14 end, scale = 2 } }
+    end,
 }
 
 function call(step, which)
@@ -307,6 +339,15 @@ def test_aggregate_values(run):
         "author=1 half=3",
         "author=2 half=1.5",
         "0 nil",
+    ]
+
+
+def test_sums_with_a_scale_add_whole_units(run):
+    assert run("exact") == [
+        # 1.5 + 0.3 + 0.9 + 0.6 as floats; 1/3 rounds to 0.33, 5/3 to 1.67
+        "float=3.3000000000000003 exact=3.3 mean=0.825 score=3.75 cents=3.67",
+        "kind=news exact=2.4",
+        "kind=note exact=0.9",
     ]
 
 
@@ -394,6 +435,15 @@ ERRORS = {
     "novalueorder": "LENT table Post query aggregate n value answered a table, which has no order",
     "mixed": "LENT table Post query aggregate n value answered a string after a number",
     "clash": "LENT table Post query aggregate kind has the name of a groupBy key",
+    "scalefn": "LENT table Post query aggregate n is max, which takes no scale; use it with"
+               " sum or avg",
+    "scalerange": "LENT table Post query aggregate n scale must be a whole number from 0 to"
+                  " 15, got 1.5",
+    "scaleint": "LENT table Post query aggregate n sets a scale, which takes a value function"
+                " or a float field; field stars is int, which sum adds exactly already",
+    "scalerows": "LENT table Post query aggregate n needs a field or value for sum",
+    "scalebig": "LENT table Post query aggregate n value answered 100000000000000, which does not fit in"
+                " 15 digits with 2 after the point",
 }
 
 

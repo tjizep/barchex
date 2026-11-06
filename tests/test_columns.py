@@ -211,6 +211,13 @@ function cases.byRegion(t)
         :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" },
                      hi = { fn = "max", field = "at" }, mean = { fn = "avg", field = "qty" } }))
 end
+-- sums of score in whole tenths, and of a value in whole hundredths
+function cases.scaled(t)
+    return rows_text(t:query():where("score", ">", 1):groupBy("region")
+        :aggregate({ s = { fn = "sum", field = "score", scale = 1 },
+                     mean = { fn = "avg", field = "score", scale = 1 },
+                     v = { fn = "sum", value = function(r) return r.qty / 3 end, scale = 2 } }))
+end
 function cases.byId(t)
     return rows_text(t:query():where("id", ">", 9):where("id", "<", 2049):groupBy("id")
         :aggregate({ n = { fn = "count" }, s = { fn = "sum", field = "score" } }))
@@ -667,7 +674,7 @@ def same(run, step, *args):
 CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "region", "qty",
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
          "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
-         "byQty", "byRaw", "byId", "cheap", "early", "byBytes", "byRegion"]
+         "byQty", "byRaw", "byId", "scaled", "cheap", "early", "byBytes", "byRegion"]
 ORDERED = ["o_region", "o_state", "o_score", "o_paid", "o_raw", "o_rank", "o_note", "o_at"]
 
 

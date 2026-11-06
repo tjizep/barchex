@@ -179,7 +179,8 @@ same way. A value holds at most 15 digits, so a scale of 2 allows up to
 `wants a decimal of at most 15 digits with 2 after the point, got <value>`.
 
 A `sum` of a decimal field adds whole units of the scale, so ten values of
-`0.1` total exactly `1`. A `sum` with a `value` function adds plain numbers.
+`0.1` total exactly `1`. A `sum` with a `value` function adds plain numbers
+unless it sets [`scale`](queries.md#aggregates).
 Filters and indexes compare the value you give, so compare with a value at
 the field's scale: `where("price", "=", 0.1 + 0.2)` matches no row, because
 `0.1 + 0.2` is `0.30000000000000004`.

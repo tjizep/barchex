@@ -454,7 +454,7 @@ queries reuse.
 | function | `field` or `value` | answers | for no values |
 |---|---|---|---|
 | `count` | optional | the rows, or the rows with a value | `0` |
-| `sum` | required; an `int`, `float` or `decimal` field, or a function answering numbers | the total, exact for a `decimal` field | `0` |
+| `sum` | required; an `int`, `float` or `decimal` field, or a function answering numbers | the total, exact for an `int` or `decimal` field or with `scale` | `0` |
 | `avg` | required; as for `sum` | the mean as a float | `nil` |
 | `min`, `max` | required; any field kind except `json`, or a function answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
 
@@ -465,6 +465,25 @@ an error. Rows without a value are skipped.
 An `avg` is a float even over an `int` or `decimal` field. Over a `decimal`
 field it adds the values exactly and then divides, so the answer is the
 nearest float to the mean and keeps no fixed scale.
+
+Set `scale = n`, from `0` to `15`, on a `sum` or `avg` with a `value`
+function or a `float` field to add exactly, as a `decimal` field does. Each
+value is rounded to `n` digits after the point and added as a whole number
+of those units:
+
+```lua
+-- TPC-H revenue: prices and discounts with 2 digits make products with 4
+c.Line:query():aggregate {
+    revenue = { fn = "sum", scale = 4,
+                value = function(l) return l.price * (1 - l.discount) end },
+}
+```
+
+A plain float sum of the same values can end in rounding noise, such as
+`3.3000000000000003` for a total of `3.3`. A rounded value must fit in 15
+digits; a larger one raises `value answered <v>, which does not fit in 15
+digits with <n> after the point`. `scale` on an `int` or `decimal` field
+raises an error, since those sums are exact already.
 
 Set `distinct = true` on a `count`, `sum` or `avg` to read each value once,
 as SQL's `count(distinct ...)` does. It needs a `field` or `value`.
