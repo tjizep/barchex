@@ -198,6 +198,11 @@ function steps.more(c)
     add("two", by():having("stars > 2"):having("n == 1"):aggregate(spec))
     -- a group whose avg has no values fails a range test
     add("score > 1", by():having("score > 1"):aggregate(spec))
+    -- totals over every matching row: n 4, stars 11, score 1.875
+    add("share", by():having("stars * 3 > total.stars"):aggregate(spec))
+    add("avg", by():having("score < total.score"):aggregate(spec))
+    add("total fn", by():having(function(g, t) return g.stars < t.stars / 4 and t.n == 4 end)
+        :aggregate(spec))
     add("stars desc", by():order("stars", "desc"):aggregate(spec))
     add("n desc, stars", by():order("n", "desc"):order("stars"):aggregate(spec))
     add("score desc", by():order("score", "desc"):aggregate(spec))
@@ -247,6 +252,13 @@ local bad = {
     having = function(c) c.Post:query():groupBy("kind"):having(5) end,
     havingparams = function(c) c.Post:query():groupBy("kind"):having(function() end, {}) end,
     havingname = function(c) c.Post:query():groupBy("kind"):having("stars > 1"):aggregate {} end,
+    totalname = function(c)
+        c.Post:query():groupBy("kind"):having("n > total.stars"):aggregate { n = { fn = "count" } }
+    end,
+    totaldistinct = function(c)
+        c.Post:query():groupBy("kind"):having("n > total.n")
+            :aggregate { n = { fn = "count", field = "stars", distinct = true } }
+    end,
     ordername = function(c) c.Post:query():groupBy("kind"):order("n"):aggregate {} end,
     orderdir = function(c) c.Post:query():groupBy("kind"):order("kind", "up") end,
     grouplimit = function(c) c.Post:query():groupBy("kind"):limit(-1) end,
@@ -381,6 +393,9 @@ def test_avg_distinct_having_and_group_order(run):
         "fn: " + a1 + ", " + a2,
         "two: " + a2,
         "score > 1: " + a1 + ", " + a2,
+        "share: " + a1,
+        "avg: " + a1,
+        "total fn: " + none,
         "stars desc: " + a1 + ", " + a2 + ", " + none,
         # ties on n keep the order of the next sort key
         "n desc, stars: " + a1 + ", " + none + ", " + a2,
@@ -411,6 +426,10 @@ ERRORS = {
                     " string only",
     "havingname": 'LENT table Post query groupBy having "stars > 1" at column 1: has no field or'
                   " parameter stars",
+    "totalname": 'LENT table Post query groupBy having "n > total.stars" at column 5: has no'
+                 " field or parameter total.stars",
+    "totaldistinct": "LENT table Post query groupBy having reads total.n; a distinct aggregate"
+                     " has no total",
     "ordername": "LENT table Post query groupBy order has no group key or aggregate n",
     "orderdir": "LENT table Post query groupBy order direction must be asc or desc, got up",
     "grouplimit": "LENT table Post query groupBy limit takes a whole number, got -1",

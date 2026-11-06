@@ -83,7 +83,7 @@ from the query text.
 | Q8 national market share | Luau | eight-table join, the year of `orderdate`, and a `CASE` share |
 | Q9 product type profit | Luau | `like(name, '%green%')`, the `PARTSUPP` cost per line through `c.Part:edge("supplies", part, supplier)`, and the year |
 | Q10 returned item reporting | verified | `groupBy("customer", "customer.name", "customer.acctbal", "customer.nation.name")` over the path edge, with `order("revenue", "desc"):limit(20)` |
-| Q11 important stock | verified | `links("parts")` reads the `PARTSUPP` values; `HAVING` against a total in Luau |
+| Q11 important stock | verified | `links("parts")` groups the `PARTSUPP` values by part; `having` compares each with `total.value` |
 | Q12 shipping modes | verified | `IN` as an `or` of `==`; each `CASE` sum is a separate `hasOrderWith` query |
 | Q13 customer distribution | verified | `withOrders` keeps customers without orders, as `LEFT OUTER JOIN` does; `NOT LIKE` as `not like(comment, pattern)` |
 | Q14 promotion effect | verified | `LIKE 'PROMO%'` as `like(type, 'PROMO%')`, read through `by_type` |
@@ -188,9 +188,9 @@ item it belongs to.
    an index.
 6. **More aggregates and group forms.** Done: `avg`, `distinct` on
    `count`, `sum` and `avg`, and `having`, `order`, `limit` and `offset` on
-   `groupBy` cover Q1, Q10, Q16's count, Q18 and the taxi benchmark. Q11
-   compares each group with a total from a second query, so it still
-   filters in Luau.
+   `groupBy` cover Q1, Q10, Q16's count, Q18 and the taxi benchmark. A
+   `having` test reads `total.name` for an aggregate over every selected
+   row, which covers Q11's comparison with its subquery total.
 7. **A linked row's fields in groups and filters.** Done: `groupBy` takes a dotted
    path through edges with one row at their far end, such as
    `customer.nation.name` or the taxi `origin.borough`, and Q3, Q10 and

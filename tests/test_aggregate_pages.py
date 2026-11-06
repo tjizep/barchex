@@ -85,6 +85,19 @@ function cases.slots(c, least)
     return c.Sale:query():where("qty >= ?", 3):groupBy("region")
         :having("n > ?", tonumber(least) or 1), SPEC
 end
+-- groups with over a twentieth of the total amount; a distinct aggregate
+-- has no total
+local function share(c)
+    return c.Sale:query():groupBy("region", "qty"):having("amount * 20 > total.amount")
+        :having(function(g, t) return t.n == 40 and t.tags == nil end)
+end
+function cases.share(c)
+    return share(c), { n = SPEC.n, amount = SPEC.amount, avgScore = SPEC.avgScore,
+                       lowTag = SPEC.lowTag, tags = SPEC.tags }
+end
+function cases.top(c)
+    return share(c):order("amount", "desc"):limit(3), { n = SPEC.n, amount = SPEC.amount }
+end
 function cases.range(c)
     return c.Sale:query():where("qty", ">=", 3):groupBy("region"), SPEC
 end
@@ -233,8 +246,8 @@ def pages(run, case, size, state="", db="keep"):
         state = r["state"]
 
 
-CASES = ["totals", "ordered", "regions", "shaped", "slots", "range", "spans", "equal", "path",
-         "follow", "has", "none", "keys"]
+CASES = ["totals", "ordered", "regions", "shaped", "share", "top", "slots", "range", "spans",
+         "equal", "path", "follow", "has", "none", "keys"]
 
 
 @pytest.mark.parametrize("db", ["keep", "spill", "some"])
@@ -246,6 +259,24 @@ def test_pages_answer_what_one_call_answers(run, size, db):
         got, _ = pages(run, case, size, db=db)
         assert got == whole, case
     # each finished run removed its scratch keys
+    assert run("keep", "scratch") == 0
+
+
+def test_having_compares_groups_with_the_total(run):
+    # 9 of the 21 region and qty groups hold over 25.5 of the 510 total
+    share = [dict(p.split("=") for p in r.split()) for r in run("keep", "whole", "share")]
+    assert sorted((g["region"], g["qty"], g["amount"]) for g in share) == [
+        ("e", "0", "28.25"), ("e", "1", "42.25"), ("e", "2", "31.25"), ("e", "5", "36.75"),
+        ("n", "4", "27.25"), ("n", "6", "30.25"), ("s", "2", "40.25"), ("s", "3", "29.25"),
+        ("s", "6", "34.75"),
+    ]
+    assert run("keep", "whole", "top") == [
+        "amount=42.25 n=2 qty=1 region=e", "amount=40.25 n=2 qty=2 region=s",
+        "amount=36.75 n=2 qty=5 region=e",
+    ]
+    for case in ["share", "top"]:
+        got, _ = pages(run, case, 7, db="spill")
+        assert got == run("keep", "whole", case), case
     assert run("keep", "scratch") == 0
 
 

@@ -558,6 +558,12 @@ c.Post:query():groupBy("author")
   and answers whether to keep it. A dotted key such as `author.name` is one
   name in the expression. Each call adds a test, and a group must pass them
   all.
+- A `having` test can compare each group with the total over every row the
+  query selects, as TPC-H Q11 compares a part's stock value with the
+  nation's. An expression reads aggregate `name` over all those rows as
+  `total.name`, and a function receives the total row as its second
+  argument. A `distinct` aggregate has no total, and an expression that
+  reads one raises `reads total.name; a distinct aggregate has no total`.
 - `order(name, dir)` orders the groups by a group key or aggregate, with
   `dir` `"asc"` (the default) or `"desc"`. Each call adds a sort key after
   the earlier ones, and groups that tie on all of them stay in key order.
@@ -566,6 +572,21 @@ c.Post:query():groupBy("author")
 
 An `order` name that is neither a group key nor an aggregate raises an error
 when `aggregate` runs.
+
+```lua
+local spec = { value = { fn = "sum", value = function(s) return s.cost * s.qty end } }
+
+-- parts that hold over 1% of the value in stock
+c.Stock:query():groupBy("part")
+    :having("value > total.value * 0.01")
+    :order("value", "desc")
+    :aggregate(spec)
+
+-- the same test as a function of the group row and the total row
+c.Stock:query():groupBy("part")
+    :having(function(g, total) return g.value > total.value * 0.01 end)
+    :aggregate(spec)
+```
 
 Aggregates run over the rows the query selects after its filters, order,
 offset, limit and cursor, so `order("stars", "desc"):limit(10):sum("stars")`
@@ -639,7 +660,8 @@ from then on the state names the run and stays under 400 bytes. Set
 `pageGroups` in [`lent.open`](client.md#open-a-client-with-the-graph) to change the limit;
 `0` spills on the first call that leaves rows unread.
 
-After a spill, each call adds its page's groups to the scratch keys. Once
+After a spill, each call adds its page's groups to the scratch keys, and to
+one more key for the totals when a `having` test reads them. Once
 the rows are read, each call reads up to the page size of scratch keys and
 removes them. It first removes the values that `distinct` aggregates read.
 With `order` calls, it then sorts the groups that pass `having` into order

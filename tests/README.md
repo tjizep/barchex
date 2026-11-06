@@ -97,8 +97,8 @@ beside a development server.
   and pessimistic transactions, integer and UUID ids, and all row formats.
 - `test_aggregates.py` checks `sum`, `min`, `max` and `aggregate` over
   filtered, ordered and limited queries and empty selections, aggregates of
-  `value` functions, `groupBy` on fields, several fields and an edge, and the
-  aggregate errors.
+  `value` functions, `groupBy` on fields, several fields and an edge,
+  `having` tests that read the total row, and the aggregate errors.
 - `test_count.py` compares `count()` with `#all()` over ids, `=` filters,
   ranges, nil and infinite values, orders, limits and offsets, and checks
   which queries read no row. It also checks a transaction's own writes and
@@ -108,7 +108,7 @@ beside a development server.
   depend on the index read, and that paged aggregates and cursors continue
   when the narrower index changes between calls.
 - `test_aggregate_pages.py` runs `aggregatePage` over totals, groups,
-  shaped groups, ranges, equal filters, paths, `follow` and `has` in pages
+  shaped groups, groups compared with the total, ranges, equal filters, paths, `follow` and `has` in pages
   of several sizes and checks each answer against one `aggregate` call,
   with the groups kept in the state, spilled into scratch keys after the
   first page, and spilled after 5 groups and values. It checks rows read per

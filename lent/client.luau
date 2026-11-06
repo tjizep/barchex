@@ -2950,21 +2950,49 @@ function path_pred(q: any, paths: any, p: any): (any) -> boolean
 end
 
 -- The test of a having(cond, params) call for the group rows of keys and
--- aggs: a function of a group row, which an expression string compiles to.
-local function group_test(tbl: any, keys: { any }, aggs: { any }, h: any): (any) -> boolean
+-- aggs: a function of a group row and the total row, which an expression
+-- string compiles to, and whether it reads the total row. An expression reads
+-- the total of aggregate `name` as `total.name`.
+local function group_test(tbl: any, keys: { any }, aggs: { any }, h: any):
+        ((any, any) -> boolean, boolean)
     if type(h.cond) == "function" then
-        return h.cond
+        return h.cond, true
     end
-    local kinds = {}
+    local where = tbl.where .. " query groupBy having"
+    local kinds, distinct = {}, {}
     for _, k in keys do
         kinds[k.name] = k.kind
     end
     for _, a in aggs do
         kinds[a.name] = a.kind
     end
-    local parts = EXPR.compile(h.cond, function(name) return kinds[name] end, h.params,
-                               "LENT " .. tbl.where .. " query groupBy having")
-    return function(row)
+    for _, a in aggs do
+        local name = "total." .. a.name
+        if kinds[name] ~= nil then
+            fail(where .. " has a group key " .. name .. " with the name of a total")
+        elseif a.distinct then
+            distinct[name] = true
+        else
+            kinds[name] = a.kind
+        end
+    end
+    local total = false
+    local parts = EXPR.compile(h.cond, function(name)
+        if distinct[name] then
+            fail(where .. " reads " .. name .. "; a distinct aggregate has no total")
+        end
+        if string.sub(name, 1, 6) == "total." and kinds[name] ~= nil then
+            total = true
+        end
+        return kinds[name]
+    end, h.params, "LENT " .. where)
+    return function(row, sums)
+        if total then
+            row = table.clone(row)
+            for name, v in sums do
+                row["total." .. name] = v
+            end
+        end
         for _, p in parts do
             if p.fn then
                 if not p.fn(row) then return false end
@@ -2973,7 +3001,7 @@ local function group_test(tbl: any, keys: { any }, aggs: { any }, h: any): (any)
             end
         end
         return true
-    end
+    end, total
 end
 
 -- Raises an error for an order(name, dir) call in `orders` that names no
@@ -3040,9 +3068,11 @@ local function aggregation(q: any, keys: { any }, spec: any, shape: any?): any
         end
         kinds[i] = k.kind
     end
-    local tests = {}
+    local tests, totals = {}, false
     for i, h in shape and shape.tests or {} do
-        tests[i] = group_test(tbl, keys, aggs, h)
+        local total
+        tests[i], total = group_test(tbl, keys, aggs, h)
+        totals = totals or total
     end
     local memos = {}
     for i, k in keys do
@@ -3052,8 +3082,8 @@ local function aggregation(q: any, keys: { any }, spec: any, shape: any?): any
         end
         memos[i] = memo
     end
-    return { q = q, tbl = tbl, keys = keys, aggs = aggs, kinds = kinds, tests = tests, memos = memos,
-             shape = shape, groups = {}, list = {} }
+    return { q = q, tbl = tbl, keys = keys, aggs = aggs, kinds = kinds, tests = tests,
+             totals = totals, memos = memos, shape = shape, groups = {}, list = {} }
 end
 
 -- The group of agg with key text `key` and key values `values`, which it
@@ -3119,10 +3149,37 @@ local function group_row(agg: any, values: { any }, acc: any): any
     return row
 end
 
--- Whether group row `row` passes the having calls of agg's shape.
+-- The running values of agg's aggregates without distinct over every
+-- group of agg.
+local function total_acc(agg: any): any
+    local total = {}
+    for _, g in agg.list do
+        for _, a in agg.aggs do
+            if not a.distinct then
+                total[a.name] = combine(a, total[a.name], g.acc[a.name])
+            end
+        end
+    end
+    return total
+end
+
+-- Sets agg's total row from the running values `acc` of its aggregates over
+-- every matching row. A distinct aggregate has no total.
+local function set_total(agg: any, acc: any)
+    local total = {}
+    for _, a in agg.aggs do
+        if not a.distinct then
+            total[a.name] = result(a, acc[a.name])
+        end
+    end
+    agg.total = total
+end
+
+-- Whether group row `row` passes the having calls of agg's shape, which
+-- take the row and agg's total row.
 local function keep_group(agg: any, row: any): boolean
     for _, test in agg.tests do
-        if not test(row) then
+        if not test(row, agg.total) then
             return false
         end
     end
@@ -3140,6 +3197,9 @@ local function group_rows(agg: any): { any }
     table.sort(list, function(a, b)
         return a.key < b.key
     end)
+    if agg.totals then
+        set_total(agg, total_acc(agg))
+    end
     local out = {}
     for _, g in list do
         local row = group_row(agg, g.values, g.acc)
@@ -3264,6 +3324,9 @@ end
 --   <scratch>o<order><group key>             the record, in the order of
 --                                            the order calls
 --   <scratch>s                               the number of the run's page
+--   <scratch>t                               the running values over every
+--                                            group, when a having test reads
+--                                            the total row
 --
 -- A record holds the group key text, then each aggregate's running value; an
 -- avg runs as its sum and count. After the scan, the run removes the read
@@ -3526,6 +3589,21 @@ end
 -- Adds the groups of agg, which one page read, to the scratch keys under
 -- `prefix`. A distinct aggregate adds only the values the scratch lacks.
 local function spill_groups(agg: any, prefix: string)
+    if agg.totals then
+        local total = total_acc(agg)
+        local stored = barch.store.get(prefix .. "t")
+        if stored ~= nil then
+            local before = read_acc(agg, (state_reader(stored)))
+            for _, a in agg.aggs do
+                if not a.distinct then
+                    total[a.name] = combine(a, before[a.name], total[a.name])
+                end
+            end
+        end
+        local parts = {}
+        acc_values(agg, total, parts)
+        barch.store.set(prefix .. "t", table.concat(parts))
+    end
     for _, g in agg.list do
         local gk = prefix .. "g" .. g.key
         local stored = barch.store.get(gk)
@@ -3617,6 +3695,10 @@ local function finish_page(agg: any, run: any, budget: number): ({ any }, number
     local shape = agg.shape
     local orders = shape and shape.orders or {}
     local skip, lim = shape and shape.skip or 0, shape and shape.lim
+    if agg.totals then
+        local stored = barch.store.get(prefix .. "t")
+        set_total(agg, if stored then read_acc(agg, (state_reader(stored))) else {})
+    end
     local out, used = {}, 0
     while true do
         local lo, each
@@ -3655,6 +3737,7 @@ local function finish_page(agg: any, run: any, budget: number): ({ any }, number
             run.phase = "rows"
         else
             barch.store.remove(prefix .. "s")
+            barch.store.remove(prefix .. "t")
             return out, used, true
         end
     end

@@ -262,23 +262,14 @@ end
 
 -- Q11, important stock identification
 function q.q11(c, p)
-    local links = c.Supplier:query()
+    -- the having test compares each part's value with the total of every part
+    local groups = c.Supplier:query()
         :hasNationWith(function(n) n:where("name", "=", p.nation) end)
-        :links("parts"):all()
-    local value, total = {}, 0
-    for _, l in links do
-        local v = l.supplycost * l.availqty
-        value[l.to] = (value[l.to] or 0) + v
-        total += v
-    end
-    local out = {}
-    for part, v in value do
-        if v * p.inverse > total then
-            out[#out + 1] = { key = part, value = v }
-        end
-    end
-    sort(out, { "-value", "key" })
-    return pick(out, { "key", "value" })
+        :links("parts"):groupBy("to")
+        :having("value * inverse > total.value", { inverse = p.inverse })
+        :order("value", "desc"):order("to")
+        :aggregate { value = { fn = "sum", value = function(l) return l.supplycost * l.availqty end } }
+    return pick(groups, { "to", "value" })
 end
 
 -- Q12, shipping modes and order priority
