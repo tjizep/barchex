@@ -477,14 +477,22 @@ Each linked row is read once per call. A row without a link joins the
 group whose key is `nil`, and so does a row whose path passes through or
 reads a row that the viewer's query rules hide.
 
-To aggregate a value worked out from each row, give a function in `value`
-in place of `field`. It receives the row with its computed fields and
-answers the value, or `nil` to skip the row:
+To aggregate a value worked out from each row, give `value` in place of
+`field`. `value` is an expression string or a function. An expression uses
+the syntax of [expression filters](#expression-filters) and answers `nil`
+to skip the row. It takes no `?` values; one with a `?` raises
+`has 1 ? and got 0 values for them`. Arithmetic that answers NaN, such as
+`0 / 0`, also skips the row. On a column table, an expression of numbers
+and `int`, `float`, `decimal` and `time` fields folds over column blocks;
+see [scans in barch's block loop](codecs.md#scans-in-barchs-block-loop).
+A function receives the row with its computed fields and answers the value,
+or `nil` to skip the row. A function reads the rows one at a time.
 
 ```lua
-c.Post:query():aggregate {
-    letters = { fn = "sum", value = function(p) return #p.body end },
-    starred = { fn = "count", value = function(p) return p.stars >= 4 or nil end },
+c.Line:query():aggregate {
+    revenue = { fn = "sum", value = "price * discount" },
+    letters = { fn = "sum", value = function(l) return #l.comment end },
+    bulk    = { fn = "count", value = function(l) return l.qty >= 40 or nil end },
 }
 ```
 
@@ -494,12 +502,12 @@ queries reuse.
 | function | `field` or `value` | answers | for no values |
 |---|---|---|---|
 | `count` | optional | the rows, or the rows with a value | `0` |
-| `sum` | required; an `int`, `float` or `decimal` field, or a function answering numbers | the total, exact for an `int` or `decimal` field or with `scale` | `0` |
+| `sum` | required; an `int`, `float` or `decimal` field, or a `value` answering numbers | the total, exact for an `int` or `decimal` field or with `scale` | `0` |
 | `avg` | required; as for `sum` | the mean as a float | `nil` |
-| `min`, `max` | required; any field kind except `json`, or a function answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
+| `min`, `max` | required; any field kind except `json`, or a `value` answering numbers, strings or booleans | the least or greatest value, in the order `order` uses | `nil` |
 
 A spec with both `field` and `value` raises an error. For `min` and `max`, a
-function must answer one type for every row; a number after a string raises
+`value` must answer one type for every row; a number after a string raises
 an error. Rows without a value are skipped.
 
 An `avg` is a float even over an `int` or `decimal` field. Over a `decimal`
@@ -507,15 +515,14 @@ field it adds the values exactly and then divides, so the answer is the
 nearest float to the mean and keeps no fixed scale.
 
 Set `scale = n`, from `0` to `15`, on a `sum` or `avg` with a `value`
-function or a `float` field to add exactly, as a `decimal` field does. Each
+or a `float` field to add exactly, as a `decimal` field does. Each
 value is rounded to `n` digits after the point and added as a whole number
 of those units:
 
 ```lua
 -- TPC-H revenue: prices and discounts with 2 digits make products with 4
 c.Line:query():aggregate {
-    revenue = { fn = "sum", scale = 4,
-                value = function(l) return l.price * (1 - l.discount) end },
+    revenue = { fn = "sum", scale = 4, value = "price * (1 - discount)" },
 }
 ```
 

@@ -349,7 +349,10 @@ A call uses the block loop when all of these hold:
 
 - Each filter compares a stored field or `id` with a value, through
   `where(field, op, value)` or a `where` expression part such as
-  `fare > 120`.
+  `fare > 120`, or is an expression part of numbers, `id` and stored
+  `int`, `float`, `decimal` and `time` fields, such as `qty + 1 > 3`. Such
+  a part may use `+`, `-`, `*`, `/`, `//`, `%`, `<`, `<=`, `>`, `>=`,
+  `and`, `or` and `not`, and `==` or `~=` with a number on one side.
 - The call reads the table by id. When a condition matches an index,
   `count` and `aggregate` still read by id unless the index range holds
   fewer than one row in 1,024 of the table's rows, because reading a row
@@ -359,7 +362,8 @@ A call uses the block loop when all of these hold:
   `aggregatePage` keeps one plan for all its pages, the one `explain`
   shows, and folds only when that plan reads by id.
 - Each `groupBy` key and aggregate field is a field of the table other than
-  a `json` field, with no edge in its path.
+  a `json` field, with no edge in its path. An aggregate `value` expression
+  of the same parts, such as `price * discount`, also folds.
 - `aggregate` has no `order`, `limit` or `offset` on the query.
 
 The loop uses `barch.vec` when the call also meets these:
@@ -377,10 +381,13 @@ The loop uses `barch.vec` when the call also meets these:
 - No key or aggregate names `id`, and no filter, key or aggregate names a
   `bool` field or a field with a `:default()`.
 
+The loop works out an expression part or `value` expression for each run
+of rows in Luau, then filters or adds its results as it does a field's.
+
 Any other call reads its rows one at a time, at a million rows/s or less.
-That includes a filter function, an expression part such as `qty + 1 > 3`,
-`has`, `follow`, `after`, a query policy, computed fields, and an aggregate
-with a `value` function.
+That includes a filter function, an expression part with strings, calls or
+`^`, `has`, `follow`, `after`, a query policy, computed fields, and an
+aggregate with a `value` function.
 
 ### Compressed column blocks
 

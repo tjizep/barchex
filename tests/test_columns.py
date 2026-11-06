@@ -305,6 +305,51 @@ function cases.vRegion(t)
         :groupBy("region"):aggregate(STATS))
 end
 
+-- arithmetic in where and value expressions over number fields, which a
+-- column table folds by computing the expression for each block
+function cases.xWhere(t) return row_text(t:query():where("qty + 1 > 3"):aggregate(STATS)) end
+function cases.xFields(t) return t:query():where("score * 2 >= at / 1e8"):count() end
+function cases.xNot(t) return t:query():where("not (qty > 3) or score < 2"):sum("amount") end
+function cases.xNeg(t) return t:query():where("-score < -1"):count() end
+function cases.xEven(t) return t:query():where("id % 2 == 0"):sum("qty") end
+function cases.xDefault(t) return t:query():where("rank + qty > 8"):count() end
+function cases.xFlip(t) return t:query():where("0 < qty - 2 and amount - 1 >= 10"):count() end
+function cases.xValues(t)
+    return rows_text(t:query():where("qty // 2 ~= 1"):groupBy("region"):aggregate({
+        third = { fn = "sum", value = "qty / 3", scale = 2 },
+        product = { fn = "avg", value = "score * qty" },
+        low = { fn = "min", value = "amount - 1" },
+        high = { fn = "max", value = "qty // 2" },
+        some = { fn = "count", value = "score % 3" },
+        kinds = { fn = "sum", value = "qty % 3", distinct = true },
+        ranked = { fn = "sum", value = "rank * 2 - qty" },
+    }))
+end
+function cases.xOverflow(t)
+    return t:query():aggregate({ big = { fn = "sum", value = "qty * 1e14", scale = 2 } })
+end
+function cases.xSlots(t) return t:query():aggregate({ v = { fn = "sum", value = "qty + ?" } }) end
+
+-- the error case `name` raises
+function steps.fails(c, tname, name)
+    local ok, err = pcall(cases[name], c[tname])
+    assert(not ok, "case " .. name .. " answered")
+    return err
+end
+
+-- how many block folds case `name` ran
+function steps.folds(c, tname, name)
+    local folds, was = 0, col.start_fold
+    col.start_fold = function(...)
+        folds += 1
+        return was(...)
+    end
+    local ok, err = pcall(cases[name], c[tname])
+    col.start_fold = was
+    assert(ok, err)
+    return folds
+end
+
 function steps.ask(c, tname, name)
     return cases[name](c[tname])
 end
@@ -674,7 +719,8 @@ def same(run, step, *args):
 CASES = ["all", "desc", "top", "first", "ranged", "back", "spans", "one", "region", "qty",
          "expr", "fn", "count", "countIds", "countExpr", "aggregate", "grouped", "value",
          "defaults", "scored", "unscored", "unpaid", "ranked", "filtered", "byPair", "byRank",
-         "byQty", "byRaw", "byId", "scaled", "cheap", "early", "byBytes", "byRegion"]
+         "byQty", "byRaw", "byId", "scaled", "cheap", "early", "byBytes", "byRegion",
+         "xWhere", "xFields", "xNot", "xNeg", "xEven", "xDefault", "xFlip", "xValues"]
 ORDERED = ["o_region", "o_state", "o_score", "o_paid", "o_raw", "o_rank", "o_note", "o_at"]
 
 
@@ -751,7 +797,8 @@ def test_column_answers_what_binary_answers(run, seed):
 
 VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
                 "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged",
-                "vRegion", "regionOps", "vTextEnds"]
+                "vRegion", "regionOps", "vTextEnds", "xWhere", "xFields", "xNot", "xNeg", "xEven",
+                "xDefault", "xFlip", "xValues"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -769,6 +816,23 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
 
+
+def test_expressions_fold_over_column_blocks(run):
+    for lo in range(1, 3101, 500):
+        hi = str(min(lo + 499, 3100))
+        assert run("fill", "Sale", str(lo), hi) == run("fill", "Plain", str(lo), hi)
+    for case in ["xWhere", "xFields", "xNot", "xNeg", "xEven", "xDefault", "xFlip", "xValues"]:
+        assert run("folds", "Sale", case) > 0, case
+        assert run("folds", "Plain", case) == 0, case
+    # a value too large for its scale fails the same way on both tables
+    for case, err in [
+        ("xOverflow", "LENT table Sale query aggregate big value answered 100000000000000,"
+                      " which does not fit in 15 digits with 2 after the point"),
+        ("xSlots", "LENT table Sale query aggregate v value \"qty + ?\": has 1 ? and got 0"
+                   " values for them"),
+    ]:
+        assert run("fails", "Sale", case) == err
+        assert run("fails", "Plain", case) == err.replace("Sale", "Plain")
 
 def test_full_blocks_answer_what_binary_answers(run):
     # ids 1024 to 3071 fill two blocks, which a fold reads slot by slot

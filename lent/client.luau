@@ -1395,7 +1395,7 @@ local group_key, path_pred
 
 local function new_query(tbl: any): any
     return setmetatable({ tbl = tbl, conds = {}, ors = {}, preds = {}, exprPreds = 0,
-                          exprFields = {}, checks = {}, loads = {},
+                          exprFields = {}, predTrees = {}, checks = {}, loads = {},
                           skip = 0 }, Query)
 end
 
@@ -1464,6 +1464,7 @@ function Query:where(field: any, ...: any): any
                 end
             elseif p.fn then
                 self.preds[#self.preds + 1] = p.fn
+                self.predTrees[#self.preds] = p.tree
                 self.exprPreds += 1
                 for f, list in p.ranges or {} do
                     self.ors[#self.ors + 1] = { field = f, ranges = list }
@@ -2612,9 +2613,10 @@ local AGGREGATES = { count = true, sum = true, avg = true, min = true, max = tru
 local DISTINCT = { count = true, sum = true, avg = true }
 
 -- Checks the aggregate `name` = { fn, field?, distinct?, scale? } or { fn,
--- value, distinct?, scale? }. Its kind is the lent kind of its result, or
--- "any" when only the rows can tell. A sum or avg with a scale adds each
--- value as whole units of that scale, as a decimal field's does.
+-- value, distinct?, scale? }, value being a function of the row or an
+-- expression string over its fields. Its kind is the lent kind of its
+-- result, or "any" when only the rows can tell. A sum or avg with a scale
+-- adds each value as whole units of that scale, as a decimal field's does.
 local function aggregate_spec(tbl: any, name: any, spec: any): any
     if type(name) ~= "string" or type(spec) ~= "table" then
         fail(tbl.where .. " query aggregate takes a table of name = { fn = ..., field = ... }")
@@ -2649,12 +2651,25 @@ local function aggregate_spec(tbl: any, name: any, spec: any): any
         if field ~= nil then
             fail(at .. " has both field and value; give one")
         end
-        if type(value) ~= "function" then
-            fail(at .. " value must be a function, got " .. tostring(value))
-        end
         local kind = fn == "count" and "int" or (fn == "min" or fn == "max") and "any" or "float"
-        return { name = name, fn = fn, value = value, at = at, distinct = distinct, kind = kind,
-                 scale = scale }
+        local out = { name = name, fn = fn, value = value, at = at, distinct = distinct,
+                      kind = kind, scale = scale }
+        if type(value) == "string" then
+            -- the fields an expression reads, which a column table reads alone
+            local fields = {}
+            local e = EXPR.value(value, function(f)
+                local k = field_kind(tbl, f)
+                if k ~= nil and not table.find(fields, f) then
+                    fields[#fields + 1] = f
+                end
+                return k
+            end, "LENT " .. at .. " value")
+            out.value, out.tree, out.src, out.fields = e.fn, e.tree, value, fields
+        elseif type(value) ~= "function" then
+            fail(at .. " value must be a function or an expression string, got "
+                .. tostring(value))
+        end
+        return out
     end
     if field == nil then
         if scale ~= nil then
@@ -2699,6 +2714,10 @@ local function fold_value(a: any, acc: any, r: any): any
         return r[a.field]
     end
     local v = a.value(r)
+    if a.tree and v ~= v then
+        -- an expression's NaN, such as 0 / 0, counts as no value
+        v = nil
+    end
     if v == nil or a.fn == "count" then
         return v
     end
@@ -3102,10 +3121,13 @@ end
 local function aggregate_needs(agg: any): any
     local more = {}
     for _, a in agg.aggs do
-        if a.value then
+        if a.value and a.fields == nil then
             return nil
         end
         more[#more + 1] = a.field
+        for _, f in a.fields or {} do
+            more[#more + 1] = f
+        end
     end
     for _, k in agg.keys do
         if k.hops == nil then
@@ -3245,14 +3267,15 @@ end
 
 -- Adds q's rows to agg's groups in COLUMNS' block loop, and answers
 -- whether it could. It can when q reads a column table through its ids and
--- filters with field conditions, and agg's keys and aggregates name the
--- table's fields; json fields take no part. With `page`, it reads one page
+-- filters with field conditions and expression parts the loop works out,
+-- and agg's keys and aggregates name the table's fields or are expressions
+-- the loop works out; json fields take no part. With `page`, it reads one page
 -- of rows as rows() does. The rows come in id order, so q must not sort.
 local function fold_blocks(agg: any, page: any?): boolean
     local q, tbl = agg.q, agg.tbl
     if tbl.linksOf or tbl.viewOf or tbl.memory or not is_column(tbl) or q.idset or q.edgeOf
         or q.cur
-        or #q.preds > 0 or #q.checks > 0 or aggregate_needs(agg) == nil then
+        or #q.checks > 0 or aggregate_needs(agg) == nil then
         return false
     end
     local function stored(name: string): boolean
@@ -3265,6 +3288,13 @@ local function fold_blocks(agg: any, page: any?): boolean
         end
         conds[i] = c
     end
+    for i in q.preds do
+        local tree = q.predTrees[i]
+        if tree == nil or col.derives(tree, stored) ~= "boolean" then
+            return false
+        end
+        conds[#conds + 1] = { expr = tree }
+    end
     for i, k in agg.keys do
         if k.hops or not stored(k.name) then
             return false
@@ -3272,10 +3302,20 @@ local function fold_blocks(agg: any, page: any?): boolean
         names[i] = k.name
     end
     for i, a in agg.aggs do
-        if a.value or (a.field and not stored(a.field)) then
+        if a.field and not stored(a.field) then
             return false
         end
         aggs[i] = a
+        if a.value then
+            if a.tree == nil or col.derives(a.tree, stored) ~= "number" then
+                return false
+            end
+            aggs[i] = { name = a.name, fn = a.fn, expr = a.tree, scale = a.scale,
+                        distinct = a.distinct, overflow = function(v)
+                            fail(a.at .. " value answered " .. tostring(v) .. ", which does not"
+                                .. " fit in 15 digits with " .. a.scale .. " after the point")
+                        end }
+        end
     end
     local p = page and page.plan or fold_plan(q)
     if p.ix == nil or not p.ix.primary or p.via or p.within then
@@ -3430,7 +3470,8 @@ local function page_mark(q: any, p: any, agg: any): string
     end
     for _, a in agg.aggs do
         parts[#parts + 1] = a.name .. " " .. a.fn .. " "
-            .. (a.field or (a.value and "(value)") or "") .. (a.distinct and " distinct" or "")
+            .. (a.field or a.src or (a.value and "(value)") or "")
+            .. (a.distinct and " distinct" or "")
             .. (a.scale and " scale " .. a.scale or "")
     end
     for _, c in q.conds do

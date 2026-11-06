@@ -1451,7 +1451,11 @@ local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number
             end
             if fresh then
                 if scale then
-                    v = math.round(v * 10 ^ scale)
+                    local units = math.round(v * 10 ^ scale)
+                    if a.overflow and not (math.abs(units) < 1e15) then
+                        a.overflow(v)
+                    end
+                    v = units
                 end
                 local acc = vals[gi]
                 if fn == "count" then
@@ -1465,6 +1469,194 @@ local function fold_aggregate(a: any, sel: { number }, n: number, gids: { number
                     vals[gi] = v
                 end
             end
+        end
+    end
+end
+
+-- derived values --------------------------------------------------------------
+--
+-- A fold works out an arithmetic expression over number fields a chunk at a
+-- time into a derived source: a buffer of an f64 per chunk slot, NaN for
+-- nil, which the fold reads as it reads a plain number field. Each step of
+-- the expression writes its own buffer. A comparison, and `and`, `or` and
+-- `not` of comparisons, work out to 1 or 0.
+
+local NUMBER_KINDS = { int = true, float = true, decimal = true, time = true }
+local STEP_ARITH = { ["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true, ["//"] = true,
+                     ["%"] = true }
+local STEP_ORDER = { ["<"] = true, ["<="] = true, [">"] = true, [">="] = true }
+local STEP_FLIP = { ["<"] = ">", ["<="] = ">=", [">"] = "<", [">="] = "<=", ["=="] = "==",
+                    ["~="] = "~=" }
+
+-- What a fold works out node n of an EXPR tree to: "number", "boolean", or
+-- nil when it can't. stored(name) answers whether the fold can read field
+-- `name`. `^` stays out, since NaN ^ 0 is 1 where nil ^ 0 is nil, and so do
+-- `==` and `~=` of two values that may both be nil.
+function derives(n: any, stored: (string) -> boolean): string?
+    local k = n.k
+    if k == "const" then
+        return if type(n.v) == "number" then "number" else nil
+    elseif k == "field" then
+        return if NUMBER_KINDS[n.kind] and stored(n.name) then "number" else nil
+    elseif k == "un" then
+        local a = derives(n.a, stored)
+        if (n.op == "-" and a == "number") or (n.op == "not" and a == "boolean") then
+            return a
+        end
+        return nil
+    elseif k ~= "bin" then
+        return nil
+    end
+    local op = n.op
+    local a, b = derives(n.a, stored), derives(n.b, stored)
+    if STEP_ARITH[op] then
+        return if a == "number" and b == "number" then "number" else nil
+    elseif STEP_ORDER[op] then
+        return if a == "number" and b == "number" then "boolean" else nil
+    elseif op == "==" or op == "~=" then
+        return if a == "number" and b == "number" and (n.a.k == "const" or n.b.k == "const")
+            then "boolean" else nil
+    elseif op == "and" or op == "or" then
+        return if a == "boolean" and b == "boolean" then "boolean" else nil
+    end
+    return nil
+end
+
+-- Adds the steps that work out node n, which derives() accepts, to `steps`,
+-- and answers n's operand: { k } for a constant, { src } for a source the
+-- fold reads, or { step } for a step's buffer.
+local function add_steps(n: any, get: (string) -> any, steps: { any }): any
+    if n.k == "const" then
+        return { k = n.v }
+    elseif n.k == "field" then
+        return { src = get(n.name) }
+    end
+    local st = { op = n.op, x = add_steps(n.a, get, steps) }
+    if n.k == "un" then
+        st.op = if n.op == "-" then "neg" else "not"
+    else
+        st.y = add_steps(n.b, get, steps)
+    end
+    steps[#steps + 1] = st
+    return { step = st }
+end
+
+-- A derived source that works out node n of an EXPR tree, which derives()
+-- accepts, with the fold's sources from get(name).
+local function derived(n: any, get: (string) -> any): any
+    local steps = {}
+    local root = add_steps(n, get, steps)
+    if root.step == nil then
+        steps[1] = { op = "copy", x = root }
+    end
+    return { derived = true, steps = steps, off = 0, at = 0 }
+end
+
+-- The values of operand o over the loaded chunk: a buffer and where its
+-- f64s start, or nil and a constant.
+local function operand(o: any, unit: number): (buffer?, number, number)
+    if o.step then
+        return o.step.out, 0, 0
+    end
+    local c = o.src
+    if c == nil then
+        return nil, 0, o.k
+    end
+    local tmp: buffer? = o.tmp
+    if tmp == nil then
+        tmp = buffer.create(unit * 8)
+        o.tmp = tmp
+    end
+    if c.id then
+        for s = 0, unit - 1 do
+            buffer.writef64(tmp, s * 8, c.base + s)
+        end
+        return tmp, 0, 0
+    end
+    if c.b == nil then
+        return nil, 0, if c.default == nil then NAN else c.default
+    end
+    if c.int then
+        c.wide = widen(c.b, c.int, c.rows, c.wide)
+        c.b, c.int = c.wide, nil
+    end
+    local d = c.default
+    if d == nil then
+        return c.b, c.at, 0
+    end
+    local b: buffer, at = c.b, c.at
+    for s = 0, unit - 1 do
+        local x = buffer.readf64(b, at + s * 8)
+        buffer.writef64(tmp, s * 8, if x == x then x else d)
+    end
+    return tmp, 0, 0
+end
+
+-- Writes step st's values over the loaded chunk of `unit` slots.
+local function run_step(st: any, unit: number)
+    local op, out = st.op, st.out
+    local xb, xat, xk = operand(st.x, unit)
+    if st.y == nil then
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local v = if op == "neg" then -x elseif op == "not" then 1 - x else x
+            buffer.writef64(out, s * 8, v)
+        end
+        return
+    end
+    local yb, yat, yk = operand(st.y, unit)
+    if op == "+" then
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local y = if yb then buffer.readf64(yb, yat + s * 8) else yk
+            buffer.writef64(out, s * 8, x + y)
+        end
+    elseif op == "-" then
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local y = if yb then buffer.readf64(yb, yat + s * 8) else yk
+            buffer.writef64(out, s * 8, x - y)
+        end
+    elseif op == "*" then
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local y = if yb then buffer.readf64(yb, yat + s * 8) else yk
+            buffer.writef64(out, s * 8, x * y)
+        end
+    elseif op == "/" then
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local y = if yb then buffer.readf64(yb, yat + s * 8) else yk
+            buffer.writef64(out, s * 8, x / y)
+        end
+    else
+        -- NaN, a slot without a value, fails every comparison but ~=, as
+        -- nil does
+        for s = 0, unit - 1 do
+            local x = if xb then buffer.readf64(xb, xat + s * 8) else xk
+            local y = if yb then buffer.readf64(yb, yat + s * 8) else yk
+            local v
+            if op == "//" then v = x // y
+            elseif op == "%" then v = x % y
+            elseif op == "<" then v = if x < y then 1 else 0
+            elseif op == "<=" then v = if x <= y then 1 else 0
+            elseif op == ">" then v = if x > y then 1 else 0
+            elseif op == ">=" then v = if x >= y then 1 else 0
+            elseif op == "==" then v = if x == y then 1 else 0
+            elseif op == "~=" then v = if x ~= y then 1 else 0
+            elseif op == "and" then v = x * y
+            else v = if x + y > 0 then 1 else 0 end
+            buffer.writef64(out, s * 8, v)
+        end
+    end
+end
+
+-- Works out the job's derived sources over its loaded chunk.
+local function run_derived(job: any)
+    local unit = job.unit
+    for _, d in job.derived do
+        for _, st in d.steps do
+            run_step(st, unit)
         end
     end
 end
@@ -1508,10 +1700,16 @@ end
 -- A fold over the rows of table t: the conditions they must pass, the
 -- fields they group by and the aggregates to add them to. `spec` holds
 --
---   conds    { field, op, value } with op one of = ~= < <= > >=
+--   conds    { field, op, value } with op one of = ~= < <= > >=, or
+--            { expr }, an EXPR tree that derives() works out to "boolean",
+--            which the row passes when it holds
 --   keys     the field names to group by, or none for one group
---   aggs     { name, fn, field?, distinct?, scale? }, fn one of count, sum,
---            avg, min and max; a sum or avg with a scale passes it
+--   aggs     { name, fn, field?, expr?, distinct?, scale?, overflow? }, fn
+--            one of count, sum, avg, min and max; a sum or avg with a scale
+--            passes it. expr is an EXPR tree that derives() works out to
+--            "number", read in place of a field, and overflow(v) raises the
+--            error for a value v whose units of the scale don't fit in 15
+--            digits
 --   group    a function of a group's key values that answers its record,
 --            { acc, seen }, with the running values by aggregate name as
 --            the client's fold keeps them
@@ -1531,10 +1729,29 @@ function start_fold(t: any, fields: any, spec: any): any
         end
         return c
     end
+    local derived_list = {}
+    local function derive(n: any): any
+        local d = derived(n, get)
+        derived_list[#derived_list + 1] = d
+        return d
+    end
     local conds = {}
     for i, c in spec.conds do
-        local w = c.value
-        conds[i] = { source = get(c.field), op = c.op, value = w }
+        local n = c.expr
+        if n == nil then
+            conds[i] = { source = get(c.field), op = c.op, value = c.value }
+        elseif n.k == "bin" and (STEP_ORDER[n.op] or n.op == "==" or n.op == "~=")
+            and (n.a.k == "const" or n.b.k == "const") then
+            -- a comparison with a constant filters the other side's values
+            local op = if n.op == "==" then "=" else n.op
+            if n.a.k == "const" then
+                conds[i] = { source = derive(n.b), op = STEP_FLIP[op] or op, value = n.a.v }
+            else
+                conds[i] = { source = derive(n.a), op = op, value = n.b.v }
+            end
+        else
+            conds[i] = { source = derive(n), op = "=", value = 1 }
+        end
     end
     local keys = {}
     for i, name in spec.keys do
@@ -1542,7 +1759,8 @@ function start_fold(t: any, fields: any, spec: any): any
     end
     local aggs = {}
     for i, a in spec.aggs do
-        aggs[i] = { name = a.name, fn = a.fn, source = a.field and get(a.field),
+        local c = if a.expr then derive(a.expr) elseif a.field then get(a.field) else nil
+        aggs[i] = { name = a.name, fn = a.fn, source = c, overflow = a.overflow,
                     scale = a.scale, distinct = a.distinct, single = #keys == 0, vals = {},
                     ns = if a.fn == "avg" then {} else nil,
                     seen = if a.distinct then {} else nil }
@@ -1555,9 +1773,15 @@ function start_fold(t: any, fields: any, spec: any): any
         end
     end
     room(unit)
-    local job = { t = t, g = g, unit = unit, sources = list, conds = conds, keys = keys,
-                  aggs = aggs, group = spec.group, budget = spec.budget, seen = 0,
-                  records = {}, tree = {}, short = {}, lanes = {},
+    for _, d in derived_list do
+        for _, st in d.steps do
+            st.out = buffer.create(unit * 8)
+        end
+        d.b = d.steps[#d.steps].out
+    end
+    local job = { t = t, g = g, unit = unit, sources = list, derived = derived_list,
+                  conds = conds, keys = keys, aggs = aggs, group = spec.group,
+                  budget = spec.budget, seen = 0, records = {}, tree = {}, short = {}, lanes = {},
                   sel = table.create(unit, 0), gids = table.create(unit, 1) }
     if vec and vectors(conds, keys, aggs) then
         -- each aggregate adds to records that grouper id i keeps at 32 * i,
@@ -1862,6 +2086,9 @@ local function load_sources(job: any, first: number)
     local t = job.t
     for _, c in job.sources do
         load(t, c, first)
+    end
+    if #job.derived > 0 then
+        run_derived(job)
     end
 end
 

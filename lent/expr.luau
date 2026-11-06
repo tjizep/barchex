@@ -30,8 +30,15 @@
 -- and values(...) the values for those `?`s, to pass as compile's params.
 -- compile(src, kindOf, params, where) answers the expression split at its
 -- top-level `and`s: each part is either { field, op, value }, a comparison
--- the caller can hand to an index, or { fn }, a function of the row.
--- kindOf(name) answers a field's lent kind or nil. Errors start with `where`.
+-- the caller can hand to an index, or { fn, tree }, a function of the row
+-- and the tree it works out. value(src, kindOf, where) answers { fn, tree }
+-- for the whole expression. kindOf(name) answers a field's lent kind or nil.
+-- Errors start with `where`.
+--
+-- A tree's nodes are { k = "const", v }, { k = "field", name, kind },
+-- { k = "un", op, a }, { k = "bin", op, a, b } and { k = "call", name, a,
+-- b }, each with the type of its value in t: number, string, boolean, json,
+-- nil, or any when only the row can tell.
 
 local VALUES = require("lent.VALUES")
 
@@ -841,8 +848,8 @@ local function ranges_of(n: any): { [string]: { any } }
 end
 
 -- The expression src split at its top-level `and`s, in order: each part is
--- { field, op, value } with op one of = ~= < <= > >=, or { fn } with fn a
--- function of the row. A { fn } part that holds only when some field lies
+-- { field, op, value } with op one of = ~= < <= > >=, or { fn, tree } with
+-- fn a function of the row that works out tree. A { fn } part that holds only when some field lies
 -- within value ranges also has ranges = { [field] = list }, each range a
 -- table { lo, loOpen, hi, hiOpen } whose nil bound is open-ended. A row
 -- matches when every part holds.
@@ -871,7 +878,7 @@ function compile(src: string, kindOf: (string) -> string?, params: any, where: s
         else
             local part = as_cond(n)
             if part == nil then
-                part = { fn = build(n, bad) }
+                part = { fn = build(n, bad), tree = n }
                 local ranges = ranges_of(n)
                 if next(ranges) ~= nil then
                     part.ranges = ranges
@@ -882,6 +889,19 @@ function compile(src: string, kindOf: (string) -> string?, params: any, where: s
     end
     split(tree)
     return parts
+end
+
+-- The expression src as { fn, tree }: fn a function of the row that
+-- answers its value, and tree the resolved tree fn works out. src reads
+-- fields and literals, and takes no parameters or `?`s.
+function value(src: string, kindOf: (string) -> string?, where: string): any
+    local bad = failer(where, src)
+    local tree = parse(src, where)
+    if tree.slots > 0 then
+        bad(nil, "has " .. tree.slots .. " ? and got 0 values for them")
+    end
+    tree = resolve(tree, kindOf, nil, { n = 0 }, bad)
+    return { fn = build(tree, bad), tree = tree }
 end
 
 -- What the expression answers for row r, for the self-check.

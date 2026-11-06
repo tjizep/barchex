@@ -448,7 +448,7 @@ ERRORS = {
     "pathmany": "LENT table User edge posts can link a row to many rows, so groupBy cannot use it",
     "pathwhere": "LENT table User edge likes can link a row to many rows, so where cannot use it",
     "both": "LENT table Post query aggregate n has both field and value; give one",
-    "valuefn": "LENT table Post query aggregate n value must be a function, got 1",
+    "valuefn": "LENT table Post query aggregate n value must be a function or an expression string, got 1",
     "sumvalue": "LENT table Post query aggregate n value answered a, so sum needs a number",
     "novalueorder": "LENT table Post query aggregate n value answered a table, which has no order",
     "mixed": "LENT table Post query aggregate n value answered a string after a number",
