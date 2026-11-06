@@ -26,6 +26,11 @@
 --                                       which CLIENT writes and removes
 --   lent.s<table>                       the planner statistics that MIGRATE's
 --                                       analyze() writes
+--   lent.v<view><group values>          a stored view's group: its row count
+--                                       and each aggregate's running values
+--   lent.m<view><group values><agg><value>
+--                                       how many of the group's rows hold
+--                                       this value, for a min or max
 --
 -- A column table's <store> is its table name, or after a change of block
 -- size or a change of format to column, the name and "@" and the schema
@@ -254,6 +259,24 @@ end
 -- The key that holds table `t`'s planner statistics.
 function stats(t: any): string
     return "lent.s" .. name(t.key)
+end
+
+-- The key of stored view `view`'s group whose values `group` packs, or with
+-- group nil, the prefix of every group of the view.
+function view(view: string, group: string?): string
+    return "lent.v" .. name(view) .. (group or "")
+end
+
+-- The key that counts the rows of stored view `view`'s group `group` whose
+-- aggregate `agg` reads value `v`, encoded with kind `kind`. With v nil it
+-- is the prefix of those keys, and with group nil, of the view's.
+function view_value(view: string, group: string?, agg: string?, kind: string?, v: any): string
+    local key = "lent.m" .. name(view)
+    if group == nil then
+        return key
+    end
+    key ..= group .. name(agg :: string)
+    return if v == nil then key else key .. kc.encode(kind :: string, v)
 end
 
 -- Counts the paths from the rows in `start`, a map of pk to count, through

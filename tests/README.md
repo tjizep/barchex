@@ -121,6 +121,15 @@ beside a development server.
   parameters to its function, keeps only the declared fields of each row,
   and checks the errors for a bad declaration, a row that breaks a field's
   kind, and query methods a view query refuses.
+- `test_stored_views.py` keeps stored views current through creates,
+  updates, deletes, links and unlinks from either end, and deleting a
+  linked row, in both row formats and transaction modes, and checks each
+  view against the `groupBy` query it keeps: field and edge keys, `where`,
+  no `groupBy`, `min` and `max` after deletes, `decimal` and `scale` sums,
+  and `avg`. It fills views from stored rows in paged migrations while
+  writes land before and after the fill's place, refills a changed view,
+  drops a removed one, and checks the errors for a stale client, a filling
+  view and a bad declaration.
 - `test_computed.py` reads computed fields from rows, hooks, edge follows,
   filters, orders, cursors, aggregates and `groupBy`, checks that `migrate`
   ignores them and that a client without the graph lacks them, and checks

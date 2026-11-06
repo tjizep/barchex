@@ -199,9 +199,10 @@ item it belongs to.
    the supplier's in `where`.
 8. **Views.** Done: `lent.view` declares a named query in the graph, with
    its fields and a function that answers its rows, and queries read it
-   like a table, as Q15 does. A view's rows are worked out on each read; a
-   stored view that keeps its rows current on each write, as stored path
-   edges do, would serve large views.
+   like a table, as Q15 does. A view's rows are worked out on each read. A
+   stored view declares a `groupBy` with counts, sums, averages, minimums
+   and maximums over one table, and each write keeps its groups current, so
+   reads of large totals cost one pass over the groups.
 9. **Anti-joins and subqueries.** Done: `hasNo` and `hasNo<Edge>With`
    keep the rows without a matching link, as `NOT EXISTS` does in Q22. A
    correlated subquery runs as two passes, as in Q17: `groupBy` keeps a

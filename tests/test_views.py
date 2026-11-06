@@ -314,7 +314,8 @@ def test_view_errors(run, which):
 def test_view_declarations(run):
     assert run("schema") == [
         "SCHEMA view V rows takes a function, got number",
-        "SCHEMA view V has no option where; it takes fields and rows",
+        "SCHEMA view V has no option where; a view takes fields and rows, and a stored view"
+        " takes from, where, groupBy and aggregates",
         "SCHEMA view V needs at least one field",
         "SCHEMA view V field n is declared twice",
         "SCHEMA view V field n is a view field, which takes no unique",

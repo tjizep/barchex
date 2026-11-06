@@ -48,6 +48,14 @@
 --       rows = function(c, params) return { ... } end,
 --   }
 --
+-- A stored view keeps one row per group of a table's rows, which CLIENT
+-- updates with each write and MIGRATE fills:
+--
+--   lent.view "PostsByAuthor" {
+--       from = "Post", where = "published", groupBy = { "author" },
+--       aggregates = { posts = { fn = "count" }, stars = { fn = "sum", field = "stars" } },
+--   }
+--
 -- lent.drop names a table that MIGRATE drops with its rows, indexes, column
 -- blocks, counter, statistics and edges. Remove the entry once the drop is
 -- done; until then, a table missing from the graph stops MIGRATE:
@@ -1119,8 +1127,73 @@ end
 -- views -----------------------------------------------------------------------
 
 local VIEW_OPTIONS = { fields = true, rows = true }
+local STORED_OPTIONS = { from = true, where = true, groupBy = true, aggregates = true }
 local VIEW_KEEPS = { kind = true, name = true, optional_ = true, values_ = true,
                      scale_ = true }
+local VIEW_FNS = { count = true, sum = true, avg = true, min = true, max = true }
+
+-- A stored view's options, checked for their shape. graph() checks them
+-- against the table they read.
+local function stored_view(where: string, name: string, spec: any): any
+    for k in spec do
+        if not STORED_OPTIONS[k] then
+            fail(where .. " has no option " .. tostring(k) .. "; a stored view takes from,"
+                .. " where, groupBy and aggregates")
+        end
+    end
+    if type(spec.from) ~= "string" then
+        fail(where .. " from takes a table name, got " .. tostring(spec.from))
+    end
+    if spec.where ~= nil and type(spec.where) ~= "string" then
+        fail(where .. " where takes an expression string, got " .. tostring(spec.where))
+    end
+    local keys = {}
+    if spec.groupBy ~= nil and type(spec.groupBy) ~= "table" then
+        fail(where .. " groupBy takes a list of field and edge names")
+    end
+    for _, k in spec.groupBy or {} do
+        if type(k) ~= "string" then
+            fail(where .. " groupBy takes a list of field and edge names, got " .. tostring(k))
+        end
+        if table.find(keys, k) then
+            fail(where .. " groupBy names " .. k .. " twice")
+        end
+        keys[#keys + 1] = k
+    end
+    if type(spec.aggregates) ~= "table" or next(spec.aggregates) == nil then
+        fail(where .. " needs aggregates, a table of name = { fn = ..., field = ... }")
+    end
+    local aggs = {}
+    for aname, a in spec.aggregates do
+        ident(aname, where .. " aggregate")
+        local at = where .. " aggregate " .. aname
+        if type(a) ~= "table" then
+            fail(at .. " takes a table such as { fn = \"sum\", field = \"price\" }")
+        end
+        for k in a do
+            if k ~= "fn" and k ~= "field" and k ~= "scale" then
+                fail(at .. " has no option " .. tostring(k) .. "; a stored view's aggregate"
+                    .. " takes fn, field and scale")
+            end
+        end
+        if not VIEW_FNS[a.fn] then
+            fail(at .. " has no function " .. tostring(a.fn) .. "; use count, sum, avg, min or max")
+        end
+        if a.field ~= nil and type(a.field) ~= "string" then
+            fail(at .. " field takes a field name, got " .. tostring(a.field))
+        end
+        if a.field == nil and a.fn ~= "count" then
+            fail(at .. " needs a field for " .. a.fn)
+        end
+        if table.find(keys, aname) then
+            fail(at .. " has the name of a groupBy key")
+        end
+        aggs[#aggs + 1] = { name = aname, fn = a.fn, field = a.field, scale = a.scale }
+    end
+    table.sort(aggs, function(x, y) return x.name < y.name end)
+    return { name = name, view = true, stored = true, from = spec.from, where = spec.where,
+             groupBy = keys, aggregates = aggs }
+end
 
 -- One view: `lent.view "Name" { fields, rows }`, a named query that
 -- lent.CLIENT reads like a table. rows(c, params) answers a list of rows,
@@ -1128,6 +1201,11 @@ local VIEW_KEEPS = { kind = true, name = true, optional_ = true, values_ = true,
 -- view's rows, so MIGRATE leaves views alone. The answer is plain data:
 -- { name, view = true, fields = { { name, kind, optional, values?,
 -- scale? } }, rows }.
+--
+-- A stored view, `lent.view "Name" { from, where?, groupBy?, aggregates }`,
+-- keeps one row per group of table `from`'s rows that match `where`, and
+-- MIGRATE fills it. graph() checks it and gives it `fields` and `record`,
+-- what the catalog keeps of it (see check_stored).
 function view(name: string)
     ident(name, "view")
     return function(spec: any)
@@ -1135,9 +1213,13 @@ function view(name: string)
         if type(spec) ~= "table" then
             fail(where .. " needs a table of options")
         end
+        if spec.from ~= nil then
+            return stored_view(where, name, spec)
+        end
         for k in spec do
             if not VIEW_OPTIONS[k] then
-                fail(where .. " has no option " .. tostring(k) .. "; it takes fields and rows")
+                fail(where .. " has no option " .. tostring(k) .. "; a view takes fields and rows,"
+                    .. " and a stored view takes from, where, groupBy and aggregates")
             end
         end
         if type(spec.rows) ~= "function" then
@@ -1177,6 +1259,110 @@ end
 
 -- the whole schema ------------------------------------------------------------
 
+local SUMMED = { int = true, float = true, decimal = true }
+
+-- Checks stored view v against table t of `tables` and gives it `fields`,
+-- the rows' fields, and `record`, what the catalog keeps: { name, from,
+-- key, where?, keys = { { name, kind, code, field?, store?, forward?,
+-- values?, scale? } }, aggs = { { name, fn, kind, field?, code?, units?,
+-- values?, scale? } } }. A key reads `field`, or the id the row links to
+-- through edge store `store`, from its `forward` end. `code` is the kind
+-- KEYCODEC encodes a key's or a min or max aggregate's values with, and a
+-- sum or avg adds whole units of scale `units` when it has one. The kinds
+-- are those of the view's fields.
+local function check_stored(v: any, tables: any)
+    local where = "view " .. v.name
+    local t = tables[v.from]
+    if t == nil then
+        fail(where .. " reads table " .. v.from .. ", which is not declared")
+    end
+    local fields, edges = {}, {}
+    for _, f in t.fields do fields[f.name] = f end
+    for _, e in t.edges do edges[e.name] = e end
+    local record = { name = v.name, from = t.name, key = t.key, where = v.where,
+                     keys = {}, aggs = {} }
+    v.fields = {}
+    for _, name in v.groupBy do
+        local f, e = fields[name], edges[name]
+        local at = where .. " groupBy " .. name
+        local k
+        if f then
+            if f.kind == "json" then
+                fail(at .. " is a json field, which has no order to group by")
+            end
+            k = { name = name, kind = f.kind, code = f.kind, field = name, values = f.values,
+                  scale = f.scale }
+        elseif e then
+            if e.dir == "through" then
+                fail(at .. " is an edge.through; group by an edge.to or edge.from")
+            end
+            if not e.unique then
+                fail(at .. " links many rows; group by an edge with :unique()")
+            end
+            local id = tables[e.target].id
+            k = { name = name, kind = id == "uuid" and "string" or "int", code = id,
+                  store = e.store, forward = e.dir == "to" }
+        else
+            fail(where .. " groupBy names " .. name .. ", which table " .. t.name
+                .. " has no stored field or edge of")
+        end
+        record.keys[#record.keys + 1] = k
+        v.fields[#v.fields + 1] = { name = name, kind = k.kind, optional = true,
+                                    values = k.values, scale = k.scale }
+    end
+    for _, a in v.aggregates do
+        local at = where .. " aggregate " .. a.name
+        local f = a.field and fields[a.field]
+        if a.field and f == nil then
+            fail(at .. " reads " .. a.field .. ", which table " .. t.name
+                .. " has no stored field of")
+        end
+        local kind = f and f.kind
+        if (a.fn == "sum" or a.fn == "avg") and not SUMMED[kind] then
+            fail(at .. " is " .. a.fn .. " of a " .. kind .. " field; use an int, float or"
+                .. " decimal field")
+        end
+        if (a.fn == "min" or a.fn == "max") and kind == "json" then
+            fail(at .. " is " .. a.fn .. " of a json field, which has no order")
+        end
+        local units = a.scale
+        if units ~= nil then
+            if kind ~= "float" or (a.fn ~= "sum" and a.fn ~= "avg") then
+                fail(at .. " sets a scale, which takes a sum or avg of a float field")
+            end
+            if type(units) ~= "number" or units ~= math.floor(units) or units < 0
+                or units > VALUES.DECIMAL_SCALE then
+                fail(at .. " scale must be a whole number from 0 to " .. VALUES.DECIMAL_SCALE
+                    .. ", got " .. tostring(units))
+            end
+        end
+        if kind == "decimal" and (a.fn == "sum" or a.fn == "avg") then
+            units = f.scale
+        end
+        local out = { name = a.name, fn = a.fn, field = a.field, units = units }
+        if a.fn == "count" then
+            out.kind = "int"
+        elseif a.fn == "avg" then
+            out.kind = "float"
+        else
+            out.kind, out.values, out.scale = kind, f.values, f.scale
+            if a.fn ~= "sum" then out.code = kind end
+        end
+        record.aggs[#record.aggs + 1] = out
+        v.fields[#v.fields + 1] = { name = a.name, kind = out.kind,
+                                    optional = a.fn ~= "count" and a.fn ~= "sum",
+                                    values = out.values, scale = out.scale }
+    end
+    if v.where then
+        local EXPR = require("lent.EXPR")
+        EXPR.compile(v.where, function(name)
+            if name == "id" then return t.id end
+            return fields[name] and fields[name].kind
+        end, nil, "SCHEMA " .. where .. " where")
+    end
+    v.record = record
+end
+
 -- A table for MIGRATE to drop, which graph() takes with the tables:
 -- { name, drop = true }.
 function drop(name: string)
@@ -1193,7 +1379,8 @@ end
 -- every hop is unique. A stored one gets a store named as an edge.to's,
 -- whose record adds edge, its name, and path = { { store, forward } }, the
 -- stored edges it follows with their direction. Views made with lent.view
--- go in `views = { [name] = view }`, and the names of tables made with
+-- go in `views = { [name] = view }`, where a stored view gets its fields
+-- and record from check_stored, and the names of tables made with
 -- lent.drop in `dropped = { [name] = true }`. An index with edges gets links = {
 -- { name, store, forward, id } }, one per edge: its store, whether this
 -- table is the store's from end, and the id kind of the linked table.
@@ -1207,7 +1394,7 @@ function graph(list: { any })
             dropped[t.name] = true
             continue
         end
-        if type(t) ~= "table" or type(t.fields) ~= "table" then
+        if type(t) ~= "table" or (type(t.fields) ~= "table" and t.stored ~= true) then
             fail("graph takes tables made with lent.schema, views made with lent.view"
                 .. " and drops made with lent.drop")
         end
@@ -1337,9 +1524,12 @@ function graph(list: { any })
             end
         end
     end
-    for name in views do
+    for name, v in views do
         if tables[name] then
             fail("view " .. name .. " has the name of a table")
+        end
+        if v.stored then
+            check_stored(v, tables)
         end
     end
     for name in dropped do

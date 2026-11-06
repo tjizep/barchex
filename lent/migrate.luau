@@ -53,6 +53,11 @@
 -- the drops and before the builds. A new stored edge.through, or one whose
 -- path changed, adds a drop step for its store and a fill step that counts
 -- each row's paths; one that is removed or no longer stored adds a drop.
+-- A stored view's record lives in /lent/compiled under views, with state =
+-- "filling" until its groups are filled. A new stored view, one whose
+-- declaration changed, or one whose table a fill step rewrites, adds a
+-- drop step for its keys and a fill step that adds each row to its group;
+-- one that is removed adds a drop.
 -- An enum choice removed with :replaces adds a fill step that rewrites the
 -- rows that hold it. Until the fill ends, the catalog field keeps the
 -- `replaces` map, so the rows not yet rewritten stay readable. A field
@@ -266,6 +271,10 @@ function load(): any
     for _, e in c.edges do
         if e.ids then load_fields(e) end
     end
+    for _, v in c.views or {} do
+        for _, k in v.keys do k.scale = num(k.scale) end
+        for _, a in v.aggs do a.units, a.scale = num(a.units), num(a.scale) end
+    end
     return c
 end
 
@@ -392,6 +401,257 @@ local function sorted(m: any): { string }
     return keys
 end
 
+-- stored views ------------------------------------------------------------------
+--
+-- A stored view's group key holds the group's row count, then for each
+-- aggregate with a field how many of the rows hold a value for it, and for
+-- a sum or avg their sum, as KEYCODEC values. A min or max keeps a count
+-- per value under lay.view_value, so its first and last keys are the
+-- answer. CLIENT and MIGRATE gather the changes of a write or a page in a
+-- batch, then write each group once.
+
+local ORDER = {
+    ["<"] = function(x, y) return x < y end,
+    ["<="] = function(x, y) return x <= y end,
+    [">"] = function(x, y) return x > y end,
+    [">="] = function(x, y) return x >= y end,
+}
+
+-- the compiled where of each stored view record
+local viewWhere = setmetatable({}, { __mode = "k" })
+
+-- Whether row r of catalog table t matches stored view v's where.
+local function view_match(v: any, t: any, r: any): boolean
+    if v.where == nil then
+        return true
+    end
+    local parts = viewWhere[v]
+    if parts == nil then
+        local kinds = { id = t.id or "int" }
+        for _, f in t.fields do kinds[f.name] = f.kind end
+        parts = require("lent.EXPR").compile(v.where, function(name)
+            return kinds[name]
+        end, nil, "MIGRATE view " .. v.name .. " where")
+        viewWhere[v] = parts
+    end
+    for _, p in parts do
+        if p.fn then
+            if not p.fn(r) then return false end
+        else
+            local x = r[p.field]
+            if p.op == "=" then
+                if not VALUES.equal_json(x, p.value) then return false end
+            elseif p.op == "~=" then
+                if VALUES.equal_json(x, p.value) then return false end
+            elseif x == nil or not ORDER[p.op](x, p.value) then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+-- The packed key values of the group of row pk, holding r, in stored view
+-- v of catalog table t, or nil when v leaves the row out. `edges` are the
+-- catalog's edge stores, which an edge key reads.
+local function view_group(v: any, t: any, edges: any, pk: any, r: any): string?
+    if not view_match(v, t, r) then
+        return nil
+    end
+    local kinds, values = table.create(#v.keys), table.create(#v.keys)
+    for i, k in v.keys do
+        kinds[i] = k.code
+        if k.store then
+            local s = edges[k.store]
+            local prefix = if k.forward then lay.edge(s, pk) else lay.edge_back(s, pk)
+            local key = barch.store.range(prefix, kc.after(prefix), 1)[1]
+            if key then
+                values[i] = if k.forward then lay.edge_to(s, key) else lay.edge_from(s, key)
+            end
+        else
+            values[i] = r[k.field]
+        end
+    end
+    return kc.pack(kinds, values)
+end
+
+-- What group key `raw` (or nil) of stored view v holds: { count, n, sum },
+-- where n and sum are by aggregate.
+local function view_record(v: any, raw: string?): any
+    local rec = { count = 0, n = {}, sum = {} }
+    local at = 1
+    if raw then
+        rec.count, at = kc.decode(raw, at)
+    end
+    for i, a in v.aggs do
+        rec.n[i], rec.sum[i] = 0, 0
+        if raw and a.field then
+            rec.n[i], at = kc.decode(raw, at)
+        end
+        if raw and (a.fn == "sum" or a.fn == "avg") then
+            rec.sum[i], at = kc.decode(raw, at)
+        end
+    end
+    return rec
+end
+
+local function view_encode(v: any, rec: any): string
+    local parts = { kc.encode("int", rec.count) }
+    for i, a in v.aggs do
+        if a.field then
+            parts[#parts + 1] = kc.encode("int", rec.n[i])
+        end
+        if a.fn == "sum" or a.fn == "avg" then
+            parts[#parts + 1] = kc.encode("float", rec.sum[i])
+        end
+    end
+    return table.concat(parts)
+end
+
+-- A batch of changes to stored views' groups, which view_flush writes.
+function view_batch(): any
+    return { groups = {}, values = {} }
+end
+
+-- Adds row pk, holding r, to the group it belongs to in stored view v of
+-- catalog table t (sign 1), or takes it away (sign -1), in `batch`.
+function view_add(v: any, t: any, edges: any, batch: any, pk: any, r: any, sign: number)
+    local g = view_group(v, t, edges, pk, r)
+    if g == nil then
+        return
+    end
+    local key = lay.view(v.name, g)
+    local d = batch.groups[key]
+    if d == nil then
+        d = { v = v, count = 0, n = {}, sum = {} }
+        batch.groups[key] = d
+    end
+    d.count += sign
+    for i, a in v.aggs do
+        local x = if a.field then r[a.field] else nil
+        if x ~= nil then
+            d.n[i] = (d.n[i] or 0) + sign
+            if a.fn == "sum" or a.fn == "avg" then
+                if a.units then
+                    x = VALUES.decimal_units(x, a.units)
+                end
+                d.sum[i] = (d.sum[i] or 0) + sign * x
+            elseif a.code then
+                local at = lay.view_value(v.name, g, a.name, a.code, x)
+                batch.values[at] = (batch.values[at] or 0) + sign
+            end
+        end
+    end
+end
+
+-- Writes the groups `batch` changed. `lock` reads each with the exclusive
+-- lock of a pessimistic transaction first. A group goes when it has no
+-- rows left.
+function view_flush(batch: any, lock: boolean?)
+    local function get(key: string): string?
+        if lock then
+            return barch.store.get(key, true)
+        end
+        return barch.store.get(key)
+    end
+    for _, key in sorted(batch.groups) do
+        local d = batch.groups[key]
+        local same = d.count == 0
+        for i in d.v.aggs do
+            same = same and (d.n[i] or 0) == 0 and (d.sum[i] or 0) == 0
+        end
+        if not same then
+            local rec = view_record(d.v, get(key))
+            rec.count += d.count
+            if rec.count > 0 then
+                for i in d.v.aggs do
+                    rec.n[i] += d.n[i] or 0
+                    -- a sum of no values is 0, whatever a float sum drifted to
+                    rec.sum[i] = if rec.n[i] == 0 then 0 else rec.sum[i] + (d.sum[i] or 0)
+                end
+                barch.store.set(key, view_encode(d.v, rec))
+            else
+                barch.store.remove(key)
+            end
+        end
+    end
+    for _, key in sorted(batch.values) do
+        local d = batch.values[key]
+        if d ~= 0 then
+            local n = (tonumber(get(key)) or 0) + d
+            if n > 0 then
+                barch.store.set(key, tostring(n))
+            else
+                barch.store.remove(key)
+            end
+        end
+    end
+end
+
+-- The rows of stored view v, in the order of their group values.
+function view_rows(v: any): { any }
+    local prefix = lay.view(v.name)
+    local out = {}
+    lay.scan_values(prefix, kc.after(prefix), function(key, raw)
+        local values = kc.unpack(key, #v.keys, #prefix + 1)
+        local g = string.sub(key, #prefix + 1)
+        local rec = view_record(v, raw)
+        local row = {}
+        for i, k in v.keys do
+            row[k.name] = values[i]
+        end
+        for i, a in v.aggs do
+            local n = if a.field then rec.n[i] else rec.count
+            local scale = if a.units then 10 ^ a.units else 1
+            if a.fn == "count" then
+                row[a.name] = n
+            elseif a.fn == "sum" then
+                row[a.name] = rec.sum[i] / scale
+            elseif a.fn == "avg" then
+                row[a.name] = if n > 0 then rec.sum[i] / n / scale else nil
+            elseif n > 0 then
+                local lo = lay.view_value(v.name, g, a.name)
+                local hi = kc.after(lo) :: string
+                local at = if a.fn == "min" then 0 else barch.store.count(lo, hi) - 1
+                row[a.name] = (kc.decode(barch.store.range(lo, hi, 1, at)[1], #lo + 1))
+            end
+        end
+        out[#out + 1] = row
+        return false
+    end)
+    return out
+end
+
+-- The prefixes of stored view `name`'s keys.
+local function view_prefixes(name: string): { string }
+    return { lay.view(name), lay.view_value(name) }
+end
+
+-- A stored view record as the catalog compares it, without its state.
+local function view_shape(v: any): string
+    local copy = table.clone(v)
+    copy.state = nil
+    return canon(copy)
+end
+
+-- Whether stored view records a and b hold the same declaration.
+function same_view(a: any, b: any): boolean
+    return view_shape(a) == view_shape(b)
+end
+
+-- The catalog's stored views as plan() compares them, or nil when there
+-- are none.
+local function logical_views(views: any): any
+    if views == nil or next(views) == nil then
+        return nil
+    end
+    local out = {}
+    for name, v in views do
+        out[name] = view_shape(v)
+    end
+    return out
+end
+
 -- "Table.edge", the edge of catalog `c` that edge store `store` holds.
 local function edge_label(c: any, store: string): string
     local s = c.edges[store]
@@ -412,10 +672,11 @@ end
 -- { version, changed, compiled, steps = { { op = "build" | "drop", table,
 -- index } | { op = "fill", table, fields, fns } | { op = "drop", edge, label }
 -- | { op = "fill", table, edge, label } | { op = "drop", gone = { key, name,
--- store } } } }. Raises an error for a change it refuses.
+-- store } } | { op = "drop", view } | { op = "fill", view, table } } }.
+-- Raises an error for a change it refuses.
 function plan(prev: any, app: any): any
     prev = prev or { version = 0, tables = {}, edges = {} }
-    local tables, steps = {}, {}
+    local tables, steps, refilled = {}, {}, {}
     for _, name in app.order do
         local t = app.tables[name]
         local where = "table " .. name
@@ -515,6 +776,7 @@ function plan(prev: any, app: any): any
         end
         if #fill > 0 then
             steps[#steps + 1] = { op = "fill", table = c, fields = fill, fns = fns }
+            refilled[t.key] = true
         end
         for _, ix in c.indexes do
             local o = had[ix.name]
@@ -585,6 +847,28 @@ function plan(prev: any, app: any): any
             steps[#steps + 1] = { op = "drop", edge = store, label = edge_label(prev, store) }
         end
     end
+    -- a new stored view, or one whose declaration changed or whose table's
+    -- rows a fill step rewrites, drops its groups and fills them again
+    local views = {}
+    for _, name in sorted(app.views or {}) do
+        local v = app.views[name]
+        if v.record then
+            local rec = table.clone(v.record)
+            local old = prev.views and prev.views[name]
+            if old and view_shape(old) == view_shape(rec) and not refilled[rec.key] then
+                rec.state = old.state
+            else
+                steps[#steps + 1] = { op = "drop", view = name }
+                steps[#steps + 1] = { op = "fill", view = name, table = tables[rec.key] }
+            end
+            views[name] = rec
+        end
+    end
+    for _, name in sorted(prev.views or {}) do
+        if views[name] == nil then
+            steps[#steps + 1] = { op = "drop", view = name }
+        end
+    end
     -- drops first, so an index rebuilt under its own name starts empty,
     -- fills before builds, so a build reads the computed values, and copies
     -- last, followed by the drops of the rows or blocks they copied. Steps
@@ -600,10 +884,11 @@ function plan(prev: any, app: any): any
         return planned[a] < planned[b]
     end)
 
-    local compiled = { tables = tables, edges = edges }
-    local prevShape = { tables = logical_tables(prev.tables), edges = logical_edges(prev.edges) }
-    local changed = canon({ tables = logical_tables(tables), edges = logical_edges(edges) })
-        ~= canon(prevShape)
+    local compiled = { tables = tables, edges = edges, views = next(views) and views or nil }
+    local prevShape = { tables = logical_tables(prev.tables), edges = logical_edges(prev.edges),
+                        views = logical_views(prev.views) }
+    local changed = canon({ tables = logical_tables(tables), edges = logical_edges(edges),
+                            views = logical_views(compiled.views) }) ~= canon(prevShape)
     compiled.version = changed and prev.version + 1 or prev.version
     return { version = compiled.version, changed = changed, compiled = compiled, steps = steps }
 end
@@ -782,6 +1067,16 @@ local function fill_paths(t: any, p: any, edges: any, k: string)
     end
 end
 
+-- Adds the row at key k of table t, which `stored` holds, to its group in
+-- stored view v, in `batch`.
+local function fill_view(t: any, v: any, edges: any, batch: any, fields: any, k: string,
+                         stored: any)
+    local pk = lay.row_pk(t, k)
+    local r = lay.fill(t, decoded(fields, stored))
+    r.id = pk
+    view_add(v, t, edges, batch, pk, r, 1)
+end
+
 local function build(t: any, ix: any, edges: any)
     local fields = row_fields(t)
     each_row(t, function(k, v)
@@ -862,6 +1157,16 @@ function apply(p: any)
     for _, s in p.steps do
         if s.gone then
             while drop_keys(table_prefixes(s.gone), 1000) == 1000 do end
+        elseif s.view and s.op == "drop" then
+            while drop_keys(view_prefixes(s.view), 1000) == 1000 do end
+        elseif s.view then
+            local v, fields = p.compiled.views[s.view], row_fields(s.table)
+            local batch = view_batch()
+            each_row(s.table, function(k, stored)
+                fill_view(s.table, v, p.compiled.edges, batch, fields, k, stored)
+            end)
+            view_flush(batch)
+            v.state = nil
         elseif s.edge and s.op == "drop" then
             while drop_edge(s.edge, 1000) == 1000 do end
         elseif s.edge then
@@ -916,6 +1221,31 @@ local function advance(c: any, budget: number, app: any): number
             local n = drop_keys(table_prefixes(step.gone), limit)
             processed += n
             if n < limit then work.at += 1 end
+            continue
+        end
+        if step.view then
+            local limit = budget - processed
+            local n, done
+            if step.op == "drop" then
+                n = drop_keys(view_prefixes(step.view), limit)
+                done = n < limit
+            else
+                local v, prefix, fields = c.views[step.view], lay.row(t), row_fields(t)
+                local keys, values = row_page(t, work.cursor and work.cursor .. "\2" or prefix,
+                                              kc.after(prefix), limit)
+                local batch = view_batch()
+                for i, k in keys do
+                    fill_view(t, v, c.edges, batch, fields, k, values[i])
+                end
+                view_flush(batch)
+                n, done = #keys, #keys < limit
+                if done then v.state = nil else work.cursor = keys[#keys] end
+            end
+            processed += n
+            if done then
+                work.at += 1
+                work.cursor = nil
+            end
             continue
         end
         if step.edge then
@@ -1046,6 +1376,9 @@ function migrate(app: any, pageSize: number?): any
             for i, s in p.steps do
                 if s.gone then
                     work.steps[i] = { op = s.op, gone = s.gone }
+                elseif s.view then
+                    work.steps[i] = { op = s.op, view = s.view, table = s.table and s.table.key }
+                    if s.op == "fill" then c.views[s.view].state = "filling" end
                 elseif s.edge then
                     work.steps[i] = { op = s.op, table = s.table and s.table.key, edge = s.edge,
                                       label = s.label }
@@ -1068,6 +1401,8 @@ function migrate(app: any, pageSize: number?): any
         for i, s in c.migration.steps do
             if s.gone then
                 steps[i] = "drop " .. s.gone.name
+            elseif s.view then
+                steps[i] = s.op .. " view " .. s.view
             elseif s.edge then
                 steps[i] = s.op .. " " .. s.label
             else

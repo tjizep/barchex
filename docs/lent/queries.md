@@ -827,9 +827,10 @@ end)
 
 A view field takes a kind and a name, plus `:optional()`, `:values(...)`
 for an `enum` and `:scale(n)` for a `decimal`; any other modifier raises an
-error. A view's name must differ from every table's. No key stores a view's
-rows, so MIGRATE leaves views alone, and a client opened without the graph
-has no `c.Name` for them.
+error. A view's name must differ from every table's. No key stores the rows
+of a view with a `rows` function, so MIGRATE leaves it alone, and a client
+opened without the graph has no `c.Name` for it. A
+[stored view](#stored-views) keeps its rows in keys.
 
 Each `all`, `first`, `count`, `groupBy` or aggregate call runs the
 function again, in the caller's transaction. The function reads through
@@ -847,3 +848,81 @@ row the function answers, so a view costs what its function costs plus a
 pass over its rows. Rows come in the order the function answers them, and
 `order` keeps that order among rows with equal values. `explain` answers
 `view AuthorStats rows, then filter in memory`.
+
+### Stored views
+
+A stored view keeps one row per group of a table's rows, with the group's
+counts, sums, averages, minimums and maximums. Each write to the table
+updates the groups it changes in the same transaction, so a read answers
+current totals and costs one pass over the groups, however many rows the
+table holds. Use it for totals that pages and reports read often, as SQL
+uses a materialized view that each write keeps current.
+
+Declare it with `from`, `groupBy` and `aggregates`, and an optional `where`,
+put it in `lent.graph`, and run MIGRATE to fill it from the stored rows:
+
+```lua
+local PostsByAuthor = lent.view "PostsByAuthor" {
+    from = "Post",
+    where = "stars > 0",
+    groupBy = { "author", "status" },
+    aggregates = {
+        posts = { fn = "count" },
+        stars = { fn = "sum", field = "stars" },
+        mean = { fn = "avg", field = "stars" },
+        latest = { fn = "max", field = "at" },
+    },
+}
+local app = lent.graph { User, Post, PostsByAuthor }
+local db = lent.open(app)
+
+db.tx(function(c)
+    -- each row holds author, status, posts, stars, mean and latest
+    return c.PostsByAuthor:query():where("posts >= 3"):order("stars", "desc"):all()
+end)
+```
+
+| option | required | takes |
+|---|---|---|
+| `from` | yes | the name of a table in the graph |
+| `where` | no | an [expression](#expression-filters) over the row's stored fields, `id` and literal values; rows that fail it stay out of every group |
+| `groupBy` | no | a list of the table's stored fields, except `json` fields, and `edge.to` or `edge.from` edges with `:unique()`; an edge groups by the linked row's id. Without `groupBy`, the view has one row for all the rows |
+| `aggregates` | yes | a map from each output name to `{ fn, field, scale }` |
+
+`fn` is `count`, `sum`, `avg`, `min` or `max`, and each answers what it
+answers in a query's [aggregates](#aggregates), including for a group with
+no values. `field` names a stored field of the table; only `count` may omit
+it. `scale` works as it does in a query's `sum` or `avg` of a `float` field,
+so the stored total stays exact; a stored view's aggregate takes no `value`
+function or `distinct`. Each row holds the `groupBy` keys, which are `nil`
+for rows without a value or link, and the aggregates by name. A group goes
+when its last row leaves it, and a view whose rows all leave answers no
+rows.
+
+The view answers the same query methods as a view with a `rows` function,
+in memory over its groups. Keep these costs and limits in mind:
+
+- Each create, update, delete, link and unlink that moves a row into or out
+  of a group writes that group's key. Writes to rows of one group conflict,
+  so an optimistic transaction retries and a pessimistic one waits. A view
+  without `groupBy` has one group that every write to the table touches.
+- A `min` or `max` stores a count for each distinct value of its field in
+  each group, so that a delete finds the next value.
+- A `sum` or `avg` of a `float` field without `scale` adds and takes away
+  float values, so after many updates its last digits can drift from a sum
+  of the current rows. Set `scale` to keep it exact.
+- The view counts every row of the table, including rows that the viewer's
+  [query rules](schema.md#privacy-policies) hide. Give a view only to viewers who may see its
+  totals.
+
+A new stored view, or one whose declaration changes, adds
+`drop view Name` and `fill view Name` steps to the migration; a view removed
+from the graph adds `drop view Name`. A fill step that rewrites the table's
+rows also fills the view again. Writes continue while a view fills, and
+reading it raises `view PostsByAuthor is filling; run MIGRATE until it
+completes`.
+
+A client opened with a graph whose stored view the catalog lacks, or holds
+with a different declaration, raises an error that ends with
+`run MIGRATE`. A client opened without the graph still reads the catalog's
+stored views as `c.Name`.

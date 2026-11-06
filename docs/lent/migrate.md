@@ -26,7 +26,7 @@ row, including rows whose missing values leave them out of a unique index.
 | `changed` | `true` when this call installs a schema or advances pending work |
 | `done` | `true` when every step is complete |
 | `processed` | row visits plus removed index entries and column blocks in this call, at most the page size |
-| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges, `drop Table.field blocks` for a field dropped from a `column` table, `drop Table` and `drop Table.edge` for a dropped table and its edges, and `copy Table blocks` or `copy Table rows` with `drop Table old blocks` or `drop Table old rows` for a change of format or `block`; empty for an unchanged, completed schema |
+| `steps` | the migration's list of `drop Table.index`, `fill Table.field,...` and `build Table.index` operations, in that order, with `drop Table.edge` and `fill Table.edge` for stored path edges, `drop view View` and `fill view View` for [stored views](queries.md#stored-views), `drop Table.field blocks` for a field dropped from a `column` table, `drop Table` and `drop Table.edge` for a dropped table and its edges, and `copy Table blocks` or `copy Table rows` with `drop Table old blocks` or `drop Table old rows` for a change of format or `block`; empty for an unchanged, completed schema |
 
 The target schema becomes active with the first committed page. An index
 being built has `state = "building"` in its `m.load().tables` index entry
@@ -40,6 +40,11 @@ have `state = "filling"`, and a client opened with the graph computes them
 on every read, so reads answer the new values before the fill reaches a
 row. A client opened without the graph reads the stored values, which are
 missing or old until the fill reaches the row.
+
+A stored view's fill reads every row of its table and adds it to its
+group. While it runs, the view has `state = "filling"`: writes keep the
+groups of the rows the fill has passed current, and reading the view
+raises a `LENT` error until the fill completes.
 
 Queries choose ready indexes or read the table while an index builds.
 `using`, `by` and `upsert` raise a `LENT` error if they request a building

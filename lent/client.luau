@@ -792,8 +792,8 @@ end
 -- the change, times the paths from `to` through the hops after i, before
 -- it; summed over each hop that follows `s`, that is the exact change even
 -- when a path follows `s` more than once.
-local function change_link(self: any, s: any, from: any, to: any, sign: number,
-                           apply: () -> ())
+local function change_paths(self: any, s: any, from: any, to: any, sign: number,
+                            apply: () -> ())
     local moves = relink(self, s, from, to, sign)
     local uses = self.pathUses[s.name]
     if uses == nil then
@@ -819,6 +819,92 @@ local function change_link(self: any, s: any, from: any, to: any, sign: number,
         end
     end
     move_entries(moves)
+end
+
+-- stored views -------------------------------------------------------------------
+
+-- Whether stored view v counts row pk of table tbl. While MIGRATE fills the
+-- view, it counts the rows the fill has passed, and the fill adds the rest.
+local function view_counts(tbl: any, v: any, pk: any): boolean
+    if v.state ~= "filling" then
+        return true
+    end
+    local work = tbl.migration
+    local step = work and work.steps[work.at]
+    return step ~= nil and step.op == "fill" and step.view == v.name and work.cursor ~= nil
+        and lay.row(tbl.t, pk) <= work.cursor
+end
+
+-- Adds row pk, holding r, to the groups of tbl's stored views (sign 1), or
+-- takes it from them (sign -1), in the batch of the running write.
+local function view_change(tbl: any, pk: any, r: any, sign: number)
+    if tbl.views == nil then
+        return
+    end
+    if r.id ~= pk then
+        r = table.clone(r)
+        r.id = pk
+    end
+    for _, v in tbl.views do
+        if view_counts(tbl, v, pk) then
+            mig.view_add(v, tbl.t, tbl.allEdges, tbl.viewState.batch, pk, r, sign)
+        end
+    end
+end
+
+-- Runs fn, gathering the changes its writes make to stored views' groups,
+-- then writes each changed group once. A write inside another write
+-- gathers into the outer write's batch.
+local function with_views(self: any, fn: () -> any): any
+    local st = self.viewState
+    if st.none or st.batch ~= nil then
+        return fn()
+    end
+    st.batch = mig.view_batch()
+    local ok, out = pcall(fn)
+    local batch = st.batch
+    st.batch = nil
+    if not ok then
+        error(out, 0)
+    end
+    mig.view_flush(batch, self.lock)
+    return out
+end
+
+-- Runs change_paths, and moves each row whose stored view groups by the
+-- link's edge from its old group to its new one.
+local function change_link(self: any, s: any, from: any, to: any, sign: number,
+                           apply: () -> ())
+    local uses = self.viewUses[s.name]
+    if uses == nil then
+        change_paths(self, s, from, to, sign, apply)
+        return
+    end
+    with_views(self, function()
+        local rows, seen = {}, {}
+        for _, u in uses do
+            local pk = if u.forward then from else to
+            local id = u.v.name .. "\0" .. tostring(pk)
+            if not seen[id] and view_counts(u.tbl, u.v, pk) then
+                seen[id] = true
+                local v = stored_row(u.tbl, pk, true)
+                if v ~= nil then
+                    local r = lay.fill(u.tbl.t,
+                        if type(v) == "table" then table.clone(v) else (rc.decode(u.tbl.fields, v)))
+                    r.id = pk
+                    rows[#rows + 1] = { u, pk, r }
+                end
+            end
+        end
+        local batch = self.viewState.batch
+        for _, x in rows do
+            mig.view_add(x[1].v, x[1].tbl.t, self.allEdges, batch, x[2], x[3], -1)
+        end
+        change_paths(self, s, from, to, sign, apply)
+        for _, x in rows do
+            mig.view_add(x[1].v, x[1].tbl.t, self.allEdges, batch, x[2], x[3], 1)
+        end
+    end)
 end
 
 local function write_link(self: any, e: any, pk: any, other: any, value: string?)
@@ -984,12 +1070,16 @@ function Table:create(values: { [string]: any }): any
             l[3][i] = (link_value(self, l[1], nil, nil))
         end
     end
-    store(self, pk, nil, r, counter)
-    for _, l in links do
-        for i, other in l[2] do
-            write_link(self, l[1], pk, other, l[3][i])
+    -- the row's links move it from the groups it starts in
+    with_views(self, function()
+        store(self, pk, nil, r, counter)
+        view_change(self, pk, r, 1)
+        for _, l in links do
+            for i, other in l[2] do
+                write_link(self, l[1], pk, other, l[3][i])
+            end
         end
-    end
+    end)
     return compute(self, r)
 end
 
@@ -1104,7 +1194,12 @@ function Table:update(pk: any, values: { [string]: any }?, clear: { string }?): 
         compute_stored(self, f, r)
     end
     check_row(self, r, old)
-    return compute(self, store(self, pk, old, r))
+    return compute(self, with_views(self, function()
+        view_change(self, pk, old, -1)
+        store(self, pk, old, r)
+        view_change(self, pk, r, 1)
+        return r
+    end))
 end
 
 -- Creates a row or updates the row selected by the unique fields in values.
@@ -1172,23 +1267,27 @@ function Table:delete(pk: any): boolean
             { op = "delete", id = pk, old = clone_row(self, old) })
     end
     run_hooks(self, "delete", pk, clone_row(self, old))
-    -- unlinking moves the entries of indexes with edges to their unlinked
-    -- keys, which go with the rest
-    unlink_all(self, pk)
-    for _, ix in self.t.indexes do
-        local key = lay.entry(self.t, ix, old, pk, lay.linked(self.allEdges, ix, pk))
-        if key and owns_entry(self, ix, key, pk) then
-            barch.store.remove(key)
+    with_views(self, function()
+        -- unlinking moves the entries of indexes with edges to their unlinked
+        -- keys, which go with the rest, and the row to its stored views'
+        -- groups without the links
+        unlink_all(self, pk)
+        view_change(self, pk, old, -1)
+        for _, ix in self.t.indexes do
+            local key = lay.entry(self.t, ix, old, pk, lay.linked(self.allEdges, ix, pk))
+            if key and owns_entry(self, ix, key, pk) then
+                barch.store.remove(key)
+            end
         end
-    end
-    if is_column(self) then
-        col.remove(self.t, self.fields, pk, old, self.lock)
-    else
-        barch.store.remove(lay.row(self.t, pk))
-    end
-    if col.copied(self.t, pk) then
-        col.uncopy(self.t, self.fields, pk, old, self.lock)
-    end
+        if is_column(self) then
+            col.remove(self.t, self.fields, pk, old, self.lock)
+        else
+            barch.store.remove(lay.row(self.t, pk))
+        end
+        if col.copied(self.t, pk) then
+            col.uncopy(self.t, self.fields, pk, old, self.lock)
+        end
+    end)
     return true
 end
 
@@ -3904,6 +4003,26 @@ local function new_view(v: any, c: any): any
     return setmetatable({ view = v, c = c, where = "view " .. v.name, byName = byName }, View)
 end
 
+-- Stored view record `rec` from the catalog, read through client c. Its
+-- rows are its groups.
+local function stored_view(rec: any, c: any): any
+    local fields = {}
+    for _, k in rec.keys do
+        fields[#fields + 1] = { name = k.name, kind = k.kind, optional = true, values = k.values,
+                                scale = k.scale }
+    end
+    for _, a in rec.aggs do
+        fields[#fields + 1] = { name = a.name, kind = a.kind, values = a.values, scale = a.scale,
+                                optional = a.fn ~= "count" and a.fn ~= "sum" }
+    end
+    return new_view({ name = rec.name, fields = fields, rows = function()
+        if rec.state == "filling" then
+            fail("view " .. rec.name .. " is filling; run MIGRATE until it completes")
+        end
+        return mig.view_rows(rec)
+    end }, c)
+end
+
 -- Starts a query over the rows the view's function answers for `params`.
 -- where, order, limit, offset, groupBy and the aggregates work on them.
 function View:query(params: any?): any
@@ -4045,6 +4164,20 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
             end
         end
     end
+    -- each table's stored views, and for each edge store the stored views
+    -- that group by one of its edges, as { tbl, v, forward }
+    local viewUses, viewState = {}, { none = compiled.views == nil }
+    for _, v in compiled.views or {} do
+        local b = c[v.from]
+        b.views = b.views or {}
+        table.insert(b.views, v)
+        for _, k in v.keys do
+            if k.store then
+                viewUses[k.store] = viewUses[k.store] or {}
+                table.insert(viewUses[k.store], { tbl = b, v = v, forward = k.forward })
+            end
+        end
+    end
     -- policy rules read and write through a client that has no rules, and
     -- whose hooks count toward the same depth
     local rules
@@ -4066,6 +4199,7 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
         b.links = links
         b.pathUses = pathUses
         b.indexUses = indexUses
+        b.viewUses, b.viewState, b.migration = viewUses, viewState, compiled.migration
         b.viewer = viewer
         b.rulesClient = rulesClient
         b.hookStack, b.hookDepth = hookStack, hookDepth
@@ -4073,7 +4207,24 @@ function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
     end
     local what = "table "
     for name, v in app and app.views or {} do
-        c[name] = new_view(v, c)
+        local rec = compiled.views and compiled.views[name]
+        if v.record and rec == nil then
+            fail("view " .. name .. " is declared, and this space's catalog lacks it;"
+                .. " run MIGRATE")
+        elseif v.record and not mig.same_view(v.record, rec) then
+            fail("view " .. name .. " is declared with another from, where, groupBy or"
+                .. " aggregates than this space's catalog holds; run MIGRATE")
+        elseif rec and not v.record then
+            fail("view " .. name .. " is a function view, and this space's catalog holds a"
+                .. " stored view of that name; run MIGRATE")
+        end
+        if not v.record then
+            c[name] = new_view(v, c)
+            what = "table or view "
+        end
+    end
+    for name, rec in compiled.views or {} do
+        c[name] = stored_view(rec, c)
         what = "table or view "
     end
     return setmetatable(c, {
