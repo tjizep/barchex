@@ -18,6 +18,9 @@
 --   lent.u<table><index><values>        the pk, for each row of a unique index
 --   lent.e<edge><from pk><to pk>        "" for each edge, read forwards
 --   lent.E<edge><to pk><from pk>        "" for each edge, read backwards
+--   lent.l<edge><from pk>               never stored: a pessimistic link
+--   lent.L<edge><to pk>                 locks it before it checks a unique
+--                                       edge's links from or to the row
 --   lent.n<table>                       the last pk given out, for id = "int"
 --   lent.a<run><part>                   a paged aggregate's spilled groups,
 --                                       which CLIENT writes and removes
@@ -205,6 +208,17 @@ end
 function edge_back(s: any, to: any, from: any): string
     local key = "lent.E" .. name(s.name) .. kc.encode(s.toId or "int", to)
     return from == nil and key or key .. kc.encode(s.fromId or "int", from)
+end
+
+-- The key a pessimistic link locks before it checks the links of unique
+-- edge `s` from row `from`, or with `back` the links into row `from`. No
+-- range read covers it, so a transaction that has read the links waits for
+-- nobody on it.
+function edge_lock(s: any, from: any, back: boolean?): string
+    if back then
+        return "lent.L" .. name(s.name) .. kc.encode(s.toId or "int", from)
+    end
+    return "lent.l" .. name(s.name) .. kc.encode(s.fromId or "int", from)
 end
 
 -- The prefixes of every forward and every backward key of edge store `s`.

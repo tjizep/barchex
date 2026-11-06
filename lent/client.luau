@@ -670,6 +670,11 @@ local function check_link(self: any, e: any, pk: any, other: any)
     end
     local s = self.allEdges[e.store]
     local from, to = ends(e, pk, other)
+    -- Two links that check one row's links at once would both hold the
+    -- range's shared lock and deadlock when they write. Taking the row's
+    -- edge lock first makes the second wait until the first commits.
+    if self.lock and s.unique then barch.store.get(lay.edge_lock(s, from), true) end
+    if self.lock and s.inverseUnique then barch.store.get(lay.edge_lock(s, to, true), true) end
     local k = s.unique and first_key(lay.edge(s, from))
     if k and k ~= lay.edge(s, from, to) then
         fail("edge " .. e.store .. " allows one " .. s.to .. " per " .. s.from .. ", and "

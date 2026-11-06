@@ -11,10 +11,6 @@ and privacy policies are built.
 
 ## Limits of what is built
 
-- **Unique edges in pessimistic transactions.** Two `link` calls to one row
-  at once can deadlock on the shared lock of the unique check.
-  `barch.tx.run` retries on `TXDEADLOCK`; an exclusive range read would
-  order the two calls.
 - **Column tables.** `format = "column"` needs `int` ids and shares
   conflicts and locks across each block. Without `block`, a field's values
   of one block stay within 524,032 bytes. See `docs/lent/codecs.md`.

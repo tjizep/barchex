@@ -63,7 +63,9 @@ apply with or without it.
 `lent.tx(fn, pessimistic)` runs `fn(c)` in `barch.tx.run`, which retries on
 a conflict, and answers what `fn` answers. With `pessimistic` true, a row or
 unique entry about to be written is read with the exclusive lock, so two
-writers of one value wait for each other. Inside a transaction you already
+writers of one value wait for each other. `link` and `create` lock a row's
+links the same way before they check a `:unique()` edge, so two links to
+one row wait for each other. Inside a transaction you already
 run, `lent.client(pessimistic)` answers the same `c`. A table with
 `id = "int"` takes each new id from one counter, so concurrent creates in
 that table conflict and retry.

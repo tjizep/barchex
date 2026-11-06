@@ -64,6 +64,14 @@ lent depends on these barch behaviors. Each one shapes a decision below.
   locks a key shared, so two inserts of one unique value would both hold the
   shared lock and deadlock when they write. `lent.CLIENT` reads every key it
   is about to write with `get(key, true)`, which orders them.
+- **A unique edge check locks a key that no range covers.** `link` checks a
+  unique edge with a range read over the row's links, which takes a shared
+  lock, so two links to one row at once would both hold it and deadlock.
+  Before that read, a pessimistic `link` reads `lent.l<edge><from pk>`, or
+  `lent.L<edge><to pk>` for a unique `edge.from`, with `get(key, true)`.
+  The key is never stored and no range read covers it, so the second link
+  waits there until the first commits. `tests/test_unique_edge_locks.py`
+  checks that four writers linking one row get no `TXDEADLOCK`.
 
 ## Schema
 
@@ -331,10 +339,3 @@ candidate row's edges are walked and the linked rows tested, each one once.
 `with<Edge>(fn)` runs one query per answered row over that row's links, so
 `fn`'s order and limit apply per row. Joins on plain fields are left out:
 a relationship worth joining on is declared as an edge.
-
-## Open questions
-
-- **Unique edges in pessimistic transactions.** `link` checks a unique edge
-  with a range read, which takes a shared lock. Two links to one row at once
-  can both hold it and deadlock; `barch.tx.run` retries on `TXDEADLOCK`. An
-  exclusive range read would order them instead.

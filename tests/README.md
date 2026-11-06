@@ -48,6 +48,9 @@ beside a development server.
   the fill reaches them, and that the index on the field is rebuilt. It
   also checks that a field added again under a dropped name, or a rename to
   a dropped name, skips the dropped field's values in old rows.
+- `test_unique_edge_locks.py` runs four writers that link one row through
+  a unique edge at once, from each end, in pessimistic transactions, and
+  checks that they wait in turn without a `TXDEADLOCK`.
 - `test_schema.py` runs the schema self-check, declares tables from another
   space, carries a stored row across a field rename with `lent.ids`, and
   checks the errors for a missing table, an unknown index field and invalid
