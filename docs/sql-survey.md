@@ -24,9 +24,10 @@ BARCHD=/path/to/barchd pytest -q tests/test_tpch.py tests/test_nyc_taxi.py
 lent stores all three schemas. Tables map to `lent.schema`, foreign keys to
 an `edge.from` with its `edge.to`, and a join table with extra columns to an
 edge with `:fields`. Single-table filters and group-by queries translate
-directly. Queries that join several tables translate to `has` filters and
-`groupBy` over a unique edge or path edge, or over fields of the rows
-those edges reach, with `having`, `order` and `limit` on the groups.
+directly. Queries that join several tables translate to `has` filters,
+expression filters that read linked rows, and `groupBy` over a unique edge
+or path edge, or over fields of the rows those edges reach, with `having`,
+`order` and `limit` on the groups.
 
 The main limits, in order of impact:
 
@@ -76,9 +77,9 @@ from the query text.
 | Q2 minimum cost supplier | Luau | `links("parts")` from suppliers in a region, then the minimum cost per part in Luau; `LIKE '%BRASS'` as `like(type, '%BRASS')` |
 | Q3 shipping priority | verified | nested `hasOrderWith` and `hasCustomerWith`, `groupBy("order", "order.orderdate", "order.shippriority")` ordered by revenue and `order.orderdate` |
 | Q4 order priority checking | verified | `hasLinesWith` with the expression `commitdate < receiptdate` for `EXISTS` |
-| Q5 local supplier volume | Luau | needs the customer's nation to equal the supplier's nation, a condition across two paths; load both with `with` and compare in Luau |
+| Q5 local supplier volume | verified | `where("customer.nation == supplier.nation and supplier.nation.region.name == region")` compares the two paths, with `hasOrderWith` for the order dates and `groupBy("supplier.nation.name")` |
 | Q6 forecasting revenue change | verified | one expression filter read through `by_shipdate` |
-| Q7 volume shipping | Luau | nation pairs as in Q5, and the year of `shipdate` |
+| Q7 volume shipping | Luau | nation pairs as in Q5 through `supplier.nation.name` and `customer.nation.name`; grouping by the year of `shipdate` needs a computed field |
 | Q8 national market share | Luau | eight-table join, the year of `orderdate`, and a `CASE` share |
 | Q9 product type profit | Luau | `like(name, '%green%')`, the `PARTSUPP` cost per line through `c.Part:edge("supplies", part, supplier)`, and the year |
 | Q10 returned item reporting | verified | `groupBy("customer", "customer.name", "customer.acctbal", "customer.nation.name")` over the path edge, with `order("revenue", "desc"):limit(20)` |
@@ -190,11 +191,12 @@ item it belongs to.
    `groupBy` cover Q1, Q10, Q16's count, Q18 and the taxi benchmark. Q11
    compares each group with a total from a second query, so it still
    filters in Luau.
-7. **Grouping by a linked row's field.** Done: `groupBy` takes a dotted
+7. **A linked row's fields in groups and filters.** Done: `groupBy` takes a dotted
    path through edges with one row at their far end, such as
    `customer.nation.name` or the taxi `origin.borough`, and Q3, Q10 and
-   Q18 group by the order and customer columns they report. Q5, Q7 and Q8
-   still need a condition across two paths before they group by nation.
+   Q18 group by the order and customer columns they report. Expression
+   filters read the same paths, so Q5 compares the customer's nation with
+   the supplier's in `where`.
 8. **Views.** Done: `lent.view` declares a named query in the graph, with
    its fields and a function that answers its rows, and queries read it
    like a table, as Q15 does. A view's rows are worked out on each read; a

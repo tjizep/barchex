@@ -263,7 +263,7 @@ local bad = {
     pathfield = function(c) c.Post:query():groupBy("title.name") end,
     pathempty = function(c) c.Post:query():groupBy("author.") end,
     pathmany = function(c) c.Post:query():groupBy("author.posts.title") end,
-    pathwhere = function(c) c.Post:query():where("author.name == 'ann'") end,
+    pathwhere = function(c) c.Post:query():where("author.likes.title == 'x'") end,
     both = function(c)
         c.Post:query():aggregate { n = { fn = "sum", field = "stars", value = function() return 1 end } }
     end,
@@ -427,8 +427,7 @@ ERRORS = {
     "pathfield": "LENT table Post has no edge title",
     "pathempty": "LENT table Post query groupBy author. has an empty name",
     "pathmany": "LENT table User edge posts can link a row to many rows, so groupBy cannot use it",
-    "pathwhere": """LENT table Post query where "author.name == 'ann'" at column 1: has no field or"""
-                 " parameter author.name",
+    "pathwhere": "LENT table User edge likes can link a row to many rows, so where cannot use it",
     "both": "LENT table Post query aggregate n has both field and value; give one",
     "valuefn": "LENT table Post query aggregate n value must be a function, got 1",
     "sumvalue": "LENT table Post query aggregate n value answered a, so sum needs a number",

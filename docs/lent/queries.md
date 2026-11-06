@@ -75,7 +75,7 @@ the row, `where(function(r) return r.age % 2 == 0 end)`.
 ## Expression filters
 
 An expression filter is a Luau expression over the row's fields, with `id`,
-and the names in `params`:
+the rows its edges link it to, and the names in `params`:
 
 ```lua
 c.Emp:query():where("age > 10 and age <= 100 and salary < max", { max = 1000 })
@@ -84,7 +84,7 @@ c.Emp:query():where("(age or 0) * 2 > salary / 10 or name .. '!' == shout",
 ```
 
 It takes numbers, strings, `true`, `false` and `nil`, the names of fields,
-computed fields and parameters, `and`, `or`, `not`, `==`, `~=`, `<`, `<=`,
+computed fields and parameters, [edge names and dotted paths](#linked-rows-in-expressions), `and`, `or`, `not`, `==`, `~=`, `<`, `<=`,
 `>`, `>=`, `+`, `-`, `*`, `/`, `//`, `%`, `^`, `..`, `#`, parentheses, the
 calls `date(text)`, `year(t)`, `month(t)` and `day(t)`, which work as the
 `lent` helpers of the same names, and [`like(text, pattern)`](#string-patterns).
@@ -169,6 +169,43 @@ shows `by_age 2 ranges age`. When a side has no comparison of that field
 with a value, as in `age ~= 3` or `age == nil`, the query checks the `or`
 on each row it reads. Every part of the expression is checked on each row
 the index reads.
+
+### Linked rows in expressions
+
+Name an edge with one row at its far end, such as a line's `supplier`, to
+read the linked row's id, and name a dotted path such as
+`supplier.nation.name` to read a field of the row the path reaches. The
+paths follow the same rules as [`groupBy`](#aggregates) paths: each step
+before the last is an edge with one row at its far end, including a path
+edge, and the last step names a field or another such edge. Use them to
+compare two linked rows, as TPC-H Q5 does with the customer's and the
+supplier's nation:
+
+```lua
+c.Lineitem:query()
+    :where("customer.nation == supplier.nation and supplier.nation.region.name == ?",
+           "AMERICA")
+    :groupBy("supplier.nation.name")
+    :aggregate { revenue = { fn = "sum", field = "extendedprice" } }
+```
+
+A path reads `nil` when a link along it is missing or leads to a row the
+viewer's query rules hide. `nil == nil` is true, so the example above also
+keeps lines whose customer and supplier both lack a nation; add
+`customer.nation ~= nil` to leave them out.
+
+Each run of the query reads a linked row once and reuses it for every row
+that links to it. The parts of the expression that read only the row's own
+fields still select an index, so in
+`where("price >= 20 and supplier.nation.name == 'GERMANY'")` an index on
+`price` reads the range and each row in it checks its supplier's nation.
+To filter on the fields of one linked row through that row's indexes, use
+[`has<Edge>With`](#joins-through-edges).
+
+An edge that can link a row to many rows
+raises `LENT table <name> edge <edge> can link a row to many rows, so where
+cannot use it`, and a step the table lacks raises `LENT table <name> has no
+field or edge <step>`.
 
 ## String patterns
 

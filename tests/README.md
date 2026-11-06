@@ -183,6 +183,12 @@ beside a development server.
   cursor pages across those spans in both directions,
   `whereEdge`, `has` and query writes, and the errors for syntax, unknown
   names, kinds and values checked per row.
+- `test_where_paths.py` filters lines by their linked rows with edge names
+  and dotted paths such as `customer.nation == supplier.nation`, on binary
+  and column tables in optimistic and pessimistic transactions. It checks
+  missing links, `?` values, `or`, `count`, the index the other parts pick,
+  `groupBy` and paged aggregates over the filtered rows, and the errors for
+  unknown steps, edges to many rows and a clash with a parameter.
 - `test_field_kinds.py` checks enum, JSON and bytes fields with both id
   kinds, all row formats, optimistic and pessimistic transactions, indexes,
   cursors, upsert and query writes. It checks structural JSON equality,

@@ -228,6 +228,17 @@ function q.q4(c, p)
     return pick(groups, { "orderpriority", "n" })
 end
 
+-- Q5, local supplier volume: lines whose customer and supplier share a
+-- nation in the region
+function q.q5(c, p)
+    local groups = c.Lineitem:query()
+        :where("customer.nation == supplier.nation and supplier.nation.region.name == region", p)
+        :hasOrderWith(function(o) o:where("orderdate >= a and orderdate < b", p) end)
+        :groupBy("supplier.nation.name"):order("revenue", "desc")
+        :aggregate { revenue = { fn = "sum", value = revenue } }
+    return pick(groups, { "supplier.nation.name", "revenue" })
+end
+
 -- Q6, forecasting revenue change
 function q.q6(c, p)
     local query = c.Lineitem:query():where(
@@ -652,6 +663,23 @@ def test_q4_order_priority(tpch):
                a="1995-01-01", b="1996-01-01")
     assert want
     got = run("q4", {"a": ms(day("1995-01-01")), "b": ms(day("1996-01-01"))})
+    assert got == want
+
+
+def test_q5_local_supplier_volume(tpch):
+    run, sql = tpch
+    want = sql("""
+        select n_name, sum(l_extendedprice * (100 - l_discount)) as revenue
+        from customer, orders, lineitem, supplier, nation, region
+        where c_custkey = o_custkey and l_orderkey = o_orderkey and l_suppkey = s_suppkey
+          and c_nationkey = s_nationkey and s_nationkey = n_nationkey
+          and n_regionkey = r_regionkey and r_name = :region
+          and o_orderdate >= :a and o_orderdate < :b
+        group by n_name order by revenue desc, n_name""",
+               region="AMERICA", a="1995-01-01", b="1996-01-01")
+    assert len(want) == 2
+    got = run("q5", {"region": "AMERICA", "a": ms(day("1995-01-01")),
+                     "b": ms(day("1996-01-01"))})
     assert got == want
 
 

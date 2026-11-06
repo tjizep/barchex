@@ -1292,6 +1292,8 @@ local function fits(kind: string, v: any): boolean
     return type(v) == (kind == "string" and "string" or "boolean")
 end
 
+local group_key, path_pred
+
 local function new_query(tbl: any): any
     return setmetatable({ tbl = tbl, conds = {}, ors = {}, preds = {}, exprPreds = 0,
                           exprFields = {}, checks = {}, loads = {},
@@ -1339,12 +1341,29 @@ function Query:where(field: any, ...: any): any
     end
     if type(field) == "string" and value == nil and (op == nil or type(op) == "table") then
         local tbl = self.tbl
+        -- an edge name such as customer reads the linked row's id, and a
+        -- dotted name such as customer.nation.name reads a linked row
+        local paths, reads = {}, false
         local parts = EXPR.compile(field, function(name)
+            if tbl.edgeByName and field_kind(tbl, name) == nil
+                and (string.find(name, ".", 1, true) or tbl.edgeByName[name]) then
+                local k = group_key(tbl, name, "where")
+                paths[name], reads = k, true
+                return k.kind
+            end
             self.exprFields[name] = true
             return field_kind(tbl, name)
         end, op, where)
         for _, p in parts do
-            if p.fn then
+            if reads and (p.fn or paths[p.field]) then
+                self.preds[#self.preds + 1] = path_pred(self, paths, p)
+                self.exprPreds += 1
+                for f, list in p.ranges or {} do
+                    if not paths[f] then
+                        self.ors[#self.ors + 1] = { field = f, ranges = list }
+                    end
+                end
+            elseif p.fn then
                 self.preds[#self.preds + 1] = p.fn
                 self.exprPreds += 1
                 for f, list in p.ranges or {} do
@@ -1978,6 +1997,10 @@ end
 -- Resets the has() checks of q for a run, and reads the rows of each
 -- driving one.
 local function prepare(q: any)
+    -- each run reads linked rows afresh for where's dotted names
+    for _, r in q.pathReads or {} do
+        r.memos = nil
+    end
     for _, h in q.checks do
         h.memo, h.set = {}, nil
         if h.drive and h.e.dir == "through" then
@@ -2700,7 +2723,9 @@ end
 -- groups by the linked row's id; or a path such as "customer.nation.name"
 -- through such edges, which groups by a field of the last linked row. A key
 -- through edges keeps each hop in `hops`, and the field it reads in `field`.
-local function group_key(tbl: any, name: any): any
+-- `use` names the caller in errors: "groupBy" (the default) or "where".
+function group_key(tbl: any, name: any, use: string?): any
+    use = use or "groupBy"
     if type(name) ~= "string" then
         fail(tbl.where .. " query groupBy takes field or edge names, got " .. tostring(name))
     end
@@ -2710,12 +2735,12 @@ local function group_key(tbl: any, name: any): any
     for i, part in parts do
         local last = i == #parts
         if part == "" then
-            fail(tbl.where .. " query groupBy " .. name .. " has an empty name")
+            fail(tbl.where .. " query " .. use .. " " .. name .. " has an empty name")
         end
         if last and ((part == "id" and at.memory == nil) or at.byName[part]
                 or at.computedByName[part]) then
             local kind = kind_of(at, part)
-            if kind == "json" then
+            if kind == "json" and use == "groupBy" then
                 fail(at.where .. " field " .. part .. " is json, so groupBy cannot use it")
             end
             if #hops == 0 then
@@ -2728,7 +2753,7 @@ local function group_key(tbl: any, name: any): any
             fail(at.where .. (if last then " has no field or edge " else " has no edge ") .. part)
         end
         if not one(at, e) then
-            fail(at.where .. " edge " .. part .. " can link a row to many rows, so groupBy"
+            fail(at.where .. " edge " .. part .. " can link a row to many rows, so " .. use
                 .. " cannot use it")
         end
         hops[#hops + 1] = { tbl = at, e = e, to = at.peers[e.target] }
@@ -2784,6 +2809,45 @@ local function key_value(k: any, r: any, memo: any): any
         return row[k.field]
     end
     return nil
+end
+
+-- A where predicate for part p of an expression that reads the dotted
+-- names in `paths`, each a group_key path: p's function, given a view of the
+-- row that answers those names, or p's comparison of one of them. Each run
+-- of q reads a linked row once, as key_value does for groupBy.
+function path_pred(q: any, paths: any, p: any): (any) -> boolean
+    local reads = { memos = nil }
+    q.pathReads = q.pathReads or {}
+    table.insert(q.pathReads, reads)
+    local function value(r: any, name: string): any
+        local memos = reads.memos
+        if memos == nil then
+            memos = {}
+            reads.memos = memos
+        end
+        local memo = memos[name]
+        if memo == nil then
+            memo = { rows = {} }
+            for j in paths[name].hops do
+                memo[j] = {}
+            end
+            memos[name] = memo
+        end
+        return key_value(paths[name], r, memo)
+    end
+    if p.fn == nil then
+        local c, name = { op = p.op, value = p.value, kind = paths[p.field].kind }, p.field
+        return function(r) return holds(c, value(r, name)) end
+    end
+    local fn = p.fn
+    return function(r)
+        return fn(setmetatable({}, { __index = function(_, k)
+            if paths[k] then
+                return value(r, k)
+            end
+            return r[k]
+        end }))
+    end
 end
 
 -- The test of a having(cond, params) call for the group rows of keys and
