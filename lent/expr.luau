@@ -6,7 +6,10 @@
 -- literals (numbers, strings, true, false, nil), `and`, `or`, `not`, the
 -- comparisons == ~= < <= > >=, the arithmetic + - * / // % ^, unary minus,
 -- `..`, `#`, parentheses, and the calls below. Nothing else parses, so an
--- expression reaches only the row and its parameters.
+-- expression reaches only the row and its parameters. A `?` stands for the
+-- next of the values given after the expression:
+--
+--   q:where("age > ? and name == ?", 10, "ann")
 --
 --   date('1995-03-15')   Unix milliseconds of ISO 8601 text, as lent.date
 --   year(t), month(t), day(t)   the UTC calendar part of a time
@@ -23,11 +26,12 @@
 --
 --   lent.EXPR                -> "ok" or which check failed
 --
--- parse(src) answers the expression's tree, and compile(src, kindOf, params,
--- where) answers the expression split at its top-level `and`s: each part is
--- either { field, op, value }, a comparison the caller can hand to an index,
--- or { fn }, a function of the row. kindOf(name) answers a field's lent kind
--- or nil. Errors start with `where`.
+-- parse(src) answers the expression's tree, slots(src) how many `?`s it has,
+-- and values(...) the values for those `?`s, to pass as compile's params.
+-- compile(src, kindOf, params, where) answers the expression split at its
+-- top-level `and`s: each part is either { field, op, value }, a comparison
+-- the caller can hand to an index, or { fn }, a function of the row.
+-- kindOf(name) answers a field's lent kind or nil. Errors start with `where`.
 
 local VALUES = require("lent.VALUES")
 
@@ -288,7 +292,7 @@ end
 -- The tokens of src: { k, v, text, at }, where k is "const", "name", a
 -- keyword or a symbol, and the last token is "eof".
 local function tokenize(src: string, bad: any): { any }
-    local toks, i, n = {}, 1, #src
+    local toks, i, n, slots = {}, 1, #src, 0
     while true do
         i = string.find(src, "[^ \t\r\n]", i) or n + 1
         if i > n then
@@ -325,6 +329,10 @@ local function tokenize(src: string, bad: any): { any }
             local v, j = read_string(src, i, bad)
             toks[#toks + 1] = { k = "const", v = v, text = string.sub(src, i, j - 1), at = i }
             i = j
+        elseif c == "?" then
+            slots += 1
+            toks[#toks + 1] = { k = "slot", v = slots, text = c, at = i }
+            i += 1
         elseif two == "--" then
             bad(i, "takes no comments")
         elseif SYMBOLS2[two] then
@@ -341,13 +349,14 @@ local function tokenize(src: string, bad: any): { any }
             bad(i, "has an unexpected " .. c)
         end
     end
-    toks[#toks + 1] = { k = "eof", text = "end", at = n + 1 }
+    toks[#toks + 1] = { k = "eof", text = "end", at = n + 1, slots = slots }
     return toks
 end
 
 -- The tree of src. Nodes are { k = "const", v }, { k = "name", name },
--- { k = "call", name, a, b }, { k = "un", op, a } and { k = "bin", op, a, b },
--- each with its column `at`.
+-- { k = "slot", n } for the nth `?`, { k = "call", name, a, b },
+-- { k = "un", op, a } and { k = "bin", op, a, b }, each with its column
+-- `at`. The root also holds the number of `?`s in `slots`.
 local function parse_tree(src: string, bad: any): any
     local toks = tokenize(src, bad)
     local pos = 1
@@ -380,6 +389,9 @@ local function parse_tree(src: string, bad: any): any
         elseif t.k == "name" then
             pos += 1
             return { k = "name", name = t.v, at = t.at }
+        elseif t.k == "slot" then
+            pos += 1
+            return { k = "slot", n = t.v, at = t.at }
         elseif t.k == "(" then
             pos += 1
             local node = expr(0)
@@ -420,10 +432,12 @@ local function parse_tree(src: string, bad: any): any
     if t.k ~= "eof" then
         bad(t.at, "has " .. t.text .. " after the end of the expression")
     end
+    tree.slots = t.slots
     return tree
 end
 
 local parsed, nparsed = {}, 0
+local VALUES_MT = {}
 
 -- The tree of src, from a cache of recent expressions.
 function parse(src: string, where: string?): any
@@ -436,6 +450,17 @@ function parse(src: string, where: string?): any
         parsed[src], nparsed = tree, nparsed + 1
     end
     return tree
+end
+
+-- How many `?`s src has. Errors start with `where`.
+function slots(src: string, where: string?): number
+    return parse(src, where).slots
+end
+
+-- The values given for an expression's `?`s, in order, nils included, to
+-- pass to compile as its params.
+function values(...: any): any
+    return setmetatable(table.pack(...), VALUES_MT)
 end
 
 local function type_of(v: any): string
@@ -460,8 +485,9 @@ local function describe(n: any): string
     return "a " .. n.t .. " value"
 end
 
-local function param(params: any, name: string, bad: any): any
-    local v = VALUES.number(params[name])
+-- Parameter value v, checked, named `name` in errors.
+local function param(v: any, name: string, bad: any): any
+    v = VALUES.number(v)
     local t = type(v)
     if t == "integer" then
         bad(nil, "parameter " .. name .. " wants a whole number from -2^53 to 2^53, got "
@@ -653,9 +679,15 @@ end
 
 -- n with its names resolved to fields and parameters, each node typed, and
 -- the operators over constants worked out.
-local function resolve(n: any, kindOf: any, params: any, bad: any): any
+local function resolve(n: any, kindOf: any, params: any, values: any, bad: any): any
     if n.k == "const" then
         return { k = "const", v = n.v, t = type_of(n.v) }
+    elseif n.k == "slot" then
+        local v = values[n.n]
+        if v ~= nil then
+            v = param(v, "?" .. n.n, bad)
+        end
+        return { k = "const", v = v, t = type_of(v) }
     elseif n.k == "name" then
         local kind = kindOf(n.name)
         local given = params ~= nil and params[n.name] ~= nil
@@ -664,16 +696,16 @@ local function resolve(n: any, kindOf: any, params: any, bad: any): any
         elseif kind ~= nil then
             return { k = "field", name = n.name, kind = kind, t = KIND_TYPE[kind] or "any" }
         elseif given then
-            local v = param(params, n.name, bad)
+            local v = param(params[n.name], n.name, bad)
             return { k = "const", v = v, t = type_of(v) }
         end
         bad(n.at, "has no field or parameter " .. n.name)
     end
     local out = { k = n.k, op = n.op, name = n.name, at = n.at,
-                  a = resolve(n.a, kindOf, params, bad) }
+                  a = resolve(n.a, kindOf, params, values, bad) }
     if n.k == "call" then
         local call = CALLS[n.name]
-        out.b = n.b and resolve(n.b, kindOf, params, bad)
+        out.b = n.b and resolve(n.b, kindOf, params, values, bad)
         for _, x in { out.a, out.b } do
             if x.t ~= call.takes and x.t ~= "any" and x.t ~= "nil" then
                 bad(n.at, n.name .. " takes a " .. call.takes .. ", got " .. describe(x))
@@ -687,7 +719,7 @@ local function resolve(n: any, kindOf: any, params: any, bad: any): any
         return out
     end
     if n.b then
-        out.b = resolve(n.b, kindOf, params, bad)
+        out.b = resolve(n.b, kindOf, params, values, bad)
     end
     -- a constant left operand decides `and` and `or` on its own
     if (n.op == "and" or n.op == "or") and out.a.k == "const" then
@@ -816,10 +848,17 @@ end
 -- matches when every part holds.
 function compile(src: string, kindOf: (string) -> string?, params: any, where: string): { any }
     local bad = failer(where, src)
-    if params ~= nil and type(params) ~= "table" then
+    local tree = parse(src, where)
+    local values = { n = 0 }
+    if getmetatable(params) == VALUES_MT then
+        params, values = nil, params
+    elseif params ~= nil and type(params) ~= "table" then
         bad(nil, "takes a table of parameters, got " .. type(params))
     end
-    local tree = resolve(parse(src, where), kindOf, params, bad)
+    if values.n ~= tree.slots then
+        bad(nil, "has " .. tree.slots .. " ? and got " .. values.n .. " values for them")
+    end
+    tree = resolve(tree, kindOf, params, values, bad)
     local parts = {}
     local function split(n: any)
         if n.k == "bin" and n.op == "and" then

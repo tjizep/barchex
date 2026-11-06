@@ -165,6 +165,34 @@ function steps.errors(c)
     }
 end
 
+-- Values after the expression fill its `?`s in order.
+function steps.slots(c)
+    local function q(...) return c.Emp:query():where(...) end
+    local groups = {}
+    for _, g in c.Emp:query():groupBy("active"):having("n > ?", 1)
+            :aggregate { n = { fn = "count" } } do
+        groups[#groups + 1] = tostring(g.active) .. "=" .. g.n
+    end
+    return {
+        names(q("age > ? and age <= ? and salary < ?", 10, 100, 1000)),
+        q("age > ? and age <= ?", 10, 100):explain(),
+        -- a nil value compares as the literal nil does
+        names(q("age == ?", nil)),
+        names(q("tags == ?", { "x" })),
+        names(q("name == ? or name == ?", "ann", "eve")),
+        -- a `?` inside a string literal is text
+        names(q("name ~= '?' and age > ?", 40)),
+        names(q("name ~= '?'")),
+        names(c.Emp:query():where("name == ?", "ann"):queryKnows():whereEdge("years >= ?", 3)),
+        table.concat(groups, ","),
+        err(function() q("age > ? and age < ?", 10) end),
+        err(function() q("age > ?") end),
+        err(function() q("age > ?", 1, 2) end),
+        err(function() q("age > ?", "ten") end),
+        err(function() q("age > ?", print) end),
+    }
+end
+
 function call(step, mode, arg)
     if step == "migrate" then
         return m.migrate(app).done and "done" or "more"
@@ -270,4 +298,25 @@ def test_expression_errors(run):
         where + '"like(age or \'none\', \'%\')" at column 1: like takes strings, got number'
                 ' and string',
         where + '"like(\'a\', name .. bad)" at column 1: ' + ends,
+    ]
+
+
+def test_values_fill_question_marks(run):
+    where = 'LENT table Emp query where '
+    assert run("slots") == [
+        "ann,dee",
+        "by_age range age",
+        "cy",
+        "ann",
+        "ann,eve",
+        "bob,eve",
+        "ann,bob,cy,dee,eve",
+        "bob",
+        "true=4",
+        where + '"age > ? and age < ?": has 2 ? and got 1 values for them',
+        where + '"age > ?": has 1 ? and got 0 values for them',
+        where + '"age > ?": has 1 ? and got 2 values for them',
+        where + '"age > ?" at column 5: > compares field age (int) with "ten"',
+        where + '"age > ?": parameter ?1 is a function; parameters are numbers, strings,'
+                ' booleans or JSON tables',
     ]

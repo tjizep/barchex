@@ -1321,21 +1321,28 @@ end
 -- >=. A missing value equals nil, differs from non-nil values and fails
 -- range comparisons. where(fn) keeps rows for which fn(row) answers true.
 -- where(expr, params) keeps the rows for which the Luau expression string
--- expr answers true; see EXPR. Its top-level `and` parts that compare a
+-- expr answers true; see EXPR. where(expr, ...) gives the values for the
+-- expression's `?`s, in order, after it. Its top-level `and` parts that compare a
 -- field with a value become conditions an index can serve, and an index can
 -- read just the value ranges of a part that holds only within them, such as
 -- `age < 20 or age > 100`.
-function Query:where(field: any, op: any, value: any): any
+function Query:where(field: any, ...: any): any
+    local op, value = ...
     if type(field) == "function" then
         self.preds[#self.preds + 1] = field
         return self
+    end
+    local where = "LENT " .. self.tbl.where .. " query where"
+    if type(field) == "string" and string.find(field, "?", 1, true)
+        and EXPR.slots(field, where) > 0 then
+        op, value = EXPR.values(...), nil
     end
     if type(field) == "string" and value == nil and (op == nil or type(op) == "table") then
         local tbl = self.tbl
         local parts = EXPR.compile(field, function(name)
             self.exprFields[name] = true
             return field_kind(tbl, name)
-        end, op, "LENT " .. tbl.where .. " query where")
+        end, op, where)
         for _, p in parts do
             if p.fn then
                 self.preds[#self.preds + 1] = p.fn
@@ -3129,6 +3136,18 @@ local function mark_value(v: any): string
     return tostring(v)
 end
 
+-- A having test's parameters, or the values of its `?`s, as text.
+local function mark_values(h: any): string
+    if h.values == nil then
+        return mark_value(h.params)
+    end
+    local out = {}
+    for i = 1, h.values.n do
+        out[i] = mark_value(h.values[i])
+    end
+    return "?" .. table.concat(out, ",")
+end
+
 -- What a state must match to continue: the table and schema version, the
 -- plan, the group keys, the aggregates, the conditions' values and the
 -- groupBy's having, order, offset and limit calls.
@@ -3148,7 +3167,7 @@ local function page_mark(q: any, p: any, agg: any): string
     if shape then
         for _, h in shape.tests do
             parts[#parts + 1] = "having " .. (if type(h.cond) == "string"
-                then h.cond .. " " .. mark_value(h.params) else "(function)")
+                then h.cond .. " " .. mark_values(h) else "(function)")
         end
         for _, o in shape.orders do
             parts[#parts + 1] = "order " .. tostring(o.name) .. (if o.desc then " desc" else " asc")
@@ -3611,8 +3630,10 @@ end
 
 -- Keeps the groups for which fn(group) answers true, or for which the
 -- expression string answers true; it reads the group's keys and aggregates
--- by name, and `params` by name, as where does. Each call adds a test.
-function Grouped:having(cond: any, params: any?): any
+-- by name, and `params` by name, as where does; values after an expression
+-- with `?`s fill them in order. Each call adds a test.
+function Grouped:having(cond: any, ...: any): any
+    local params = ...
     if type(cond) ~= "function" and type(cond) ~= "string" then
         fail(self.q.tbl.where .. " query groupBy having takes a function or an expression"
             .. " string, got " .. tostring(cond))
@@ -3621,7 +3642,12 @@ function Grouped:having(cond: any, params: any?): any
         fail(self.q.tbl.where .. " query groupBy having takes parameters with an expression"
             .. " string only")
     end
-    self.tests[#self.tests + 1] = { cond = cond, params = params }
+    local test = { cond = cond, params = params }
+    if type(cond) == "string" and string.find(cond, "?", 1, true)
+        and EXPR.slots(cond, "LENT " .. self.q.tbl.where .. " query groupBy having") > 0 then
+        test.params, test.values = EXPR.values(...), table.pack(...)
+    end
+    self.tests[#self.tests + 1] = test
     return self
 end
 
@@ -3854,7 +3880,7 @@ end
 -- value`, as where does for a row's fields. After follow, a row stays when
 -- one of the links of the last edge that reach it matches. whereEdge(fn)
 -- keeps the links for which fn(values) answers true.
-function Query:whereEdge(field: any, op: string?, value: any): any
+function Query:whereEdge(field: any, ...: any): any
     local l = self.edgeOf
     if l == nil then
         fail(self.tbl.where .. " query whereEdge works inside the function given to has or"
@@ -3865,7 +3891,7 @@ function Query:whereEdge(field: any, op: string?, value: any): any
         fail(l.tbl.where .. " edge " .. l.e.name .. " has no fields")
     end
     l.q = l.q or es:query()
-    l.q:where(field, op, value)
+    l.q:where(field, ...)
     return self
 end
 

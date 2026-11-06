@@ -81,6 +81,10 @@ function cases.shaped(c)
     return c.Sale:query():groupBy("region", "qty"):having("n > 1")
         :order("amount", "desc"):limit(4), { n = SPEC.n, amount = SPEC.amount }
 end
+function cases.slots(c, least)
+    return c.Sale:query():where("qty >= ?", 3):groupBy("region")
+        :having("n > ?", tonumber(least) or 1), SPEC
+end
 function cases.range(c)
     return c.Sale:query():where("qty", ">=", 3):groupBy("region"), SPEC
 end
@@ -138,8 +142,8 @@ function steps.whole(c, name)
 end
 
 -- one page, as JSON: done, processed, state and the page's group rows
-function steps.page(c, name, state, size)
-    local q, spec = cases[name](c)
+function steps.page(c, name, state, size, arg)
+    local q, spec = cases[name](c, arg)
     local r = q:aggregatePage(spec, if state == "" then nil else state, tonumber(size))
     return simdjson.encode({ done = r.done, processed = r.processed, state = r.state or "",
                              result = answer(r.result) })
@@ -229,7 +233,7 @@ def pages(run, case, size, state="", db="keep"):
         state = r["state"]
 
 
-CASES = ["totals", "ordered", "regions", "shaped", "range", "spans", "equal", "path",
+CASES = ["totals", "ordered", "regions", "shaped", "slots", "range", "spans", "equal", "path",
          "follow", "has", "none", "keys"]
 
 
@@ -303,6 +307,13 @@ def test_pages_see_writes_after_their_position(run):
     assert run("keep", "change") == "ok"
     got, _ = pages(run, "totals", 10, first["state"])
     assert [p for p in got[0].split() if p.startswith("n=")] == ["n=41"]
+
+
+def test_a_state_keeps_its_having_values(run):
+    state = json.loads(run("keep", "page", "slots", "", "2"))["state"]
+    assert json.loads(run("keep", "page", "slots", state, "2", "1"))["state"]
+    with pytest.raises(redis.ResponseError, match="state comes from another query"):
+        run("keep", "page", "slots", state, "2", "2")
 
 
 def test_page_errors(run):

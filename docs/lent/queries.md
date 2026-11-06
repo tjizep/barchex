@@ -47,7 +47,7 @@ the row, `where(function(r) return r.age % 2 == 0 end)`.
 
 | method | effect |
 |---|---|
-| `where(expr, params)` | keeps rows for which the expression string `expr` is true; `params` is an optional table of named values; see [expression filters](#expression-filters) |
+| `where(expr, params)`, `where(expr, ...)` | keeps rows for which the expression string `expr` is true; `params` is an optional table of named values, and the values after an expression with `?`s fill them in order; see [expression filters](#expression-filters) |
 | `where(field, op, value)` | keeps rows where the comparison holds, `op` being one of `=`, `~=`, `<`, `<=`, `>`, `>=`; a missing field equals `nil`, differs from non-`nil` values and fails range comparisons |
 | `where(fn)` | keeps rows for which `fn(row)` is true |
 | `order(field, dir)` | sorts by `field`, `"asc"` by default or `"desc"`; `asc` puts equal values in id order and missing values first, and `desc` reverses both |
@@ -60,13 +60,13 @@ the row, `where(function(r) return r.age % 2 == 0 end)`.
 | `has(edge, fn)`, `has<Edge>With(fn)` | keeps rows linked to a row that matches the query `fn(q)` builds with `where`, `has` and `using` |
 | `hasNo(edge)`, `hasNo<Edge>()`, `hasNo(edge, fn)`, `hasNo<Edge>With(fn)` | keeps the rows that `has` with the same arguments leaves out, as SQL's `NOT EXISTS` does |
 | `with(edge, fn)`, `with<Edge>(fn)` | loads each answered row's links into `row.<edge>`; `fn` is optional and may filter, order and limit them |
-| `whereEdge(field, op, value)`, `whereEdge(fn)`, `whereEdge(expr, params)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
+| `whereEdge(field, op, value)`, `whereEdge(fn)`, `whereEdge(expr, params)`, `whereEdge(expr, ...)` | inside the `fn` of `has` or `with`, or on the answer of `follow`, keeps the linked rows whose link values match, as `where` does for fields |
 | `links(edge)` | a query over the links of the matches through an `edge.to` or `edge.from`, one row per link holding `from`, `to` and the link's values |
 | `all()`, `first()`, `ids()` | runs the query |
 | `count()` | answers how many rows match, after `offset` and `limit`; see [counting rows](#counting-rows) |
 | `sum(field)`, `min(field)`, `max(field)` | runs the query and answers one aggregate |
 | `aggregate(spec)`, `groupBy(...):aggregate(spec)` | runs the query and answers several aggregates, for all rows or per group |
-| `groupBy(...):having(cond, params)`, `:order(name, dir)`, `:limit(n)`, `:offset(n)` | filters, orders and pages the groups before `aggregate(spec)` answers them |
+| `groupBy(...):having(cond, params)`, `:having(cond, ...)`, `:order(name, dir)`, `:limit(n)`, `:offset(n)` | filters, orders and pages the groups before `aggregate(spec)` answers them |
 | `aggregatePage(spec, state, pageSize)`, `groupBy(...):aggregatePage(spec, state, pageSize)` | reads one page of the rows and answers a report; the last page's report holds what `aggregate` answers; see [paged aggregates](#paged-aggregates) |
 | `update(values, clear)` | updates the selected rows and answers the affected-row count; both arguments are optional, as for a row's `update` |
 | `delete()` | deletes the selected rows and answers the number it removed |
@@ -97,13 +97,21 @@ the literal `nil` instead.
 
 ### Values in expressions
 
-Put a program's value into an expression with Luau string interpolation or
-with a parameter:
+Put a program's value into an expression with a `?`, a named parameter or
+Luau string interpolation:
 
 ```lua
-c.User:query():where(`id == {u.id}`)              -- interpolation
-c.User:query():where("name == n", { n = name })   -- a parameter
+c.User:query():where("name == ? and age > ?", name, 30)  -- values for the ?s
+c.User:query():where("name == n", { n = name })          -- a named parameter
+c.User:query():where(`id == {u.id}`)                     -- interpolation
 ```
+
+Each `?` takes the next value after the expression. Pass one value for each
+`?`; another count raises `has 2 ? and got 1 values for them`. A `?` value
+can be `nil`, which compares as the literal `nil` does, or a JSON table, as
+in `where("tags == ?", { "x" })`. An expression with a `?` reads every
+value after it as a `?` value, so it takes no `params` table. A `?` inside
+a string literal, as in `name == '?'`, is text.
 
 Interpolation needs a backtick string; Luau keeps `{u.id}` in a `"..."` or
 `'...'` string as literal text. It writes the value into the expression
@@ -111,7 +119,7 @@ text, which suits numbers, `true`, `false` and `nil`: a number's text reads
 back as the same number, so `` `score == {s}` `` matches a stored `0.1`.
 
 Pass strings, JSON tables and any value that comes from outside the program
-in `params`. An interpolated string becomes part of the expression's
+as a `?` value or a parameter. An interpolated string becomes part of the expression's
 syntax:
 
 - `` `name == {name}` `` reads `ann` as a name and raises
@@ -122,10 +130,11 @@ syntax:
 - a value such as `x' or name ~= 'x` turns
   `` `name == '{name}'` `` into an expression that matches every row.
 
-A parameter is always one value, whatever its text holds. lent keeps the
-parsed form of the 256 most recent expression texts, and each interpolated
-value makes a new text, so a query run in a loop parses its expression on
-every call. With a parameter, the text stays the same and is parsed once.
+A `?` value or parameter is always one value, whatever its text holds.
+lent keeps the parsed form of the 256 most recent expression texts, and
+each interpolated value makes a new text, so a query run in a loop parses
+its expression on every call. With `?`s or parameters, the text stays the
+same and is parsed once.
 
 A call on a value or parameter is worked out once, so
 `placed >= date('1995-01-01')` compares the field with a number, and an
@@ -489,7 +498,7 @@ c.Post:query():groupBy("author")
 
 - `having(cond, params)` keeps the groups that match. `cond` is an
   expression string, as for `where`, over the group's keys and aggregates by
-  name and the names in `params`, or a function that receives the group row
+  name and the names in `params`, with values after it for its `?`s, or a function that receives the group row
   and answers whether to keep it. A dotted key such as `author.name` is one
   name in the expression. Each call adds a test, and a group must pass them
   all.
