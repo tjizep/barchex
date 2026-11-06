@@ -288,6 +288,9 @@ id with a `limit` keeps only the rows that sort first; see
 out rows with a missing value, so it is used when every one of its fields
 has an `=` filter, or when each field before the last has one and the last
 has a range. Filters on other fields are checked on each row read.
+`count` and `aggregate` on a `column` table read its blocks by id when an
+index range holds a large share of the rows; see
+[Scans in barch's block loop](codecs.md#scans-in-barchs-block-loop).
 
 When two indexes match equally well, the query counts the keys each one
 would read and uses the smaller count. Equal counts keep the index declared

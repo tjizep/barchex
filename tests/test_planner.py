@@ -15,6 +15,7 @@ APP = """
 local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
+local col = require("lent.COLUMNS")
 local f = lent.field
 
 local app = lent.graph {
@@ -115,6 +116,34 @@ end
 
 function steps.readingExplain(c)
     return c.Reading:query():where("id", ">=", 35):where("sensor", "=", 1):explain()
+end
+
+-- The sum of the values of the readings with sensor = n, through the
+-- index when `named`, and how many block folds the sum ran.
+function steps.readingFolds(c, n, named)
+    local q = c.Reading:query():where("sensor", "=", tonumber(n))
+    if named == "named" then
+        q = q:using("by_sensor")
+    end
+    local folds, was = 0, col.start_fold
+    col.start_fold = function(...)
+        folds += 1
+        return was(...)
+    end
+    local ok, sum = pcall(q.sum, q, "value")
+    col.start_fold = was
+    assert(ok, sum)
+    return { sum, folds }
+end
+
+-- 2,059 more readings of sensor 2, and one of sensor 3.
+function steps.manyReadings(c)
+    local rows = {}
+    for i = 41, 2100 do
+        rows[#rows + 1] = { id = i, sensor = if i == 2100 then 3 else 2, value = i }
+    end
+    c.Reading:createMany(rows)
+    return "ok"
 end
 
 function steps.analyzeInside(c)
@@ -393,6 +422,17 @@ def test_column_tables_estimate_id_ranges(run):
     # rows' block, the 40 sensor keys, and finds no more
     assert run("analyze", "Reading", "42") == 1
     assert run("readingExplain") == "id range id [~6 keys over by_sensor ~20]"
+
+
+def test_column_aggregates_fold_blocks_unless_the_index_finds_few_rows(run):
+    # sensor 1 holds 20 of the 40 readings, so the sum folds the blocks
+    assert run("readingFolds", "1", "") == [400, 1]
+    # a named index reads its rows
+    assert run("readingFolds", "1", "named") == [400, 0]
+    assert run("manyReadings") == "ok"
+    # sensor 3 holds 1 of 2,100 readings, fewer than one in 1,024
+    assert run("readingFolds", "3", "") == [2100, 0]
+    assert run("readingFolds", "2", "") == [2203130, 1]
 
 
 def test_an_index_without_statistics_keeps_the_key_counts(run):

@@ -770,6 +770,76 @@ local function field_at(t: any, c: any, pk: number): any
     return if c.bool then x == 1 else x
 end
 
+-- Whether `v op w` holds, as a query condition compares a row's value.
+local function holds(op: string, v: any, w: any): boolean
+    if op == "=" then
+        return v == w
+    elseif op == "~=" then
+        return v ~= w
+    elseif v == nil then
+        return false
+    elseif op == "<" then
+        return v < w
+    elseif op == "<=" then
+        return v <= w
+    elseif op == ">" then
+        return v > w
+    end
+    return v >= w
+end
+
+-- The tests of `conds` that scan can make on a row's stored values, each a
+-- condition's op and value with the column that reads its field: the one
+-- in `cols`, or one of its own for a field the rows leave out. A condition
+-- on a field outside `fields` or on a json field is left to the caller.
+local function tests_of(t: any, g: any, fields: any, cols: { any }, conds: { any }): { any }
+    local out = {}
+    for _, c in conds do
+        local name = c.field
+        if name == "id" then
+            out[#out + 1] = { op = c.op, value = c.value }
+            continue
+        end
+        local col
+        for _, x in cols do
+            if x.name == name then
+                col = x
+            end
+        end
+        if col == nil then
+            col = columns(t, g, fields, { [name] = true })[1]
+        end
+        if col and not col.json then
+            local default
+            for _, d in t.fields do
+                if d.name == name then
+                    default = d.default
+                end
+            end
+            out[#out + 1] = { col = col, op = c.op, value = c.value, default = default }
+        end
+    end
+    return out
+end
+
+-- Whether the row at pk passes `tests` (see tests_of).
+local function passes(t: any, tests: { any }, pk: number): boolean
+    for i = 1, #tests do
+        local x = tests[i]
+        local v = pk
+        if x.col then
+            v = field_at(t, x.col, pk)
+            if v == nil then
+                v = x.default
+            end
+        end
+        if not holds(x.op, v, x.value) then
+            return false
+        end
+    end
+    return true
+end
+
 -- The row at pk of the fields in `cols`, with no defaults.
 local function row_at(t: any, cols: { any }, pk: number): any
     local r = {}
@@ -824,20 +894,27 @@ end
 -- The slots from `a` to `z` of presence block `block`, in order or, with
 -- `back`, highest first, as rows of the fields in `cols`. Calls each(pk, row)
 -- until it answers true, and answers whether it did. With `cut`, it skips
--- the rows that cannot join a top-k scan's rows.
+-- the rows that cannot join a top-k scan's rows, and with `tests` the rows
+-- that fail them.
 local function read_block(t: any, g: any, cols: { any }, block: number, presence: string,
                           a: number, z: number, back: boolean?,
-                          each: (number, any) -> boolean?, cut: any?): boolean
+                          each: (number, any) -> boolean?, cut: any?, tests: { any }?): boolean
     check_presence(g, block, presence)
     local n = #cols
     for i = 1, n do
         cols[i].fb = nil
     end
+    for _, x in tests or {} do
+        if x.col then
+            x.col.fb = nil
+        end
+    end
     local base, pbase = block * g.rows, g.pbase
     for s = if back then z else a, if back then a else z, if back then -1 else 1 do
         if string.byte(presence, pbase + s + 1) == 1 then
             local pk = base + s
-            if cut == nil or cut.n == 0 or joins(t, cut, pk) then
+            if (cut == nil or cut.n == 0 or joins(t, cut, pk))
+                and (tests == nil or passes(t, tests, pk)) then
                 if each(pk, row_at(t, cols, pk)) then
                     return true
                 end
@@ -860,8 +937,13 @@ end
 -- adds 1 to `n` each time it changes, from 0 for no cut yet. Read in id
 -- order, a row then joins when its value sorts before `value`, or in desc
 -- order when it sorts at or past it. A `json` field takes no cut.
+--
+-- `conds` holds conditions each row must meet, each a `field`, `op` and
+-- `value` as a query keeps them. The scan tests them on the stored values
+-- before it builds the row, and leaves the ones it cannot test (see
+-- tests_of) to `each`.
 function scan(t: any, fields: any, lo: string, hi: string, each: (number, any) -> boolean?,
-              first: number?, back: boolean?, need: any?, cut: any?): boolean
+              first: number?, back: boolean?, need: any?, cut: any?, conds: { any }?): boolean
     local g = geometry(t)
     local rows = g.rows
     local from, last, plo, phi = span(t, g, lo, hi)
@@ -880,12 +962,16 @@ function scan(t: any, fields: any, lo: string, hi: string, each: (number, any) -
             cut = nil
         end
     end
+    local tests = if conds and #conds > 0 then tests_of(t, g, fields, cols, conds) else nil
+    if tests and #tests == 0 then
+        tests = nil
+    end
     local page = math.clamp((first or rows * 16) // rows + 1, 1, 16)
     local function run(keys: { string }, values: { string }, i: number): boolean
         local block = lay.present_block(keys[i])
         local base = block * rows
         local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
-        return a <= z and read_block(t, g, cols, block, values[i], a, z, back, each, cut)
+        return a <= z and read_block(t, g, cols, block, values[i], a, z, back, each, cut, tests)
     end
     if back then
         local pos = barch.store.count(plo, phi)
@@ -1120,24 +1206,6 @@ local function value_at(c: any, s: number): any
         return x == 1
     end
     return x
-end
-
--- Whether `v op w` holds, as a query condition compares a row's value.
-local function holds(op: string, v: any, w: any): boolean
-    if op == "=" then
-        return v == w
-    elseif op == "~=" then
-        return v ~= w
-    elseif v == nil then
-        return false
-    elseif op == "<" then
-        return v < w
-    elseif op == "<=" then
-        return v <= w
-    elseif op == ">" then
-        return v > w
-    end
-    return v >= w
 end
 
 -- Keeps the slots of sel[1..n] whose value of source c passes `op w`, and

@@ -350,8 +350,14 @@ A call uses the block loop when all of these hold:
 - Each filter compares a stored field or `id` with a value, through
   `where(field, op, value)` or a `where` expression part such as
   `fare > 120`.
-- The plan reads the table by id. A condition on an indexed field makes the
-  query read rows through that index; `explain` shows the plan.
+- The call reads the table by id. When a condition matches an index,
+  `count` and `aggregate` still read by id unless the index range holds
+  fewer than one row in 1,024 of the table's rows, because reading a row
+  through an index costs about 3,000 times as much as folding it. A
+  `count` whose filters the index keys match exactly counts those keys
+  without reading rows. Call `using(name)` to read through the named index.
+  `aggregatePage` keeps one plan for all its pages, the one `explain`
+  shows, and folds only when that plan reads by id.
 - Each `groupBy` key and aggregate field is a field of the table other than
   a `json` field, with no edge in its path.
 - `aggregate` has no `order`, `limit` or `offset` on the query.

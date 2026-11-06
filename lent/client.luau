@@ -2419,7 +2419,7 @@ local function rows(q: any, loading: boolean?, page: any?, need: any?): { any }
         if blocks then
             first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
             scan = function(lo: string, hi: string, fn: any, limit: number?): boolean
-                return col.scan(tbl.t, tbl.fields, lo, hi, fn, limit, back, scanned, cut)
+                return col.scan(tbl.t, tbl.fields, lo, hi, fn, limit, back, scanned, cut, q.conds)
             end
         elseif rowValues or (unique and not primary) then
             first = if early then math.max(want, 16) elseif budget then budget + 1 else nil
@@ -3221,6 +3221,28 @@ local function group_rows(agg: any): { any }
     return out
 end
 
+-- Reading a column table's rows through a secondary index costs about
+-- 3,000 times what a block fold spends on a row, so a fold reads the blocks
+-- unless the index range holds fewer than one row in INDEX_SHARE.
+local INDEX_SHARE = 1024
+
+-- The plan a fold of column table q's rows reads: q's plan, or the plan by
+-- id when q's plan reads a secondary index that q does not name, unless the
+-- index range holds fewer than one row in INDEX_SHARE.
+local function fold_plan(q: any): any
+    local p = plan(q)
+    if p.ix == nil or p.ix.primary or p.via or p.within or q.use ~= nil then
+        return p
+    end
+    local pq = setmetatable(table.clone(q), Query)
+    pq.use = PRIMARY.name
+    local byId = plan(pq)
+    if plan_keys(q, p) * INDEX_SHARE < plan_keys(q, byId) then
+        return p
+    end
+    return byId
+end
+
 -- Adds q's rows to agg's groups in COLUMNS' block loop, and answers
 -- whether it could. It can when q reads a column table through its ids and
 -- filters with field conditions, and agg's keys and aggregates name the
@@ -3255,7 +3277,7 @@ local function fold_blocks(agg: any, page: any?): boolean
         end
         aggs[i] = a
     end
-    local p = page and page.plan or plan(q)
+    local p = page and page.plan or fold_plan(q)
     if p.ix == nil or not p.ix.primary or p.via or p.within then
         return false
     end
