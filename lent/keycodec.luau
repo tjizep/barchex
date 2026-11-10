@@ -147,6 +147,9 @@ end
 -- Values packed back to back: kinds[i] encodes values[i]. values may have
 -- holes, which pack as null; #kinds says how many there are.
 function pack(kinds: { string }, values: { any }): string
+    if #kinds == 1 then
+        return encode(kinds[1], values[1])
+    end
     local parts = table.create(#kinds)
     for i, kind in kinds do
         parts[i] = encode(kind, values[i])

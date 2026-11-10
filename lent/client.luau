@@ -3208,6 +3208,28 @@ local function keep_group(agg: any, row: any): boolean
     return true
 end
 
+-- Sorts groups by key. Groups often arrive in key order, such as keys that
+-- grow with the ids, and a sort of bare strings runs without calling Luau.
+local function sort_groups(list: { any })
+    local n = #list
+    local i = 2
+    while i <= n and list[i - 1].key < list[i].key do
+        i += 1
+    end
+    if i > n then
+        return
+    end
+    local keys, byKey = table.create(n), {}
+    for j, g in list do
+        keys[j] = g.key
+        byKey[g.key] = g
+    end
+    table.sort(keys)
+    for j, k in keys do
+        list[j] = byKey[k]
+    end
+end
+
 -- One row per group of agg, with the keys' values and each aggregate. The
 -- having, order, offset and limit calls of agg's shape apply; without order
 -- calls, groups come in the order of their keys.
@@ -3216,9 +3238,7 @@ local function group_rows(agg: any): { any }
     if #keys == 0 and #list == 0 then
         list[1] = { key = "", values = {}, acc = {} }
     end
-    table.sort(list, function(a, b)
-        return a.key < b.key
-    end)
+    sort_groups(list)
     if agg.totals then
         set_total(agg, total_acc(agg))
     end
