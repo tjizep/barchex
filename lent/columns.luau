@@ -1109,6 +1109,23 @@ local function source(t: any, g: any, fields: any, name: string): any
              default = default, starts = table.create(sp.rows, 0), off = 0, at = 0 }
 end
 
+-- Reads the value at k through cursor cur into c.buf, which load reuses
+-- while values keep the same size. Answers the buffer, or what the cursor
+-- answered for a missing or removed key. The next read overwrites it.
+local function cursor_read(c: any, cur: any, k: string): any
+    local out = c.buf
+    local size = cur:read(k, out)
+    if type(size) ~= "number" then
+        return size
+    end
+    if out == nil or size ~= buffer.len(out) then
+        out = buffer.create(size)
+        cur:read(k, out)
+        c.buf = out
+    end
+    return out
+end
+
 -- Reads the block of source c that holds id `first`, unless it holds it
 -- already, or notes that the block holds no value. Sets c.off to the slot
 -- of `first` in the block, and c.at to where its f64 starts.
@@ -1122,7 +1139,13 @@ local function load(t: any, c: any, first: number)
     if fb ~= c.fb then
         -- a key removed in this transaction reads as barch.tomb
         local k = block_key(c.prefix, fb)
-        local stored = barch.store.getBufferAt(k, 0)
+        local cur = c.cur
+        local stored
+        if cur and fb >= c.cfb and fb <= c.cfl then
+            stored = cursor_read(c, cur, k)
+        else
+            stored = barch.store.getBufferAt(k, 0)
+        end
         local b = if type(stored) == "buffer" then stored else nil
         if b and c.spec.head and buffer.readu16(b, 2) ~= 0 then
             b = buffer.fromstring(joined(t, c.name, fb, k, buffer.tostring(b)))
@@ -2624,17 +2647,8 @@ end
 -- bounds, in id order, to its groups. Answers true when the budget ran out
 -- first; job.last is then the last id read, and job.seen counts the rows
 -- read.
-function fold(t: any, job: any, lo: string, hi: string): boolean
-    local g = job.g
-    local from, last, plo, phi = span(t, g, lo, hi)
-    if from > last then
-        return false
-    end
-    -- blocks read in an earlier call may have changed since
-    for _, c in job.sources do
-        c.fb = nil
-    end
-    local rows = g.rows
+local function fold_span(job: any, from: number, last: number, plo: string, phi: string): boolean
+    local rows = job.g.rows
     while true do
         local keys, values = barch.store.rangeValues(plo, phi, 16)
         for i, k in keys do
@@ -2650,6 +2664,37 @@ function fold(t: any, job: any, lo: string, hi: string): boolean
         end
         plo = keys[#keys] .. "\2"
     end
+end
+
+function fold(t: any, job: any, lo: string, hi: string): boolean
+    local g = job.g
+    local from, last, plo, phi = span(t, g, lo, hi)
+    if from > last then
+        return false
+    end
+    -- blocks read in an earlier call may have changed since. A cursor over
+    -- each column's blocks in the span reads them without copying them into
+    -- the transaction, and records the span once for COMMITTX
+    local open = barch.store.cursor
+    for _, c in job.sources do
+        c.fb = nil
+        if open and not c.id then
+            local p = c.prefix
+            c.cfb, c.cfl = from // c.rows, last // c.rows
+            c.cur = open(if from == -math.huge then p else block_key(p, c.cfb),
+                         if last == math.huge then kc.after(p) else block_key(p, c.cfl + 1))
+        end
+    end
+    -- a cursor ends with the call or the transaction, so none is kept, even
+    -- past an error
+    local ok, out = pcall(fold_span, job, from, last, plo, phi)
+    for _, c in job.sources do
+        c.cur = nil
+    end
+    if not ok then
+        error(out, 0)
+    end
+    return out
 end
 
 -- Adds the records of a job that ran on barch.vec to its groups' running
