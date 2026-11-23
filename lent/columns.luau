@@ -255,7 +255,13 @@ local LEGACY_TEXT = { rows = LEGACY, text = true, used = 0, slots = 4, lens = 8,
 -- How a field's blocks are laid out: its rows, and for numbers where the
 -- f64s start and an empty block, or for text where each header field, the
 -- lengths and the values start and the longest value kept whole.
-local function new_spec(rows: number, text: boolean, int: boolean): any
+-- Specs and empty presence blocks by their inputs. Each transaction loads
+-- the catalog afresh, so geometries misses once per transaction, and these
+-- keep it from rebuilding empty blocks, which take a loop over every row.
+local made_specs: { [string]: any } = {}
+local made_presence: { [number]: buffer } = {}
+
+local function make_spec(rows: number, text: boolean, int: boolean): any
     if text then
         return { rows = rows, text = true, used = 8, slots = 12, over = 16, distinct = 20,
                  lens = 24, vals = 24 + rows * 4, cap = CAP, head = true }
@@ -273,6 +279,16 @@ local function new_spec(rows: number, text: boolean, int: boolean): any
                  else empty_numbers(8, rows, header(8 + rows * 8, "n", rows)) }
 end
 
+local function new_spec(rows: number, text: boolean, int: boolean): any
+    local key = rows .. (if text then "t" elseif int then "i" else "n")
+    local sp = made_specs[key]
+    if sp == nil then
+        sp = make_spec(rows, text, int)
+        made_specs[key] = sp
+    end
+    return sp
+end
+
 local geometries: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
 
 -- How table t lays out its blocks: the presence rows, where the presence
@@ -288,8 +304,12 @@ local function geometry(t: any): any
               empty = buffer.create(LEGACY + 4), specs = {} }
     else
         local rows = t.rows
-        g = { rows = rows, pbase = 16, plive = 8, empty = header(16 + rows, "p", rows),
-              specs = {} }
+        local empty = made_presence[rows]
+        if empty == nil then
+            empty = header(16 + rows, "p", rows)
+            made_presence[rows] = empty
+        end
+        g = { rows = rows, pbase = 16, plive = 8, empty = empty, specs = {} }
     end
     g.t = t
     geometries[t] = g
