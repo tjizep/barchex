@@ -4275,7 +4275,7 @@ end
 -- that open checked.
 function client(pessimistic: boolean?, app: any?, viewer: any?, free: boolean?,
                 options: any?): any
-    local compiled = mig.load()
+    local compiled = mig.shared()
     if compiled == nil then
         fail("this space has no schema; run MIGRATE first")
     end

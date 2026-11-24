@@ -255,13 +255,8 @@ local function load_fields(t: any)
     end
 end
 
--- The compiled schema in this space's catalog, or nil before the first
--- migration.
-function load(): any
-    local s = barch.graph.get("/lent/compiled")
-    if s == nil then
-        return nil
-    end
+-- The compiled schema in catalog JSON s.
+local function parse(s: string): any
     local c = simdjson.parse(s)
     c.version = num(c.version)
     if c.migration then c.migration.at = num(c.migration.at) end
@@ -276,6 +271,30 @@ function load(): any
         for _, a in v.aggs do a.units, a.scale = num(a.units), num(a.scale) end
     end
     return c
+end
+
+-- The compiled schema in this space's catalog, or nil before the first
+-- migration. The caller may change it.
+function load(): any
+    local s = barch.graph.get("/lent/compiled")
+    return if s == nil then nil else parse(s)
+end
+
+local shared_json, shared_schema = nil, nil
+
+-- The compiled schema as load() answers it, parsed again only when the
+-- catalog changes, for callers that leave it as it is. It reads the catalog
+-- each time, so a transaction still conflicts with a migration that
+-- commits before it does.
+function shared(): any
+    local s = barch.graph.get("/lent/compiled")
+    if s == nil then
+        return nil
+    end
+    if s ~= shared_json then
+        shared_json, shared_schema = s, parse(s)
+    end
+    return shared_schema
 end
 
 local function by_name(list: { any }?): any
