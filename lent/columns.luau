@@ -703,7 +703,8 @@ local function columns(t: any, g: any, fields: any, need: any): { any }
             out[#out + 1] = { name = f.name, prefix = lay.column(t, f.id),
                               okey = lay.overflow(t, f.id), spec = sp,
                               text = TEXT_KINDS[f.kind] == true, json = f.kind == "json",
-                              bool = f.kind == "bool", starts = table.create(sp.rows, 0) }
+                              bool = f.kind == "bool",
+                              starts = if TEXT_KINDS[f.kind] then table.create(sp.rows, 0) else nil }
         end
     end
     return out
@@ -1057,15 +1058,17 @@ function count(t: any, lo: string, hi: string): number
     end
     local n = 0
     while true do
-        local keys, values = barch.store.rangeValues(plo, phi, 256)
-        for i, k in keys do
+        -- a whole block's header counts its rows, so only part blocks are read
+        local keys = barch.store.range(plo, phi, 256)
+        for _, k in keys do
             local base = lay.present_block(k) * rows
             local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
             if a == 0 and z == rows - 1 then
-                n += live(g, values[i])
-            else
+                n += barch.store.getInt32At(k, g.plive) or 0
+            elseif a <= z then
+                local v = barch.store.get(k) or ""
                 for s = a, z do
-                    if string.byte(values[i], pbase + s + 1) == 1 then
+                    if string.byte(v, pbase + s + 1) == 1 then
                         n += 1
                     end
                 end
@@ -1126,7 +1129,8 @@ local function source(t: any, g: any, fields: any, name: string): any
     local sp = spec(g, f)
     return { name = name, prefix = lay.column(t, f.id), okey = lay.overflow(t, f.id), spec = sp,
              rows = sp.rows, text = TEXT_KINDS[f.kind] == true, bool = f.kind == "bool",
-             default = default, starts = table.create(sp.rows, 0), off = 0, at = 0 }
+             default = default, starts = if TEXT_KINDS[f.kind] then table.create(sp.rows, 0) else nil,
+             off = 0, at = 0 }
 end
 
 -- Reads the value at k through cursor cur into c.buf, which load reuses
@@ -1146,6 +1150,35 @@ local function cursor_read(c: any, cur: any, k: string): any
     return out
 end
 
+-- The whole block at k of source c, whose part 0 cursor_read left in c.buf,
+-- read through cursor cur into c.whole, which load reuses while blocks keep
+-- the same size. The part keys sort inside the block's range.
+local function cursor_joined(t: any, c: any, cur: any, k: string, block: number): buffer
+    local first: buffer = c.buf
+    local n = buffer.readu16(first, 2)
+    local sizes, size = table.create(n - 1), buffer.len(first)
+    for p = 1, n - 1 do
+        local got = cur:read(part_key(k, p))
+        if type(got) ~= "number" then
+            fail("table " .. t.name .. " field " .. c.name .. " column block " .. block
+                .. " has lost part " .. p .. " of " .. n)
+        end
+        sizes[p], size = got, size + got
+    end
+    local out = c.whole
+    if out == nil or buffer.len(out) ~= size then
+        out = buffer.create(size)
+        c.whole = out
+    end
+    buffer.copy(out, 0, first)
+    local at = buffer.len(first)
+    for p = 1, n - 1 do
+        cur:read(part_key(k, p), out, at)
+        at += sizes[p]
+    end
+    return out
+end
+
 -- Reads the block of source c that holds id `first`, unless it holds it
 -- already, or notes that the block holds no value. Sets c.off to the slot
 -- of `first` in the block, and c.at to where its f64 starts.
@@ -1161,14 +1194,16 @@ local function load(t: any, c: any, first: number)
         local k = block_key(c.prefix, fb)
         local cur = c.cur
         local stored
-        if cur and fb >= c.cfb and fb <= c.cfl then
+        local through = cur and fb >= c.cfb and fb <= c.cfl
+        if through then
             stored = cursor_read(c, cur, k)
         else
             stored = barch.store.getBufferAt(k, 0)
         end
         local b = if type(stored) == "buffer" then stored else nil
         if b and c.spec.head and buffer.readu16(b, 2) ~= 0 then
-            b = buffer.fromstring(joined(t, c.name, fb, k, buffer.tostring(b)))
+            b = if through then cursor_joined(t, c, cur, k, fb)
+                else buffer.fromstring(joined(t, c.name, fb, k, buffer.tostring(b)))
         end
         if b and c.spec.head then
             check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
@@ -1745,6 +1780,26 @@ local function vectors(conds: { any }, keys: { any }, aggs: { any }): boolean
     return true
 end
 
+-- A job's slot list and group ids for the Luau loops, made on first use:
+-- a table of a block's rows takes longer to make than a short fold runs.
+local function sel_of(job: any): { number }
+    local sel = job.sel
+    if sel == nil then
+        sel = table.create(job.unit, 0)
+        job.sel = sel
+    end
+    return sel
+end
+
+local function gids_of(job: any): { number }
+    local gids = job.gids
+    if gids == nil then
+        gids = table.create(job.unit, 1)
+        job.gids = gids
+    end
+    return gids
+end
+
 -- A fold over the rows of table t: the conditions they must pass, the
 -- fields they group by and the aggregates to add them to. `spec` holds
 --
@@ -1829,8 +1884,7 @@ function start_fold(t: any, fields: any, spec: any): any
     end
     local job = { t = t, g = g, unit = unit, sources = list, derived = derived_list,
                   conds = conds, keys = keys, aggs = aggs, group = spec.group,
-                  budget = spec.budget, seen = 0, records = {}, tree = {}, short = {}, lanes = {},
-                  sel = table.create(unit, 0), gids = table.create(unit, 1) }
+                  budget = spec.budget, seen = 0, records = {}, tree = {}, short = {}, lanes = {} }
     if vec and vectors(conds, keys, aggs) then
         -- each aggregate adds to records that grouper id i keeps at 32 * i,
         -- and finish adds them to group gis[i + 1]
@@ -2119,7 +2173,7 @@ local function luau_rows(job: any, sel: { number }, n: number, full: boolean)
         end
         full = full and n == unit
     end
-    local gids = job.gids
+    local gids = gids_of(job)
     local ks = job.keys
     if #ks == 1 and ks[1].text and ks[1].b then
         text_gids(job, ks[1], sel, n, gids, full)
@@ -2421,18 +2475,19 @@ end
 -- fold_chunk with barch.vec: the selection, group ids and running values
 -- stay in buffers, and each step is one kernel call over the chunk. A text
 -- block with a value it keeps only the start of runs luau_rows.
-local function vector_chunk(job: any, first: number, presence: string, from: number,
-                            a: number, z: number, packed_block: boolean): boolean
+local function vector_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
     local v, unit = job.vec, job.unit
     local selb: buffer = job.selb
     local budget, seen = job.budget, job.seen
     local sel: buffer?, n, more = nil, unit, false
-    if not (a == 0 and z == unit - 1 and (packed_block or packed(presence, from, unit))
-            and (budget == nil or budget - seen >= unit)) then
+    if not (packed_block and (budget == nil or budget - seen >= unit)) then
         -- job.presence holds no rows outside the fold's range
         sel, n = selb, v.mask(job.presence, from, unit, selb)
         if budget ~= nil and n > budget - seen then
             n, more = budget - seen, true
+        elseif n == unit then
+            -- a full chunk reads every slot
+            sel = nil
         end
     end
     job.seen = seen + n
@@ -2442,7 +2497,7 @@ local function vector_chunk(job: any, first: number, presence: string, from: num
     job.last = first + (if sel then buffer.readu32(sel, (n - 1) * 4) else n - 1)
     load_sources(job, first)
     local function in_luau(): boolean
-        local slots = job.sel
+        local slots = sel_of(job)
         if sel then
             for i = 1, n do
                 slots[i] = buffer.readu32(sel, (i - 1) * 4)
@@ -2604,10 +2659,10 @@ end
 local function fold_chunk(job: any, first: number, presence: string, from: number, a: number,
                           z: number, packed_block: boolean): boolean
     if job.vec then
-        return vector_chunk(job, first, presence, from, a, z, packed_block)
+        return vector_chunk(job, first, from, packed_block)
     end
     local unit = job.unit
-    local sel: { number }, n = job.sel, 0
+    local sel: { number }, n = sel_of(job), 0
     local budget, seen = job.budget, job.seen
     local more, full = false, false
     if a == 0 and z == unit - 1 and (packed_block or packed(presence, from, unit))
@@ -2640,16 +2695,25 @@ end
 
 -- Adds the slots from `a` to `z` of a presence block to the job's groups,
 -- a chunk at a time. Answers true when the job's budget ran out before the
--- block's last row.
-local function fold_block(job: any, block: number, presence: string, a: number, z: number): boolean
+-- block's last row. A nil presence means fold_span read the block into
+-- job.presence.
+local function fold_block(job: any, block: number, presence: any, a: number, z: number): boolean
     local g, unit = job.g, job.unit
     local rows, pbase = g.rows, g.pbase
-    check_presence(g, block, presence)
     local whole = a == 0 and z == rows - 1
-    local packed_block = whole and live(g, presence) == rows
+    local pb: buffer = job.presence
+    local packed_block
+    if presence == nil then
+        check_rows(g.t, "presence", block, buffer.readu32(pb, 4), rows)
+        packed_block = whole and buffer.readi32(pb, g.plive) == rows
+    else
+        check_presence(g, block, presence)
+        packed_block = whole and live(g, presence) == rows
+    end
     if job.vec and not (packed_block and job.budget == nil) then
-        local pb: buffer = job.presence
-        buffer.writestring(pb, 0, presence, pbase + rows)
+        if presence ~= nil then
+            buffer.writestring(pb, 0, presence, pbase + rows)
+        end
         buffer.fill(pb, pbase, 0, a)
         buffer.fill(pb, pbase + z + 1, 0, rows - 1 - z)
     end
@@ -2668,14 +2732,39 @@ end
 -- first; job.last is then the last id read, and job.seen counts the rows
 -- read.
 local function fold_span(job: any, from: number, last: number, plo: string, phi: string): boolean
-    local rows = job.g.rows
+    local rows, pb = job.g.rows, job.presence
+    -- a vector job reads each presence block into job.presence through a
+    -- cursor, which is quicker than making a string of it. Legacy blocks are
+    -- longer than job.presence and read as strings
+    local open = barch.store.cursor
+    local cur = if job.vec and open and not job.g.legacy then open(plo, phi) else nil
+    local held = { buf = pb }
     while true do
-        local keys, values = barch.store.rangeValues(plo, phi, 16)
+        local keys, values
+        if cur then
+            keys = barch.store.range(plo, phi, 16)
+        else
+            keys, values = barch.store.rangeValues(plo, phi, 16)
+        end
         for i, k in keys do
             local block = lay.present_block(k)
             local base = block * rows
             local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
-            if a <= z and fold_block(job, block, values[i], a, z) then
+            if a > z then
+                continue
+            end
+            local presence = if values then values[i] else nil
+            if cur then
+                local got = cursor_read(held, cur, k)
+                if type(got) ~= "buffer" then
+                    continue
+                end
+                if got ~= pb then
+                    -- a block of another size: job.presence holds its rows
+                    buffer.copy(pb, 0, got, 0, buffer.len(pb))
+                end
+            end
+            if fold_block(job, block, presence, a, z) then
                 return true
             end
         end
