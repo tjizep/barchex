@@ -192,6 +192,34 @@ local function cell(b: buffer, f: any, s: number): number
     return if x == f.none then NAN else x
 end
 
+-- An int block ends with its nil count, a uint32 after its slots that
+-- counts the slots holding the format's none. A fold over a block that
+-- counts none passes no none to barch.vec, which then takes its fast path.
+-- Blocks written before the count have none and fold as if they held nils.
+local function nils_at(f: any, rows: number): number
+    return SHEAD + rows * f.width
+end
+
+-- Whether int block b, of format f and `rows` slots, counts no nils.
+local function nil_free(b: buffer, f: any, rows: number): boolean
+    local at = nils_at(f, rows)
+    return buffer.len(b) >= at + 4 and buffer.readu32(b, at) == 0
+end
+
+-- The slots of int block b, of format f and `rows` slots, that hold none.
+local function count_nils(b: buffer, f: any, rows: number): number
+    local n, none, w = 0, f.none, f.width
+    for s = 0, rows - 1 do
+        local at = SHEAD + s * w
+        local x = if f == INT8 then buffer.readi8(b, at)
+            elseif f == INT16 then buffer.readi16(b, at) else buffer.readi32(b, at)
+        if x == none then
+            n += 1
+        end
+    end
+    return n
+end
+
 -- Writes x, nil or NaN for nil, into slot s of number block b of format f.
 local function set_cell(b: buffer, f: any, s: number, x: number?)
     local at = SHEAD + s * f.width
@@ -212,15 +240,24 @@ end
 -- The block of format `to` holding the values of number block b, of
 -- format `from` and `rows` slots, written into `out` when it is given.
 local function reformat(b: buffer, from: any, rows: number, to: any, out: buffer?): buffer
-    local w = out or header(SHEAD + rows * to.width, to.tag, rows)
+    local int = to ~= F64
+    local w = out or header(SHEAD + rows * to.width + (if int then 4 else 0), to.tag, rows)
     if out then
         buffer.writeu8(w, 0, 1)
         buffer.writeu8(w, 1, string.byte(to.tag))
         buffer.writeu16(w, 2, 0)
         buffer.writeu32(w, 4, rows)
     end
+    local nils = 0
     for s = 0, rows - 1 do
-        set_cell(w, to, s, cell(b, from, s))
+        local x = cell(b, from, s)
+        set_cell(w, to, s, x)
+        if x ~= x then
+            nils += 1
+        end
+    end
+    if int then
+        buffer.writeu32(w, nils_at(to, rows), nils)
     end
     return w
 end
@@ -268,10 +305,11 @@ local function make_spec(rows: number, text: boolean, int: boolean): any
     end
     local short
     if int then
-        short = header(SHEAD + rows * 2, "h", rows)
+        short = header(SHEAD + rows * 2 + 4, "h", rows)
         for s = 0, rows - 1 do
             buffer.writei16(short, SHEAD + s * 2, NIL_SHORT)
         end
+        buffer.writeu32(short, nils_at(INT16, rows), rows)
     end
     -- an int field's empty number block is made when first needed
     return { rows = rows, data = 8, head = true, short = short,
@@ -1215,6 +1253,7 @@ local function load(t: any, c: any, first: number)
             c.cnil = nil_code(c.cw)
         end
         c.int = not c.text and b ~= nil and c.spec.short ~= nil and int_format(b :: buffer)
+        c.none = if c.int and not nil_free(b :: buffer, c.int, rows) then c.int.none else nil
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
@@ -2382,7 +2421,7 @@ local function key_numbers(job: any, c: any, ks: any, sel: buffer?, n: number)
         kind, b, at = "str", elements(v, c), c.off * 8
     elseif c.int then
         local f = c.int
-        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, f.none
+        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, c.none
     end
     name = name or kind
     local e = ks.groupers[name]
@@ -2553,7 +2592,7 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
                 kind, b, at = "str", elements(v, c), c.off * 8
             elseif c.int then
                 local f = c.int
-                kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, f.none
+                kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, c.none
             end
             n = v.filter(kind, b, at, stride, cd.op, cd.value, none, sel, n, selb)
             sel = selb
@@ -2609,7 +2648,7 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
             job.lanes[f.kind] = lane
         end
         gids = job.gidb
-        local size = lane.grouper:ids(k.b, SHEAD + k.off * f.width, f.width, f.none, sel, n, gids)
+        local size = lane.grouper:ids(k.b, SHEAD + k.off * f.width, f.width, k.none, sel, n, gids)
         if size > #lane.gis then
             new_ids(job, size, lane)
         end
@@ -2645,7 +2684,7 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
         elseif c.int then
             local f = c.int
-            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, f.none, sel, n, gids, recs)
+            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, sel, n, gids, recs)
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
@@ -3010,6 +3049,18 @@ local function numbers(k: string, b: buffer, was: number): number
     return put_block(k, buffer.tostring(b), was)
 end
 
+-- Whether the cell of int format f at offset off of key k holds none. The
+-- 4 bytes from the cell hold it in their low bytes, and in a block without
+-- a nil count the last cell reads in the top bytes of the 4 ending at it.
+local function held_nil(k: string, off: number, f: any): boolean
+    local w = barch.store.getInt32At(k, off)
+    if w == nil then
+        w = barch.store.getInt32At(k, off + f.width - 4)
+        return w ~= nil and w // 2 ^ (32 - 8 * f.width) == f.none
+    end
+    return if f == INT32 then w == f.none else w % 2 ^ (8 * f.width) == 2 ^ (8 * f.width - 1)
+end
+
 -- Stores number `x` in `slot` of number block k, nil as NaN, or as the
 -- format's none in an int block. `was` is the value x replaces, and k is
 -- block `block` of table t's field `name`. An int field's block takes the
@@ -3040,6 +3091,7 @@ local function put_number(t: any, name: string, block: number, sp: any, k: strin
             end
         end
         local at, off = cell_at(k, parts, SHEAD + slot * format.width)
+        local held = format ~= F64 and held_nil(at, off, format)
         local one = CELLS[format]
         if one then
             if format == INT8 then
@@ -3052,6 +3104,24 @@ local function put_number(t: any, name: string, block: number, sp: any, k: strin
             barch.store.setInt32At(at, x or INT32.none, off)
         else
             barch.store.setF64At(at, x or NAN, off)
+            return
+        end
+        -- was answers a field's default for a nil, so the count reads the slot
+        local more = (if x == nil or x ~= x then 1 else 0) - (if held then 1 else 0)
+        if more ~= 0 then
+            local nk, noff = cell_at(k, parts, nils_at(format, sp.rows))
+            local nils = barch.store.getInt32At(nk, noff)
+            if nils then
+                barch.store.setInt32At(nk, nils + more, noff)
+            else
+                -- a block written before the nil count takes one now
+                local b = whole_numbers(t, name, block, k, parts)
+                local size = nils_at(format, sp.rows)
+                local nb = buffer.create(size + 4)
+                buffer.copy(nb, 0, b, 0, size)
+                buffer.writeu32(nb, size, count_nils(nb, format, sp.rows))
+                numbers(k, nb, parts)
+            end
         end
         return
     end
@@ -3602,7 +3672,8 @@ function selftest(): (boolean, string?)
     buffer.writef64(nb, 8 + 3 * 8, 32767)
     local h = reformat(nb, F64, 4, narrowest(nb, F64, 4))
     if wide_n ~= INT32 or int_format(wn) ~= INT32 or cell(wn, INT32, 3) ~= 40000
-        or cell(wn, INT32, 1) == cell(wn, INT32, 1) or int_format(h) ~= INT16
+        or cell(wn, INT32, 1) == cell(wn, INT32, 1) or nil_free(wn, INT32, 4) or buffer.readu32(wn, nils_at(INT32, 4)) ~= 1
+        or int_format(h) ~= INT16
         or buffer.readi16(h, SHEAD) ~= 3 or buffer.readi16(h, SHEAD + 2) ~= NIL_SHORT
         or buffer.readi16(h, SHEAD + 6) ~= 32767 or format_for(2 ^ 31) ~= F64
         or format_for(-2147483647) ~= INT32 or format_for(0.5) ~= F64
@@ -3612,7 +3683,7 @@ function selftest(): (boolean, string?)
     buffer.writef64(nb, 8 + 2 * 8, -127)
     buffer.writef64(nb, 8 + 3 * 8, 127)
     local bb = reformat(nb, F64, 4, narrowest(nb, F64, 4))
-    if int_format(bb) ~= INT8 or buffer.len(bb) ~= SHEAD + 4 or cell(bb, INT8, 0) ~= 3
+    if int_format(bb) ~= INT8 or buffer.len(bb) ~= SHEAD + 8 or cell(bb, INT8, 0) ~= 3
         or cell(bb, INT8, 1) == cell(bb, INT8, 1) or buffer.readi8(bb, SHEAD + 1) ~= -128
         or cell(bb, INT8, 2) ~= -127 or cell(bb, INT8, 3) ~= 127 then
         return false, "byte block from a number block"

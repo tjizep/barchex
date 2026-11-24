@@ -609,6 +609,73 @@ function steps.kinds(_, ...)
 end
 
 -- the keys of Sale's split blocks past their first part
+-- Each int block of Sale's fields `...`, part 0 then its parts, by key,
+-- with its format's width and none.
+local INTS = { b = { 1, -128, "<i1" }, h = { 2, -32768, "<i2" }, i = { 4, -2147483648, "<i4" } }
+local function int_blocks(...)
+    local lay = require("lent.LAYOUT")
+    local kc = require("lent.KEYCODEC")
+    local t = m.load().tables.sale
+    local out = {}
+    for _, name in { ... } do
+        for _, f in t.fields do
+            if f.name == name then
+                local p = lay.column(t, f.id)
+                local keys, values = barch.store.rangeValues(p, kc.after(p) :: string, 1000)
+                for i, v in values do
+                    local k = keys[i]
+                    local int = INTS[string.sub(v, 2, 2)]
+                    if int and string.sub(k, #p + 1, #p + 1) == "i"
+                        and not string.find(k, "/", #p + 1, true) then
+                        local whole = { v }
+                        for part = 1, string.unpack("<I2", v, 3) - 1 do
+                            whole[#whole + 1] = barch.store.get(k .. "/" .. part)
+                        end
+                        out[#out + 1] = { key = k, v = table.concat(whole), int = int,
+                                          split = string.unpack("<I2", v, 3) > 0 }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- "ok" when the nil count that ends each int block of Sale's fields `...`
+-- counts the slots holding none, or the first block that miscounts.
+-- "untrailed" ends the answer for a block without its count.
+function steps.nils(_, ...)
+    local plain = 0
+    for _, b in int_blocks(...) do
+        local v, width, none, fmt = b.v, b.int[1], b.int[2], b.int[3]
+        local rows = string.unpack("<I4", v, 5)
+        local n = 0
+        for s = 0, rows - 1 do
+            if string.unpack(fmt, v, 9 + s * width) == none then n += 1 end
+        end
+        if #v < 8 + rows * width + 4 then
+            plain += 1
+        elseif string.unpack("<I4", v, 9 + rows * width) ~= n then
+            return b.key .. " counts " .. string.unpack("<I4", v, 9 + rows * width)
+                .. " nils and holds " .. n
+        end
+    end
+    return if plain > 0 then "ok untrailed=" .. plain else "ok"
+end
+
+-- Drops the nil count from each whole int block of Sale's fields `...`, as
+-- lent wrote int blocks before it kept one.
+function steps.untrail(_, ...)
+    local n = 0
+    for _, b in int_blocks(...) do
+        if not b.split then
+            barch.store.set(b.key, string.sub(b.v, 1, #b.v - 4))
+            n += 1
+        end
+    end
+    return n
+end
+
 function steps.parts()
     local kc = require("lent.KEYCODEC")
     local p = "lent.c" .. kc.encode("string", "sale")
@@ -1167,6 +1234,40 @@ def test_small_whole_numbers_use_narrow_blocks(run):
 
 
 
+def test_int_blocks_count_their_nils(run):
+    if run.block == "fixed":
+        pytest.skip("a fixed table keeps its number blocks as f64")
+    assert run("fill", "Sale", "1", "600") == run("fill", "Plain", "1", "600")
+    assert run("nils", "qty", "rank") == "ok"
+    cases = ("qty", "vByQty", "expr", "countExpr", "byQty", "aggregate", "value",
+             "defaults", "byRank", "ranked")
+    # clearing, setting, widening, narrowing and deleting keep the count
+    write_both(run, "clear", 5, "rank")
+    write_both(run, "update", 6, {"rank": 3})
+    write_both(run, "update", 7, {"qty": 40000})
+    write_both(run, "clear", 8, "rank")
+    write_both(run, "update", 8, {"rank": 300})
+    write_both(run, "update", 7, {"qty": 1})
+    write_both(run, "delete", 9, {})
+    write_both(run, "create", 2000, {"region": "n", "qty": 70000})
+    assert run("nils", "qty", "rank") == "ok"
+    for case in cases:
+        same(run, "ask", case)
+    # a block without a count folds as if it held nils, and takes a count
+    # with its next write of a nil or over one
+    assert run("untrail", "qty", "rank") > 0
+    assert run("nils", "qty", "rank").startswith("ok untrailed=")
+    for case in cases:
+        same(run, "ask", case)
+    write_both(run, "clear", 10, "rank")
+    write_both(run, "update", 5, {"rank": 4})
+    write_both(run, "create", 2001, {"region": "n", "qty": 2})
+    write_both(run, "create", 601, {"region": "n", "qty": 2})
+    assert run("nils", "qty", "rank").startswith("ok")
+    for case in cases:
+        same(run, "ask", case)
+
+
 def test_int_blocks_split_past_the_value_limit(most):
     run = most
     # 131,072 int8s or int16s fit in one key; as int32s they take 524,296
@@ -1223,6 +1324,7 @@ def test_int_blocks_split_past_the_value_limit(most):
     same(run, "get", "200000")
     write_both(run, "delete", 200000, {})
     assert run("parts") == 0
+    assert run("nils", "qty") == "ok"
     for case in cases:
         same(run, "ask", case)
         answers = same(run, "paths", case)
