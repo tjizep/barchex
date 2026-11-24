@@ -1243,7 +1243,7 @@ local function load(t: any, c: any, first: number)
             b = if through then cursor_joined(t, c, cur, k, fb)
                 else buffer.fromstring(joined(t, c.name, fb, k, buffer.tostring(b)))
         end
-        if b and c.spec.head then
+        if b and c.spec.head and buffer.readu32(b, 4) ~= rows then
             check_rows(t, "field " .. c.name, fb, buffer.readu32(b, 4), rows)
         end
         c.b, c.fb, c.located, c.elements = b, fb, false, false
@@ -2811,14 +2811,7 @@ local function bit_chunk(job: any, first: number, from: number, packed_block: bo
     if n == 0 then
         return false
     end
-    local last = unit - 1
-    if pb then
-        local presence: buffer = job.presence
-        while buffer.readu8(presence, from + last) == 0 do
-            last -= 1
-        end
-    end
-    job.last = first + last
+    -- a bit job has no budget, so it leaves job.last unset
     load_sources(job, first)
     if needs_luau(job) then
         local sel: buffer? = nil
