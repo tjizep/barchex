@@ -1915,11 +1915,42 @@ function start_fold(t: any, fields: any, spec: any): any
         end
     end
     room(unit)
-    for _, d in derived_list do
+    local function ready(d: any)
         for _, st in d.steps do
             st.out = buffer.create(unit * 8)
         end
         d.b = d.steps[#d.steps].out
+    end
+    for _, d in derived_list do
+        ready(d)
+    end
+    -- A program that writes a bit per slot for boolean node n: see run_bits.
+    -- A number compared with a constant compares in barch.vec, from its
+    -- source when it is a field and from a derived source otherwise, and
+    -- other boolean parts work out as derived sources compared with 1.
+    local bytes = (unit + 7) // 8
+    local function leaf(c: any, op: string, value: number): any
+        return { c = c, op = op, value = value, out = buffer.create(bytes) }
+    end
+    local function compile(n: any): any
+        if n.k == "un" and n.op == "not" then
+            return { op = "not", a = compile(n.a), out = buffer.create(bytes) }
+        elseif n.k == "bin" and (n.op == "and" or n.op == "or") then
+            return { op = n.op, a = compile(n.a), b = compile(n.b), out = buffer.create(bytes) }
+        elseif n.k == "bin" and (STEP_ORDER[n.op] or n.op == "==" or n.op == "~=")
+            and (n.a.k == "const") ~= (n.b.k == "const") then
+            local op = if n.op == "==" then "=" else n.op
+            local x, w = n.a, n.b.v
+            if x.k == "const" then
+                x, w, op = n.b, n.a.v, STEP_FLIP[op] or op
+            end
+            local c = if x.k == "field" then get(x.name) else nil
+            if not (c and (c.id or plain(c))) then
+                c = derive(x)
+            end
+            return leaf(c, op, w)
+        end
+        return leaf(derive(n), "=", 1)
     end
     local job = { t = t, g = g, unit = unit, sources = list, derived = derived_list,
                   conds = conds, keys = keys, aggs = aggs, group = spec.group,
@@ -1973,6 +2004,48 @@ function start_fold(t: any, fields: any, spec: any): any
             end
         end
         job.texts = texts
+        if job.budget == nil then
+            -- conditions on numbers pass through bitmaps; see bit_chunk.
+            -- The derived sources of expression conditions only run when
+            -- a chunk folds in Luau
+            local prog, rest, lazy = nil, {}, {}
+            for i, cd in conds do
+                local p
+                local n = spec.conds[i].expr
+                if n then
+                    p = compile(n)
+                    lazy[cd.source] = true
+                elseif type(cd.value) == "number" then
+                    p = leaf(cd.source, cd.op, cd.value)
+                else
+                    rest[#rest + 1] = cd
+                    continue
+                end
+                prog = if prog then { op = "and", a = prog, b = p, out = buffer.create(bytes) }
+                    else p
+            end
+            if prog then
+                local now, later = {}, {}
+                for _, d in derived_list do
+                    if lazy[d] then
+                        later[#later + 1] = d
+                    else
+                        now[#now + 1] = d
+                        if d.b == nil then
+                            ready(d)
+                        end
+                    end
+                end
+                job.prog, job.rest, job.derived, job.lazy = prog, rest, now, later
+                job.pbits = buffer.create(bytes)
+                local text = false
+                for _, a in aggs do
+                    text = text or a.text == true
+                end
+                -- one group and no other test: each aggregate folds the bits
+                job.foldbits = #keys == 0 and #rest == 0 and not text
+            end
+        end
         return job
     end
     -- one number range filter and one plain sum fold in one pass
@@ -2514,76 +2587,72 @@ end
 -- fold_chunk with barch.vec: the selection, group ids and running values
 -- stay in buffers, and each step is one kernel call over the chunk. A text
 -- block with a value it keeps only the start of runs luau_rows.
-local function vector_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
-    local v, unit = job.vec, job.unit
-    local selb: buffer = job.selb
-    local budget, seen = job.budget, job.seen
-    local sel: buffer?, n, more = nil, unit, false
-    if not (packed_block and (budget == nil or budget - seen >= unit)) then
-        -- job.presence holds no rows outside the fold's range
-        sel, n = selb, v.mask(job.presence, from, unit, selb)
-        if budget ~= nil and n > budget - seen then
-            n, more = budget - seen, true
-        elseif n == unit then
-            -- a full chunk reads every slot
-            sel = nil
+-- Adds the chunk's slots in `sel, n` to the job's groups with Luau loops,
+-- once its blocks are loaded. A nil sel holds every slot.
+local function in_luau(job: any, sel: buffer?, n: number)
+    for _, d in job.lazy or {} do
+        for _, st in d.steps do
+            run_step(st, job.unit)
         end
     end
-    job.seen = seen + n
-    if n == 0 then
-        return more
-    end
-    job.last = first + (if sel then buffer.readu32(sel, (n - 1) * 4) else n - 1)
-    load_sources(job, first)
-    local function in_luau(): boolean
-        local slots = sel_of(job)
-        if sel then
-            for i = 1, n do
-                slots[i] = buffer.readu32(sel, (i - 1) * 4)
-            end
-        else
-            table.move(ALL_SLOTS, 1, n, 1, slots)
+    local slots = sel_of(job)
+    if sel then
+        for i = 1, n do
+            slots[i] = buffer.readu32(sel, (i - 1) * 4)
         end
-        luau_rows(job, slots, n, sel == nil)
-        return more
+    else
+        table.move(ALL_SLOTS, 1, n, 1, slots)
     end
+    luau_rows(job, slots, n, sel == nil)
+end
+
+-- Whether the loaded chunk folds in Luau: a text value that a block keeps
+-- only the start of may decide a test or a group, and plain text values
+-- that aggregates read compare in Luau.
+local function needs_luau(job: any): boolean
     for _, c in job.texts do
         if c.b and buffer.readu32(c.b, c.spec.over) > 0 then
-            return in_luau()
+            return true
         end
     end
     for _, ag in job.aggs do
-        -- plain text values compare in Luau
         local c = ag.text and ag.source
         if c and c.b and not c.coded then
-            return in_luau()
+            return true
         end
     end
-    for _, cd in job.conds do
+    return false
+end
+
+-- Keeps the slots in `sel, n` of the loaded chunk whose values pass each of
+-- `conds`, and answers them.
+local function filter_conds(job: any, conds: { any }, sel: buffer?, n: number): (buffer?, number)
+    local v, selb = job.vec, job.selb
+    for _, cd in conds do
         local c = cd.source
         if c.id then
             -- slot s holds id c.base + s
             n = v.filter("f64", SLOTS, 0, 8, cd.op, cd.value - c.base, nil, sel, n, selb)
             sel = selb
             if n == 0 then
-                return more
+                return sel, 0
             end
         elseif c.b == nil then
             -- every row reads nil, which passes only ~=
             if cd.op ~= "~=" then
-                return more
+                return sel, 0
             end
         elseif c.coded then
             local op, code = code_bound(c, cd.op, cd.value)
             if op == "none" then
-                return more
+                return sel, 0
             elseif op ~= "all" then
                 local cw = c.cw
                 n = v.filter(code_kind(cw), c.b, DHEAD + c.off * cw, cw, op, code, c.cnil, sel, n,
                     selb)
                 sel = selb
                 if n == 0 then
-                    return more
+                    return sel, 0
                 end
             end
         else
@@ -2597,10 +2666,17 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
             n = v.filter(kind, b, at, stride, cd.op, cd.value, none, sel, n, selb)
             sel = selb
             if n == 0 then
-                return more
+                return sel, 0
             end
         end
     end
+    return sel, n
+end
+
+-- Adds the slots in `sel, n` of the loaded chunk, which passed the job's
+-- conditions, to its groups. A nil sel holds every slot.
+local function group_and_fold(job: any, sel: buffer?, n: number)
+    local v = job.vec
     local gids: buffer? = nil
     -- the int format's lane that groups this chunk, when its key is in one
     local lane = nil
@@ -2688,6 +2764,142 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
+    end
+end
+
+-- Writes the bits of program node p over the loaded chunk to p.out, and
+-- answers how many are set. Bit s is set when slot s passes. A slot whose
+-- value is nil fails every comparison but ~=, as in run_step.
+local function run_bits(v: any, p: any, unit: number): number
+    local op, out = p.op, p.out
+    if op == "and" or op == "or" then
+        run_bits(v, p.a, unit)
+        run_bits(v, p.b, unit)
+        return (v.bits(op, p.a.out, 0, p.b.out, 0, unit, out, 0))
+    elseif op == "not" then
+        run_bits(v, p.a, unit)
+        return (v.bits("not", p.a.out, 0, nil, 0, unit, out, 0))
+    end
+    local c = p.c
+    if c.id then
+        -- slot s holds id c.base + s
+        return (v.compare("f64", SLOTS, 0, 8, op, p.value - c.base, nil, unit, out, 0))
+    elseif c.b == nil then
+        -- every row reads nil, which passes only ~=
+        local hit = op == "~="
+        buffer.fill(out, 0, if hit then 255 else 0)
+        return if hit then unit else 0
+    elseif c.int then
+        local f = c.int
+        return (v.compare(f.kind, c.b, SHEAD + c.off * f.width, f.width, op, p.value, c.none, unit,
+            out, 0))
+    end
+    return (v.compare("f64", c.b, c.at, 8, op, p.value, nil, unit, out, 0))
+end
+
+-- vector_chunk for a job whose number conditions make one bit program. The
+-- program's bits and the presence bits pick the rows, and with one group
+-- and no other test each aggregate folds them without a slot list.
+local function bit_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
+    local v, unit = job.vec, job.unit
+    local pb: buffer?, n = nil, unit
+    if not packed_block then
+        pb = job.pbits
+        n = v.compare("i8", job.presence, from, 1, "~=", 0, nil, unit, pb, 0)
+    end
+    job.seen += n
+    if n == 0 then
+        return false
+    end
+    local last = unit - 1
+    if pb then
+        local presence: buffer = job.presence
+        while buffer.readu8(presence, from + last) == 0 do
+            last -= 1
+        end
+    end
+    job.last = first + last
+    load_sources(job, first)
+    if needs_luau(job) then
+        local sel: buffer? = nil
+        if pb and n < unit then
+            sel = job.selb
+            v.maskBits(pb, 0, unit, sel)
+        end
+        in_luau(job, sel, n)
+        return false
+    end
+    local bits: buffer = job.prog.out
+    n = run_bits(v, job.prog, unit)
+    if pb and n > 0 then
+        n = v.bits("and", bits, 0, pb, 0, unit, bits, 0)
+    end
+    if n == 0 then
+        return false
+    end
+    if job.foldbits then
+        if #job.records == 0 then
+            new_group(job, {})
+        end
+        grow(job, 1)
+        for _, ag in job.aggs do
+            local c, recs = ag.source, ag.recs
+            if c == nil then
+                -- a count's record counts the rows
+                buffer.writef64(recs, 0, buffer.readf64(recs, 0) + n)
+            elseif c.int then
+                local f = c.int
+                v.foldBits(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, bits, 0, unit,
+                    nil, recs)
+            elseif c.b ~= nil then
+                v.foldBits("f64", c.b, c.at, 8, nil, bits, 0, unit, nil, recs)
+            end
+        end
+        return false
+    end
+    local sel: buffer? = nil
+    if n < unit then
+        sel = job.selb
+        v.maskBits(bits, 0, unit, sel)
+    end
+    sel, n = filter_conds(job, job.rest, sel, n)
+    if n > 0 then
+        group_and_fold(job, sel, n)
+    end
+    return false
+end
+
+local function vector_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
+    if job.prog then
+        return bit_chunk(job, first, from, packed_block)
+    end
+    local v, unit = job.vec, job.unit
+    local selb: buffer = job.selb
+    local budget, seen = job.budget, job.seen
+    local sel: buffer?, n, more = nil, unit, false
+    if not (packed_block and (budget == nil or budget - seen >= unit)) then
+        -- job.presence holds no rows outside the fold's range
+        sel, n = selb, v.mask(job.presence, from, unit, selb)
+        if budget ~= nil and n > budget - seen then
+            n, more = budget - seen, true
+        elseif n == unit then
+            -- a full chunk reads every slot
+            sel = nil
+        end
+    end
+    job.seen = seen + n
+    if n == 0 then
+        return more
+    end
+    job.last = first + (if sel then buffer.readu32(sel, (n - 1) * 4) else n - 1)
+    load_sources(job, first)
+    if needs_luau(job) then
+        in_luau(job, sel, n)
+        return more
+    end
+    sel, n = filter_conds(job, job.conds, sel, n)
+    if n > 0 then
+        group_and_fold(job, sel, n)
     end
     return more
 end

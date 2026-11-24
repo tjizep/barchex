@@ -298,6 +298,187 @@ function offsets(b: buffer, off: number, n: number, start: number, out: buffer):
     return start
 end
 
+-- bitmaps ---------------------------------------------------------------------
+
+-- A bitmap is a buffer whose bit i is bit i % 8 of byte i // 8, as in
+-- buffer.readbits and writebits. Each bitmap argument has a bit offset after
+-- it, and a function that writes a bitmap changes only its n bits. A nil
+-- bitmap to write answers a new buffer.
+
+-- Checks the n bits of bitmap b from bit offset off, which a function reads.
+local function bits_in(fn: string, b: any, off: any, offname: string, n: number, what: string)
+    if type(b) ~= "buffer" then
+        fail(fn, what)
+    end
+    whole(fn, offname, off, 0)
+    if off + n > buffer.len(b) * 8 then
+        fail(fn, "reads past the end of a buffer")
+    end
+end
+
+-- The bitmap a function writes n bits of from bit offset off: b, or a new
+-- buffer when b is nil.
+local function bits_out(fn: string, b: any, off: any, offname: string, n: number,
+                        what: string): buffer
+    whole(fn, offname, off, 0)
+    if b == nil then
+        return buffer.create((off + n + 7) // 8)
+    elseif type(b) ~= "buffer" then
+        fail(fn, what)
+    end
+    if off + n > buffer.len(b) * 8 then
+        fail(fn, "writes past the end of a buffer")
+    end
+    return b
+end
+
+local function bit(b: buffer, i: number): boolean
+    return bit32.btest(buffer.readu8(b, i // 8), bit32.lshift(1, i % 8))
+end
+
+local function set_bit(b: buffer, i: number, on: boolean)
+    local at, m = i // 8, bit32.lshift(1, i % 8)
+    local byte = buffer.readu8(b, at)
+    buffer.writeu8(b, at, if on then bit32.bor(byte, m) else bit32.band(byte, bit32.bnot(m)))
+end
+
+-- Sets bit bitsoff + i of `bits` when element i, for i below n, passes
+-- filter's test `element op value`, and clears it otherwise. Answers how
+-- many it set, and the bitmap.
+function compare(kind: string, b: buffer, off: number, stride: number, op: string, value: any,
+                 none: number?, n: number, bits: buffer?, bitsoff: number): (number, buffer)
+    local code = column("compare", kind, b, off, stride, nil, n)
+    local o = OPS[op]
+    if o == nil then
+        fail("compare", "unknown op " .. tostring(op))
+    end
+    if code == 5 then
+        if type(value) ~= "string" then
+            fail("compare", "kind str compares with a string")
+        end
+    elseif type(value) ~= "number" or value ~= value then
+        fail("compare", "kind " .. kind .. " compares with a number")
+    end
+    local out = bits_out("compare", bits, bitsoff, "bitsoff", n,
+        "takes a buffer or nil for bits")
+    local count = 0
+    for i = 0, n - 1 do
+        local at = off + i * stride
+        local pass
+        if code == 5 then
+            local s = text(b, at)
+            pass = if s == nil then o == 2 else holds(o, s, value)
+        else
+            local x = read(code, b, at)
+            pass = if x == none then o == 2 else holds(o, x, value)
+        end
+        set_bit(out, bitsoff + i, pass)
+        if pass then
+            count += 1
+        end
+    end
+    return count, out
+end
+
+local BIT_OPS = { ["and"] = true, ["or"] = true, xor = true, andnot = true, ["not"] = true }
+
+-- Writes `a op b` bit by bit over n bits into out, op one of and, or, xor,
+-- andnot (a and not b) and not (b nil). Answers how many bits it set, and
+-- out. out may be a or b at the same offset, and must not overlap them at
+-- another.
+function bits(op: string, a: buffer, aoff: number, b: buffer?, boff: number, n: number,
+              out: buffer?, outoff: number): (number, buffer)
+    if not BIT_OPS[op] then
+        fail("bits", "unknown op " .. tostring(op))
+    end
+    whole("bits", "n", n, 0)
+    bits_in("bits", a, aoff, "aoff", n, "takes a buffer of bits")
+    if op == "not" then
+        if b ~= nil then
+            fail("bits", "not takes nil for its second bits")
+        end
+    else
+        if type(b) ~= "buffer" then
+            fail("bits", op .. " takes two buffers of bits")
+        end
+        bits_in("bits", b, boff, "boff", n, "")
+    end
+    local o = bits_out("bits", out, outoff, "outoff", n, "takes a buffer or nil for out")
+    for _, pair in { { a, aoff }, { b, boff } } do
+        local inb, inoff = pair[1], pair[2]
+        if inb == o and inoff ~= outoff and n > 0 and inoff < outoff + n
+            and outoff < inoff + n then
+            fail("bits", "out overlaps an input at another offset")
+        end
+    end
+    local count = 0
+    for i = 0, n - 1 do
+        local x = bit(a, aoff + i)
+        local r
+        if op == "not" then
+            r = not x
+        else
+            local y = bit(b :: buffer, boff + i)
+            if op == "and" then
+                r = x and y
+            elseif op == "or" then
+                r = x or y
+            elseif op == "xor" then
+                r = x ~= y
+            else
+                r = x and not y
+            end
+        end
+        set_bit(o, outoff + i, r)
+        if r then
+            count += 1
+        end
+    end
+    return count, o
+end
+
+-- Writes into `out` the u32 i below n whose bit bitsoff + i is set, in
+-- order, and answers how many it wrote, as mask does for bytes.
+function maskBits(m: buffer, bitsoff: number, n: number, out: buffer): number
+    whole("maskBits", "n", n, 0)
+    bits_in("maskBits", m, bitsoff, "bitsoff", n, "takes a buffer of bits")
+    output("maskBits", out)
+    local count = 0
+    for i = 0, n - 1 do
+        if bit(m, bitsoff + i) then
+            if (count + 1) * 4 > buffer.len(out) then
+                fail("maskBits", "writes past the end of a buffer")
+            end
+            buffer.writeu32(out, count * 4, i)
+            count += 1
+        end
+    end
+    return count
+end
+
+-- fold over the elements i below n whose bit bitsoff + i is set: element i
+-- belongs to group gids[i], or to group 0 when gids is nil.
+function foldBits(kind: string, b: buffer, off: number, stride: number, none: number?,
+                  m: buffer, bitsoff: number, n: number, gids: buffer?, out: buffer)
+    column("foldBits", kind, b, off, stride, nil, n)
+    bits_in("foldBits", m, bitsoff, "bitsoff", n, "takes a buffer of bits")
+    if gids ~= nil and (type(gids) ~= "buffer" or n * 4 > buffer.len(gids)) then
+        fail("foldBits", "takes a buffer of n u32 group ids or nil for gids")
+    end
+    output("foldBits", out)
+    local sel, ids, k = buffer.create(n * 4), if gids then buffer.create(n * 4) else nil, 0
+    for i = 0, n - 1 do
+        if bit(m, bitsoff + i) then
+            buffer.writeu32(sel, k * 4, i)
+            if ids then
+                buffer.writeu32(ids, k * 4, buffer.readu32(gids :: buffer, i * 4))
+            end
+            k += 1
+        end
+    end
+    fold(kind, b, off, stride, none, sel, k, ids, out)
+end
+
 -- groupers --------------------------------------------------------------------
 
 -- A grouper numbers the distinct values of one kind from 0, in the order it
@@ -416,6 +597,15 @@ function selftest(): (boolean, string?)
     if g:ids(codes, 0, 1, 0, nil, 4, gids) ~= 3 or buffer.readu32(gids, 8) ~= 0
         or g:key(1) ~= nil or g:key(2) ~= -1 then
         return false, "grouper i8"
+    end
+    local count, bm = compare("f64", b, 0, 8, ">", 1, nil, 4, nil, 0)
+    if count ~= 2 or buffer.readu8(bm, 0) ~= 10 then
+        return false, "compare f64"
+    end
+    count = bits("not", bm, 0, nil, 0, 4, bm, 0)
+    if count ~= 2 or buffer.readu8(bm, 0) ~= 5 or maskBits(bm, 0, 4, sel) ~= 2
+        or buffer.readu32(sel, 4) ~= 2 then
+        return false, "bits not"
     end
     if not raises(function() filter("u8", b, 0, 8, "=", 1, nil, nil, 4, sel) end,
                   "vec.filter: unknown kind u8")

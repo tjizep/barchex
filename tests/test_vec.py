@@ -55,6 +55,15 @@ local function g17(x)
     return string.format("%.17g", x)
 end
 
+-- a bitmap's bits in order, as 0s and 1s
+local function bit_text(b)
+    local out = table.create(buffer.len(b) * 8)
+    for i = 0, buffer.len(b) * 8 - 1 do
+        out[i + 1] = if buffer.readbits(b, i, 1) == 1 then "1" else "0"
+    end
+    return table.concat(out)
+end
+
 function call(step, impl, ...)
     local vec = vec_of(impl)
     if step == "native" then
@@ -64,6 +73,48 @@ function call(step, impl, ...)
         return if pcall(barch.vec.grouper, "i16") then 2 else 1
     end
     local a = { ... }
+    if step == "bits" then
+        -- op, a, aoff, b or -, boff, n, then out: "a" or "b" for that input,
+        -- "-" for a new buffer, or a byte to fill a buffer of a's size with
+        local x, y = buffer.fromstring(a[2]), if a[4] == "-" then nil else buffer.fromstring(a[4])
+        local out = if a[7] == "a" then x elseif a[7] == "b" then y elseif a[7] == "-" then nil
+            else buffer.create(#a[2])
+        if out and a[7] ~= "a" and a[7] ~= "b" then
+            buffer.fill(out, 0, tonumber(a[7]))
+        end
+        local count, o = vec.bits(a[1], x, tonumber(a[3]), y, tonumber(a[5]), tonumber(a[6]),
+            out, tonumber(a[8]))
+        return { count, bit_text(o) }
+    end
+    if step == "maskBits" then
+        local n = tonumber(a[3])
+        local out = buffer.create(math.max(n, 1) * 4)
+        return indexes(out, vec.maskBits(buffer.fromstring(a[1]), tonumber(a[2]), n, out))
+    end
+    if step == "bitErrors" then
+        local b = buffer.create(16)
+        local bits = buffer.create(2)
+        local out = buffer.create(64)
+        local cases = {
+            function() vec.compare("f64", b, 0, 8, "=", 1, nil, 2, bits, 15) end,
+            function() vec.compare("f64", b, 0, 8, "=", 1, nil, 2, "x", 0) end,
+            function() vec.compare("f64", b, 0, 8, "=", 0 / 0, nil, 2, bits, 0) end,
+            function() vec.bits("nand", bits, 0, bits, 0, 8, nil, 0) end,
+            function() vec.bits("not", bits, 0, bits, 0, 8, nil, 0) end,
+            function() vec.bits("and", bits, 0, nil, 0, 8, nil, 0) end,
+            function() vec.bits("or", bits, 9, bits, 0, 8, nil, 0) end,
+            function() vec.bits("and", bits, 0, bits, 0, 8, bits, 3) end,
+            function() vec.maskBits(bits, 1, 16, out) end,
+            function() vec.foldBits("f64", b, 0, 8, nil, bits, 0, 3, nil, out) end,
+            function() vec.compare("f64", b, 0, 8, "=", 1, nil, 2, bits, 0.5) end,
+        }
+        local msgs = {}
+        for i, f in cases do
+            local ok, err = pcall(f)
+            msgs[i] = if ok then "no error" else tostring(err)
+        end
+        return msgs
+    end
     if step == "errors" then
         local b = buffer.create(16)
         local out = buffer.create(64)
@@ -180,6 +231,34 @@ function call(step, impl, ...)
             list[#list + 1] = if key == nil then "nil"
                 elseif type(key) == "number" then g17(key)
                 else "s:" .. (string.gsub(key, ".", function(c) return string.format("%02x", string.byte(c)) end))
+        end
+        return list
+    end
+    if step == "compare" then
+        -- bits start filled with byte a[10], so bits outside the n stay put
+        local value = if kind == "str" then a[6] else tonumber(a[6])
+        local n, bitsoff = tonumber(a[8]), tonumber(a[9])
+        local bits = nil
+        if a[10] ~= "-" then
+            bits = buffer.create((bitsoff + n + 7) // 8 + 1)
+            buffer.fill(bits, 0, tonumber(a[10]))
+        end
+        local count, out = vec.compare(kind, b, off, stride, a[5], value, opt(a[7]), n, bits,
+            bitsoff)
+        return { count, bit_text(out) }
+    end
+    if step == "foldBits" then
+        local n, gids, groups = tonumber(a[8]), u32s(a[9]), tonumber(a[10])
+        local out = buffer.create(groups * 32)
+        for g = 0, groups - 1 do
+            buffer.writef64(out, g * 32 + 16, math.huge)
+            buffer.writef64(out, g * 32 + 24, -math.huge)
+        end
+        vec.foldBits(kind, b, off, stride, opt(a[5]), buffer.fromstring(a[6]), tonumber(a[7]), n,
+            gids, out)
+        local list = {}
+        for i = 0, groups * 4 - 1 do
+            list[#list + 1] = g17(buffer.readf64(out, i * 8))
         end
         return list
     end
@@ -450,3 +529,118 @@ def test_errors(run):
     # an index in sel past the block raises; the reference's message comes
     # from Luau's buffer checks
     assert got[13] != "no error"
+
+
+def bit_text(bits, size):
+    """The bits as 0s and 1s, bit i of the text being bit i % 8 of byte i // 8,
+    for a buffer of `size` bytes."""
+    return "".join("1" if bits >> i & 1 else "0" for i in range(size * 8))
+
+
+def pack_bits(flags):
+    out = bytearray((len(flags) + 7) // 8)
+    for i, f in enumerate(flags):
+        if f:
+            out[i // 8] |= 1 << (i % 8)
+    return bytes(out)
+
+
+@pytest.mark.parametrize("shape", ["column", "row"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_compare_sets_a_bit_per_element(run, kind, shape):
+    kinds(run, kind)
+    rng = random.Random(f"cmp{kind}{shape}")
+    vals = values(kind, rng)
+    data, off, stride = layout(kind, vals, shape)
+    none = "-" if kind in ("f64", "str") else str(NONE[kind])
+    present = [v for v in vals if v is not None]
+    for op in OPS:
+        w = rng.choice(present)
+        arg = w.encode("latin-1") if kind == "str" else g17(w) if kind == "f64" else str(w)
+        flags = [passes(op, v, w) for v in vals]
+        for bitsoff, fill in [(0, "-"), (0, 0), (64, 255), (5, 0), (13, 255)]:
+            size = (bitsoff + N + 7) // 8 + (0 if fill == "-" else 1)
+            want = 0 if fill == "-" or fill == 0 else (1 << size * 8) - 1
+            for i, f in enumerate(flags):
+                bit = 1 << (bitsoff + i)
+                want = want | bit if f else want & ~bit
+            got = run("compare", kind, data, off, stride, op, arg, none, N, bitsoff, fill)
+            assert got == [sum(flags), bit_text(want, size)], (op, w, bitsoff, fill)
+
+
+def test_bits_combine_bitmaps(run):
+    rng = random.Random("bits")
+    n = 200
+    xs = [rng.random() < 0.5 for _ in range(n + 70)]
+    ys = [rng.random() < 0.3 for _ in range(n + 70)]
+    a, b = pack_bits(xs), pack_bits(ys)
+    size = len(a)
+
+    def as_int(flags):
+        return sum(1 << i for i, f in enumerate(flags) if f)
+
+    fns = {"and": lambda x, y: x and y, "or": lambda x, y: x or y, "xor": lambda x, y: x != y,
+           "andnot": lambda x, y: x and not y, "not": lambda x, y: not x}
+    for op, fn in fns.items():
+        for aoff, boff, outoff, out in [(0, 0, 0, "-"), (0, 0, 0, "a"), (3, 3, 3, "b"),
+                                        (7, 64, 1, 255), (64, 5, 9, 0)]:
+            if op == "not" and out == "b":
+                continue
+            r = [fn(xs[aoff + i], ys[boff + i]) for i in range(n)]
+            if out == "-":
+                base, size_out = 0, (outoff + n + 7) // 8
+            else:
+                base = {"a": as_int(xs), "b": as_int(ys), 255: (1 << size * 8) - 1, 0: 0}[out]
+                size_out = size
+            want = base
+            for i, f in enumerate(r):
+                bit = 1 << (outoff + i)
+                want = want | bit if f else want & ~bit
+            got = run("bits", op, a, aoff, "-" if op == "not" else b, boff, n, out, outoff)
+            assert got == [sum(r), bit_text(want, size_out)], (op, aoff, boff, outoff, out)
+
+
+def test_mask_bits_lists_the_set_bits(run):
+    flags = [i % 3 == 0 or i % 7 == 1 for i in range(150)]
+    bits = pack_bits(flags)
+    assert run("maskBits", bits, 0, 150) == [i for i, f in enumerate(flags) if f]
+    assert run("maskBits", bits, 5, 100) == [i for i in range(100) if flags[5 + i]]
+    assert run("maskBits", bits, 0, 0) == []
+
+
+@pytest.mark.parametrize("shape", ["column", "row"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_fold_bits_folds_the_set_bits(run, kind, shape):
+    kinds(run, kind)
+    rng = random.Random(f"foldbits{kind}{shape}")
+    vals = values(kind, rng)
+    if kind == "i64":
+        vals = [None if v is None else v // 2**12 for v in vals]
+    data, off, stride = layout(kind, vals, shape)
+    none = "-" if kind in ("f64", "str") else str(NONE[kind])
+    flags = [rng.random() < 0.4 for _ in range(N + 11)]
+    for bitsoff in (0, 11):
+        bits = pack_bits(flags)
+        picked = [vals[i] for i in range(N) if flags[bitsoff + i]]
+        got = run("foldBits", kind, data, off, stride, none, bits, bitsoff, N, "-", 1)
+        same_records(got, records(kind, picked, [0] * len(picked), 1), kind)
+        gids = [rng.randrange(4) for _ in range(N)]
+        mine = [gids[i] for i in range(N) if flags[bitsoff + i]]
+        got = run("foldBits", kind, data, off, stride, none, bits, bitsoff, N, csv(gids), 4)
+        same_records(got, records(kind, picked, mine, 4), kind)
+
+
+def test_bit_errors(run):
+    assert run("bitErrors") == [
+        "vec.compare: writes past the end of a buffer",
+        "vec.compare: takes a buffer or nil for bits",
+        "vec.compare: kind f64 compares with a number",
+        "vec.bits: unknown op nand",
+        "vec.bits: not takes nil for its second bits",
+        "vec.bits: and takes two buffers of bits",
+        "vec.bits: reads past the end of a buffer",
+        "vec.bits: out overlaps an input at another offset",
+        "vec.maskBits: reads past the end of a buffer",
+        "vec.foldBits: reads past the end of a buffer",
+        "vec.compare: bitsoff must be a whole number from 0",
+    ]

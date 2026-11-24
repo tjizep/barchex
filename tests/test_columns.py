@@ -305,6 +305,27 @@ function cases.vRegion(t)
         :groupBy("region"):aggregate(STATS))
 end
 
+-- boolean where expressions, whose comparisons with constants make bitmaps
+-- that barch.vec combines and folds
+function cases.bAnd(t) return t:query():where("qty > 1 and qty < 4"):sum("score") end
+function cases.bOr(t) return row_text(t:query():where("score < 1 or at >= 7e8"):aggregate(STATS)) end
+function cases.bNot(t) return t:query():where("not (score >= 2) and id > 100"):count() end
+function cases.bEq(t) return t:query():where("qty == 2 or qty ~= 3 and score ~= 2.5"):count() end
+function cases.bFlip(t) return t:query():where("4 > qty and 1e8 <= at"):sum("qty") end
+function cases.bIds(t) return t:query():where("not (id < 1000) and not (id > 2500)"):sum("qty") end
+function cases.bDerived(t) return t:query():where("qty + 1 > 3 or score < 1"):sum("score") end
+function cases.bFields(t) return t:query():where("score * 2 >= at / 1e8 or qty == 1"):count() end
+function cases.bDefault(t) return t:query():where("rank > 5 and qty < 3"):count() end
+function cases.bFieldAnd(t)
+    return t:query():where("score", ">", 1):where("qty < 4 or at < 2e8"):sum("score")
+end
+function cases.bGrouped(t)
+    return rows_text(t:query():where("score > 1 and qty < 4"):groupBy("region"):aggregate(STATS))
+end
+function cases.bText(t)
+    return t:query():where("qty >= 2 and score < 3"):where("region", "~=", "e"):count()
+end
+
 -- groups by 2 and 3 keys, which barch.vec folds as one key
 function cases.vPair(t) return rows_text(t:query():groupBy("region", "state"):aggregate(STATS)) end
 function cases.vNumbers(t)
@@ -378,6 +399,20 @@ function steps.vectored(c, tname, name)
     col.start_fold = was
     assert(ok, err)
     return all
+end
+
+-- whether each block fold case `name` ran combined its conditions as bits
+function steps.bitwise(c, tname, name)
+    local all, folds, was = true, 0, col.start_fold
+    col.start_fold = function(...)
+        local job = was(...)
+        all, folds = all and job.prog ~= nil, folds + 1
+        return job
+    end
+    local ok, err = pcall(cases[name], c[tname])
+    col.start_fold = was
+    assert(ok, err)
+    return all and folds > 0
 end
 
 -- how many block folds case `name` ran
@@ -911,6 +946,8 @@ VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoT
                 "vRegion", "regionOps", "vTextEnds", "xWhere", "xFields", "xNot", "xNeg", "xEven",
                 "xDefault", "xFlip", "xValues", "vPair", "vNumbers", "vTriple", "vTripleText",
                 "vPairPaged"]
+BIT_CASES = ["bAnd", "bOr", "bNot", "bEq", "bFlip", "bIds", "bDerived", "bFields", "bFieldAnd",
+             "bGrouped", "bText"]
 
 
 def test_vector_kernels_answer_what_luau_loops_answer(run):
@@ -929,6 +966,12 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
         assert len(set(answers)) == 1, (case, answers)
     for case in ["vPair", "vNumbers", "vTriple", "vTripleText", "vPairPaged"]:
         assert run("vectored", "Sale", case) == 1, case
+    # a field with a default takes the Luau loops
+    for case in BIT_CASES + ["bDefault"]:
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+    for case in BIT_CASES:
+        assert run("bitwise", "Sale", case) == 1, case
 
 
 def test_expressions_fold_over_column_blocks(run):
