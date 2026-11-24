@@ -61,6 +61,14 @@ Output buffers come from the caller, so one set serves block after block.
 An output may be the same buffer as `sel`; writes never pass reads, so
 in-place compaction works.
 
+The bitmap functions hold one bit per element. Bit `i` of a bitmap is bit
+`i % 8` of byte `i // 8`, as in `buffer.readbits` and `buffer.writebits`.
+Each bitmap argument is followed by its bit offset, so a call can use part
+of a larger bitmap. A function that writes a bitmap changes only its `n`
+bits from that offset and leaves the other bits of the buffer as they were.
+Pass `nil` for an output bitmap to get a new buffer of `(off + n + 7) // 8`
+bytes.
+
 ## Functions
 
 ### `vec.mask(m, off, n, out) -> count`
@@ -150,6 +158,58 @@ in `out`: element i is the start of value i and its length + 1. A nil
 element's start is where the next value starts. Answers the byte after the
 last value. lent's text blocks store their values this way.
 
+### Bitmap functions
+
+lent uses these four functions for boolean `where` expressions such as
+`where("age > 10 and age < 20 or weight < 100")`. `compare` sets a bit for
+each comparison with a constant, `bits` combines the bitmaps, and `foldBits`
+folds the rows whose bits are set. When other conditions or groups follow,
+`maskBits` turns the bitmap into a selection for `filter`, `grouper` and
+`fold`.
+
+#### `vec.compare(kind, b, off, stride, op, value, none, n, bits, bitsoff) -> count, bits`
+
+Sets bit `bitsoff + i` of `bits` when element `i`, for `i` from 0 to
+`n - 1`, passes `element op value`, and clears it otherwise. Answers how
+many bits it set and the bitmap it wrote. `compare` tests elements exactly
+as `filter` does, including every kind, op and nil rule. It reads all `n`
+elements, with no `sel`.
+
+A NaN `value` raises an error.
+
+#### `vec.bits(op, a, aoff, b, boff, n, out, outoff) -> count, out`
+
+Writes `a op b` bit by bit over `n` bits into `out`, and answers how many
+bits it set and `out`.
+
+| `op` | bit result | `b` |
+|---|---|---|
+| `and` | `a` and `b` | bitmap |
+| `or` | `a` or `b` | bitmap |
+| `xor` | `a` differs from `b` | bitmap |
+| `andnot` | `a` and not `b` | bitmap |
+| `not` | not `a` | `nil` |
+
+`out` may be `a` or `b` at the same offset, so `bits("and", x, 0, y, 0, n,
+x, 0)` updates `x` in place. Using `out` at another offset that overlaps an
+input raises an error.
+
+#### `vec.maskBits(bits, bitsoff, n, out) -> count`
+
+Writes the u32 index `i` of each set bit `bitsoff + i`, for `i` from 0 to
+`n - 1`, into `out`, in order, and answers how many it wrote. It is `mask`
+for bitmaps. Size `out` as `4 * n` bytes; a smaller `out` raises an error
+when the set bits do not fit.
+
+#### `vec.foldBits(kind, b, off, stride, none, bits, bitsoff, n, gids, out)`
+
+Folds into `out` each element `i`, for `i` from 0 to `n - 1`, whose bit
+`bitsoff + i` is set, with the records and rules of `fold`.
+
+Element `i` belongs to group `gids[i]`, a u32, or to group 0 when `gids` is
+`nil`. This indexing differs from `fold`, where `gids` lists one id per
+candidate. Pass the ids of all `n` elements here.
+
 ## Errors
 
 Raise these messages, with no position prefix (as `error(msg, 0)` does). The
@@ -167,6 +227,16 @@ tests check them exactly.
 | `filterIn` with another kind | `vec.filterIn: takes kind i8, i16 or i32` |
 | `gids` shorter than `4 * n` | `vec.fold: takes a buffer of n u32 group ids or nil for gids` |
 | `mask` or `offsets` past the end | `vec.mask: reads past the end of a buffer` |
+| `compare` with a NaN value | `vec.compare: kind f64 compares with a number` |
+| an input bitmap shorter than its offset + `n` bits | `vec.bits: reads past the end of a buffer` |
+| an output bitmap shorter than its offset + `n` bits, or `maskBits` output too short | `vec.compare: writes past the end of a buffer` |
+| an output bitmap that is neither a buffer nor `nil` | `vec.compare: takes a buffer or nil for bits` |
+| a bit offset below 0 or fractional | `vec.compare: bitsoff must be a whole number from 0` |
+| `bits` with an unknown op | `vec.bits: unknown op nand` |
+| `bits` `not` with a second bitmap | `vec.bits: not takes nil for its second bits` |
+| `bits` with another op and no second bitmap | `vec.bits: and takes two buffers of bits` |
+| `bits` output overlapping an input at another offset | `vec.bits: out overlaps an input at another offset` |
+| `foldBits` `gids` shorter than `4 * n` | `vec.foldBits: takes a buffer of n u32 group ids or nil for gids` |
 | `grouper` with an unknown kind | `vec.grouper: unknown kind u8` |
 | `g:key` with an id it doesn't hold | `vec.key: has no group 0` |
 
