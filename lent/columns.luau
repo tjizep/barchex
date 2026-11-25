@@ -17,8 +17,11 @@
 --
 --   presence   a 16-byte header, then a byte per slot, 1 for a slot that
 --              holds a row. The header is 1, "p", 0 as a uint16, the rows,
---              the rows held, and 0, as uint32s. Without `block`: the 1024
---              bytes, then the rows held as an int32.
+--              the rows held, and the end, as uint32s. The end is one past
+--              the highest slot marked since the block was made, so no row
+--              lies at or above it; it is 0 in a block made before lent
+--              kept it. Without `block`: the 1024 bytes, then the rows held
+--              as an int32.
 --   number     an 8-byte header (1, "n", 0, the rows), then 8 bytes per
 --              slot, an f64, for int, float and what ROWCODEC stores as
 --              those, and bool as 1 and 0. NaN is nil, since every row
@@ -663,6 +666,15 @@ end
 local function live(g: any, presence: string): number
     return (string.unpack("<i4", presence, g.plive + 1))
 end
+
+-- A presence block's end: one past its highest marked slot, or 0 when the
+-- block does not keep one.
+local function block_end(presence: string): number
+    return (string.unpack("<i4", presence, 13))
+end
+
+-- mark()'s rows held and end, written together.
+local LIVE_END = buffer.create(8)
 
 local function check_presence(g: any, block: number, presence: string)
     if not g.legacy then
@@ -2841,8 +2853,9 @@ end
 -- vector_chunk for a job whose number conditions make one bit program. The
 -- program's bits and the presence bits pick the rows, and with one group
 -- and no other test each aggregate folds them without a slot list.
-local function bit_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
-    local v, unit = job.vec, job.unit
+local function bit_chunk(job: any, first: number, from: number, packed_block: boolean,
+                         unit: number): boolean
+    local v = job.vec
     local pb: buffer?, n = nil, unit
     if not packed_block then
         pb = job.pbits
@@ -2903,11 +2916,12 @@ local function bit_chunk(job: any, first: number, from: number, packed_block: bo
     return false
 end
 
-local function vector_chunk(job: any, first: number, from: number, packed_block: boolean): boolean
+local function vector_chunk(job: any, first: number, from: number, packed_block: boolean,
+                            unit: number): boolean
     if job.prog then
-        return bit_chunk(job, first, from, packed_block)
+        return bit_chunk(job, first, from, packed_block, unit)
     end
-    local v, unit = job.vec, job.unit
+    local v = job.vec
     local selb: buffer = job.selb
     local budget, seen = job.budget, job.seen
     local sel: buffer?, n, more = nil, unit, false
@@ -2944,7 +2958,10 @@ end
 local function fold_chunk(job: any, first: number, presence: string, from: number, a: number,
                           z: number, packed_block: boolean): boolean
     if job.vec then
-        return vector_chunk(job, first, from, packed_block)
+        -- the kernels read the slots up to the last one the fold can hold,
+        -- in whole words
+        return vector_chunk(job, first, from, packed_block,
+            math.min(job.unit, (z + 64) // 64 * 64))
     end
     local unit = job.unit
     local sel: { number }, n = sel_of(job), 0
@@ -2985,14 +3002,27 @@ end
 local function fold_block(job: any, block: number, presence: any, a: number, z: number): boolean
     local g, unit = job.g, job.unit
     local rows, pbase = g.rows, g.pbase
-    local whole = a == 0 and z == rows - 1
     local pb: buffer = job.presence
-    local packed_block
+    local stop
     if presence == nil then
         check_rows(g.t, "presence", block, buffer.readu32(pb, 4), rows)
-        packed_block = whole and buffer.readi32(pb, g.plive) == rows
+        stop = buffer.readi32(pb, 12)
     else
         check_presence(g, block, presence)
+        stop = if g.legacy then 0 else block_end(presence)
+    end
+    -- no row lies at or past the block's end
+    if stop > 0 and stop <= z then
+        z = stop - 1
+        if a > z then
+            return false
+        end
+    end
+    local whole = a == 0 and z == rows - 1
+    local packed_block
+    if presence == nil then
+        packed_block = whole and buffer.readi32(pb, g.plive) == rows
+    else
         packed_block = whole and live(g, presence) == rows
     end
     if job.vec and not (packed_block and job.budget == nil) then
@@ -3703,7 +3733,17 @@ local function mark(t: any, g: any, block: number, slot: number, on: boolean,
         barch.store.setBufferAt(key, g.empty, 0)
     end
     barch.store.setBufferAt(key, if on then PRESENT else ABSENT, g.pbase + slot)
-    barch.store.setInt32At(key, n, g.plive)
+    -- a block made before ends were kept keeps 0, since rows may lie past
+    -- any slot it marks
+    local stop = if presence == nil or g.legacy then 0 else block_end(presence)
+    if on and not g.legacy and (presence == nil or stop > 0 and slot >= stop) then
+        -- the rows held and the end are next to each other
+        buffer.writei32(LIVE_END, 0, n)
+        buffer.writei32(LIVE_END, 4, slot + 1)
+        barch.store.setBufferAt(key, LIVE_END, g.plive)
+    else
+        barch.store.setInt32At(key, n, g.plive)
+    end
     return n, presence
 end
 

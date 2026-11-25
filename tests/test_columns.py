@@ -609,6 +609,23 @@ function steps.keys()
     return simdjson.encode(out)
 end
 
+-- the end each of Sale's presence blocks keeps, in block order, or with
+-- "clear" sets each to 0, as in a block made before lent kept ends
+function steps.ends(_, clear)
+    local t = { key = "sale", id = "int" }
+    local lay = require("lent.LAYOUT")
+    local kc = require("lent.KEYCODEC")
+    local p = lay.present(t)
+    local out = {}
+    for _, k in barch.store.range(p, kc.after(p), 100) do
+        if clear == "clear" then
+            barch.store.setInt32At(k, 0, 12)
+        end
+        out[#out + 1] = barch.store.getInt32At(k, 12)
+    end
+    return simdjson.encode(out)
+end
+
 -- text big enough to pass a block's limit in `n` rows
 function steps.huge(c, from, n, size)
     local text = string.rep("x", size)
@@ -1058,6 +1075,30 @@ def test_rows_use_blocks_and_leave_with_their_last_row(run):
     write_both(run, "delete", 1030, {})
     assert json.loads(run("keys")) == {"present": 0, "fields": 0, "rows": 0}
     assert run("ask", "Sale", "count") == 0
+
+
+def test_presence_blocks_keep_their_end(run, request):
+    if "fixed" in request.node.name:
+        pytest.skip("a table without `block` keeps no presence header")
+    # slot 900 and those past it hold no row, so a fold reads up to slot 899
+    for pk in (3, 899, 5, 1030):
+        write_both(run, "create", pk, {"region": "n", "qty": pk})
+    assert json.loads(run("ends")) == [900, 7]
+    write_both(run, "delete", 899, {})
+    assert json.loads(run("ends")) == [900, 7]
+    for case in ("count", "all", "byRegion"):
+        same(run, "ask", case)
+    # a block made before lent kept ends may hold rows past any slot it
+    # marks, so it keeps 0 and its folds read every slot
+    assert json.loads(run("ends", "clear")) == [0, 0]
+    write_both(run, "create", 1000, {"region": "s", "qty": 2})
+    write_both(run, "create", 4, {"region": "s", "qty": 4})
+    assert json.loads(run("ends")) == [0, 0]
+    for case in ("count", "all", "byRegion"):
+        same(run, "ask", case)
+    for case in ["vAll", "vEq", "bAnd", "bNot"]:
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
 
 
 def test_a_cleared_slot_comes_back_empty(run):
