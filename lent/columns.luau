@@ -1156,6 +1156,32 @@ end
 -- of any block it reads, so each chunk lies in one block of every field.
 -- Slots in a fold count from the chunk's first id.
 
+-- Block-sized buffers a finished fold leaves for the next, by size: making
+-- and collecting them for each fold costs more than a short fold runs. A
+-- buffer taken here holds whatever the last fold wrote.
+local spare: { [number]: { buffer } } = {}
+
+local function take(size: number): buffer
+    local list = spare[size]
+    local b = if list then table.remove(list) else nil
+    return b or buffer.create(size)
+end
+
+local function give(b: buffer?)
+    if b == nil then
+        return
+    end
+    local size = buffer.len(b)
+    local list = spare[size]
+    if list == nil then
+        list = {}
+        spare[size] = list
+    end
+    if #list < 8 then
+        list[#list + 1] = b
+    end
+end
+
 -- A field a fold reads: "id", which reads each row's id, or a field's
 -- blocks, with the value a slot without one reads as.
 local function source(t: any, g: any, fields: any, name: string): any
@@ -1191,7 +1217,7 @@ local function cursor_read(c: any, cur: any, k: string): any
         return size
     end
     if out == nil or size ~= buffer.len(out) then
-        out = buffer.create(size)
+        out = take(size)
         cur:read(k, out)
         c.buf = out
     end
@@ -1215,7 +1241,7 @@ local function cursor_joined(t: any, c: any, cur: any, k: string, block: number)
     end
     local out = c.whole
     if out == nil or buffer.len(out) ~= size then
-        out = buffer.create(size)
+        out = take(size)
         c.whole = out
     end
     buffer.copy(out, 0, first)
@@ -1968,8 +1994,8 @@ function start_fold(t: any, fields: any, spec: any): any
         -- each aggregate adds to records that grouper id i keeps at 32 * i,
         -- and finish adds them to group gis[i + 1]
         job.vec, job.gis, job.capacity = vec, if #keys == 0 then { 1 } else {}, 0
-        job.presence = buffer.create(g.pbase + g.rows)
-        job.selb, job.gidb = buffer.create(unit * 4), buffer.create(unit * 4)
+        job.presence = take(g.pbase + g.rows)
+        job.selb, job.gidb = take(unit * 4), take(unit * 4)
         for _, a in aggs do
             if a.source and a.source.text then
                 -- see fold_text
@@ -3119,6 +3145,15 @@ end
 function finish(job: any)
     if job.vec then
         add_records(job)
+        give(job.presence)
+        give(job.selb)
+        give(job.gidb)
+        job.presence, job.selb, job.gidb = nil, nil, nil
+        for _, c in job.sources do
+            give(c.buf)
+            give(c.whole)
+            c.buf, c.whole = nil, nil
+        end
     end
     for gi, g in job.records do
         for _, a in job.aggs do
