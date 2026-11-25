@@ -2983,6 +2983,34 @@ local function fold_span(job: any, from: number, last: number, plo: string, phi:
     local open = barch.store.cursor
     local cur = if job.vec and open and not job.g.legacy then open(plo, phi) else nil
     local held = { buf = pb }
+    if cur and from ~= -math.huge then
+        -- a span that starts at an id reads its presence blocks by number,
+        -- and lists a key only to step over a gap: each range call costs
+        -- about as much as reading a dozen blocks
+        local t, block = job.g.t, from // rows
+        while block * rows <= last do
+            local k = lay.present(t, block)
+            local got = cursor_read(held, cur, k)
+            if type(got) ~= "buffer" then
+                local found = barch.store.range(k, phi, 1)[1]
+                if found == nil then
+                    return false
+                end
+                block = math.max(lay.present_block(found), block + 1)
+                continue
+            end
+            if got ~= pb then
+                buffer.copy(pb, 0, got, 0, buffer.len(pb))
+            end
+            local base = block * rows
+            local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
+            if fold_block(job, block, nil, a, z) then
+                return true
+            end
+            block += 1
+        end
+        return false
+    end
     while true do
         local keys, values
         if cur then

@@ -974,6 +974,16 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
         assert run("bitwise", "Sale", case) == 1, case
 
 
+def test_folds_from_an_id_step_over_empty_presence_blocks(run):
+    # no rows from 301 to 2800: a fold that starts at an id reads its presence
+    # blocks by number and lists keys to get past the ones that are missing
+    for lo, hi in [(1, 300), (2801, 3100)]:
+        assert run("fill", "Sale", str(lo), str(hi)) == run("fill", "Plain", str(lo), str(hi))
+    for case in ["vIds", "vSpans", "bNot", "bIds", "ranged"]:
+        answers = same(run, "paths", case)
+        assert len(set(answers)) == 1, (case, answers)
+
+
 def test_expressions_fold_over_column_blocks(run):
     for lo in range(1, 3101, 500):
         hi = str(min(lo + 499, 3100))
