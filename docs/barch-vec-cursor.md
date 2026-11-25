@@ -163,32 +163,38 @@ These follow in this repository once barch has the change and
 
 ## Measurements
 
-Measured on barch `0f6d0fff6219`, a Ryzen 9 7940HS (1 MB L2 per core, 16 MB
-L3), with 524,288 rows.
+Measured on a Ryzen 9 7940HS (1 MB L2 per core, 16 MB L3) with 524,288
+rows. The copy and query figures come from barch `0f6d0fff6219`, and the
+kernel figures from `887548a`, which folds f64 `vec.foldBits` with vector
+code.
 
 `cur:read` copies at about 25 ns per KB above 64 KB, with no step at
 64 KB. Per slot, that is about 0.025 ns for presence and i8 columns,
 0.05 ns for i16 and 0.2 ns for f64.
 
 The kernels cost the same per slot from 4K to 1M slots, so block size and
-cache size don't change their speed:
+cache size don't change their speed. These are the AVX-512 figures, with
+about 99% of the bits set:
 
 | kernel | ns per slot |
 |---|---:|
-| `vec.compare` i8 | 0.09 |
-| `vec.compare` i16 | 0.10 |
-| `vec.compare` f64 | 0.17 |
-| `vec.bits` and | 0.06 |
-| `vec.foldBits` i16 | 0.18 |
-| `vec.foldBits` f64 | 1.4 |
+| `vec.compare` i8 | 0.07 |
+| `vec.compare` i16 | 0.09 |
+| `vec.compare` f64 | 0.15 |
+| `vec.bits` and | 0.05 |
+| `vec.foldBits` i16 | 0.13 |
+| `vec.foldBits` f64 | 0.18 |
+
+Before `887548a`, f64 `vec.foldBits` took 1.14 ns per slot, because it
+folded partly set bits one element at a time. With AVX2 it now takes
+0.22 ns.
 
 Outside a transaction, `age > 10 sum` takes about 0.55 ns per row. Copying
 its presence block and one or two i16 blocks takes 0.075 to 0.125 ns of
 that. Removing the copies should make large i8 and i16 scans 10 to 20%
-faster, and f64 scans up to 30% faster.
-
-`vec.foldBits` on f64 costs eight times the i16 kernel and probably runs
-scalar. Fix it separately; it limits f64 sums more than the copy does.
+faster. An f64 sum filtered on an i16 column spends about 0.40 ns per row
+in its kernels and 0.275 ns copying, so removing the copies should make it
+up to 40% faster.
 
 ## Testing
 
