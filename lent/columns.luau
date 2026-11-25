@@ -1679,6 +1679,14 @@ local function derived(n: any, get: (string) -> any): any
     return { derived = true, steps = steps, off = 0, at = 0 }
 end
 
+-- Gives derived source d's steps their values for chunks of `unit` slots.
+local function ready(d: any, unit: number)
+    for _, st in d.steps do
+        st.out = buffer.create(unit * 8)
+    end
+    d.b = d.steps[#d.steps].out
+end
+
 -- The values of operand o over the loaded chunk: a buffer and where its
 -- f64s start, or nil and a constant.
 local function operand(o: any, unit: number): (buffer?, number, number)
@@ -1925,15 +1933,6 @@ function start_fold(t: any, fields: any, spec: any): any
         end
     end
     room(unit)
-    local function ready(d: any)
-        for _, st in d.steps do
-            st.out = buffer.create(unit * 8)
-        end
-        d.b = d.steps[#d.steps].out
-    end
-    for _, d in derived_list do
-        ready(d)
-    end
     -- A program that writes a bit per slot for boolean node n: see run_bits.
     -- A number compared with a constant compares in barch.vec, from its
     -- source when it is a field and from a derived source otherwise, and
@@ -2041,9 +2040,6 @@ function start_fold(t: any, fields: any, spec: any): any
                         later[#later + 1] = d
                     else
                         now[#now + 1] = d
-                        if d.b == nil then
-                            ready(d)
-                        end
                     end
                 end
                 job.prog, job.rest, job.derived, job.lazy = prog, rest, now, later
@@ -2056,6 +2052,9 @@ function start_fold(t: any, fields: any, spec: any): any
                 job.foldbits = #keys == 0 and #rest == 0 and not text
             end
         end
+        for _, d in job.derived do
+            ready(d, unit)
+        end
         return job
     end
     -- one number range filter and one plain sum fold in one pass
@@ -2064,6 +2063,9 @@ function start_fold(t: any, fields: any, spec: any): any
         and not a1.distinct and a1.scale == nil and plain(c1.source) and type(c1.value) == "number"
         and (c1.op == "<" or c1.op == "<=" or c1.op == ">" or c1.op == ">=") then
         job.fuse = c1
+    end
+    for _, d in derived_list do
+        ready(d, unit)
     end
     return job
 end
@@ -2601,6 +2603,9 @@ end
 -- once its blocks are loaded. A nil sel holds every slot.
 local function in_luau(job: any, sel: buffer?, n: number)
     for _, d in job.lazy or {} do
+        if d.b == nil then
+            ready(d, job.unit)
+        end
         for _, st in d.steps do
             run_step(st, job.unit)
         end
