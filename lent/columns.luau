@@ -1105,10 +1105,20 @@ function count(t: any, lo: string, hi: string): number
                 n += barch.store.getInt32At(k, g.plive) or 0
             elseif a <= z then
                 local v = barch.store.get(k) or ""
-                for s = a, z do
-                    if string.byte(v, pbase + s + 1) == 1 then
-                        n += 1
+                -- the rows in slots a to b
+                local function held(a: number, b: number): number
+                    if a > b then
+                        return 0
                     end
+                    local _, m = string.gsub(string.sub(v, pbase + a + 1, pbase + b + 1), "\1", "")
+                    return m
+                end
+                if (z - a + 1) * 2 > rows then
+                    -- a span from id 1 leaves out one slot: count the fewer
+                    -- slots outside it and take them from the block's rows
+                    n += live(g, v) - held(0, a - 1) - held(z + 1, rows - 1)
+                else
+                    n += held(a, z)
                 end
             end
         end

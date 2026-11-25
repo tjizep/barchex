@@ -168,6 +168,25 @@ function cases.notes(t)
     return out
 end
 function cases.countIds(t) return t:query():where("id", ">", 1000):count() end
+-- id bounds of each kind, which the fold reads as key ranges
+local ID_BOUNDS = {
+    { "id", ">", 1000 }, { "id", ">=", 1000 }, { "id", "<", 1000 }, { "id", "<=", 1000 },
+    { "id", ">", 999.5 }, { "id", ">=", 999.5 }, { "id", "<", 999.5 }, { "id", "<=", 999.5 },
+    { "id", "=", 1000 }, { "id", "=", 999.5 }, { "id", ">", -math.huge }, { "id", "<", math.huge },
+    { "id", ">=", 2 ^ 60 }, { "id", "<=", -(2 ^ 60) }, { "id", "~=", 1000 },
+}
+function cases.idBounds(t)
+    local out = {}
+    for _, b in ID_BOUNDS do
+        out[#out + 1] = t:query():where(b[1], b[2], b[3]):count()
+        out[#out + 1] = t:query():where(b[1], b[2], b[3]):where("qty", ">", 2):sum("qty")
+    end
+    out[#out + 1] = t:query():where("id >= 900 and id < 1100 and id > 950 and id <= 2000"):count()
+    out[#out + 1] = t:query():where("id == 1000 and id > 1000"):count()
+    out[#out + 1] = t:query():where("id >= 2000 and id <= 1000"):count()
+    out[#out + 1] = t:query():where("(id < 3 or id > 2040) and id <= 2050"):sum("qty")
+    return out
+end
 function cases.countExpr(t) return t:query():where("qty + 1 > 3"):count() end
 function cases.aggregate(t) return row_text(t:query():aggregate(SPEC)) end
 function cases.grouped(t) return rows_text(t:query():groupBy("region"):aggregate(SPEC)) end
@@ -982,6 +1001,16 @@ def test_folds_from_an_id_step_over_empty_presence_blocks(run):
     for case in ["vIds", "vSpans", "bNot", "bIds", "ranged"]:
         answers = same(run, "paths", case)
         assert len(set(answers)) == 1, (case, answers)
+
+
+def test_id_conditions_bound_folds_exactly(run):
+    # the fold drops the id conditions it reads as key ranges, so each bound
+    # must keep exactly the ids its condition keeps
+    assert run("fill", "Sale", "1", "3100") == run("fill", "Plain", "1", "3100")
+    # Plain reads each row, so it answers once for the three kernel paths
+    answers = run("paths", "Sale", "idBounds")
+    assert len(set(answers)) == 1, answers
+    assert json.loads(answers[0]) == run("ask", "Plain", "idBounds")
 
 
 def test_expressions_fold_over_column_blocks(run):

@@ -3347,6 +3347,47 @@ local function fold_blocks(agg: any, page: any?): boolean
             p.lo = lo
         end
     end
+    -- an id condition narrows the keys to exactly the ids it keeps, so the
+    -- loop has no ids to compare
+    local kind = lay.id_kind(tbl.t)
+    if kind == "int" then
+        local kept = {}
+        for _, c in conds do
+            local v = c.field == "id" and c.value
+            local lo, hi
+            if type(v) == "number" and v == v then
+                if c.op == "=" then
+                    lo, hi = math.ceil(v), math.floor(v)
+                elseif c.op == ">=" then
+                    lo = math.ceil(v)
+                elseif c.op == ">" then
+                    lo = math.floor(v) + 1
+                elseif c.op == "<=" then
+                    hi = math.floor(v)
+                elseif c.op == "<" then
+                    hi = math.ceil(v) - 1
+                end
+            end
+            if (lo == nil and hi == nil) or not in_keys(kind, lo or 0)
+                or not in_keys(kind, hi or 0) then
+                kept[#kept + 1] = c
+                continue
+            end
+            if lo then
+                local k = lay.row(tbl.t, lo)
+                if k > p.lo then
+                    p.lo = k
+                end
+            end
+            if hi then
+                local k = kc.after(lay.row(tbl.t, hi)) :: string
+                if k < p.hi then
+                    p.hi = k
+                end
+            end
+        end
+        conds = kept
+    end
     local job = col.start_fold(tbl.t, tbl.fields, {
         conds = conds, keys = names, aggs = aggs, budget = page and page.budget,
         group = function(values)
