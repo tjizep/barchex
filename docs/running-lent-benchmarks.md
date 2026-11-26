@@ -95,9 +95,22 @@ except 5 should print the query's sum:
 | `5` | lent's `start_fold`, `fold` and `finish`; prints the number of spans |
 | `6` | the full `c.P:query():where("age > 10"):sum("weight")` |
 
-At 64 KB blocks, 524,288 rows, range sharded, with barch `05d5c09` and lent
-`3fd5e3f`, line 0 ran at about 4.5 G rows/s, line 3 at 3.5, line 5 at 2.8
-and line 6 at 2.6.
+These figures are G rows/s from two runs at each block size, with 524,288
+rows from `FIRST=262144`, range sharded, on barch `05d5c09` and lent
+`3fd5e3f`:
+
+| line | 64 KB | 128 KB | 256 KB |
+|---|---|---|---|
+| `0` | 4.46–4.81 | 4.44–4.85 | 4.77–4.85 |
+| `2` | 4.16–4.50 | 4.10–4.42 | 4.48–4.50 |
+| `3` | 3.39–3.50 | 3.68–3.72 | 3.97–4.02 |
+| `5` | 2.68–2.86 | 2.98–3.22 | 3.31–3.40 |
+| `6` | 2.45–2.63 | 2.86–3.03 | 2.96–3.07 |
+
+The kernels run at the same rate at every block size, so line 0 barely
+changes. Each block costs a cursor read for each source, about 0.4 µs, and a
+pass through lent's fold, so larger blocks raise lines 3 to 6. Line 6 also
+holds about 17 µs of query building, which stays the same at every size.
 
 ## Compare two versions
 
