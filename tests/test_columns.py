@@ -252,6 +252,12 @@ local STATS = {
     first = { fn = "min", field = "state" }, last = { fn = "max", field = "region" },
 }
 function cases.vAll(t) return row_text(t:query():aggregate(STATS)) end
+local NUMBERS = {
+    n = { fn = "count" }, scored = { fn = "count", field = "score" },
+    sum = { fn = "sum", field = "score" }, mean = { fn = "avg", field = "score" },
+    low = { fn = "min", field = "qty" }, high = { fn = "max", field = "at" },
+}
+function cases.vSums(t) return row_text(t:query():aggregate(NUMBERS)) end
 function cases.vIds(t) return row_text(t:query():where("id > 5 and id <= 1500"):aggregate(STATS)) end
 function cases.vSpans(t) return row_text(t:query():where("id < 3 or id > 2040"):aggregate(STATS)) end
 function cases.vRange(t)
@@ -432,6 +438,26 @@ function steps.bitwise(c, tname, name)
     col.start_fold = was
     assert(ok, err)
     return all and folds > 0
+end
+
+-- whether each block fold case `name` ran folded its chunks with absent rows
+-- as bits
+function steps.gapbits(c, tname, name)
+    local jobs, was = {}, col.start_fold
+    col.start_fold = function(...)
+        local job = was(...)
+        jobs[#jobs + 1] = job
+        return job
+    end
+    local ok, err = pcall(cases[name], c[tname])
+    col.start_fold = was
+    assert(ok, err)
+    for _, job in jobs do
+        if not job.gapbits or job.pbits == nil then
+            return false
+        end
+    end
+    return #jobs > 0
 end
 
 -- how many block folds case `name` ran
@@ -988,7 +1014,7 @@ def test_column_answers_what_binary_answers(run, seed):
     same(run, "ask", "all")
 
 
-VECTOR_CASES = ["vAll", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
+VECTOR_CASES = ["vAll", "vSums", "vIds", "vSpans", "vRange", "vEq", "vNe", "vText", "vNoText",
                 "vByQty", "vByScore", "vByNote", "vByState", "vMixed", "vMixedText", "vPaged",
                 "vRegion", "regionOps", "vTextEnds", "xWhere", "xFields", "xNot", "xNeg", "xEven",
                 "xDefault", "xFlip", "xValues", "vPair", "vNumbers", "vTriple", "vTripleText",
@@ -1013,6 +1039,10 @@ def test_vector_kernels_answer_what_luau_loops_answer(run):
         assert len(set(answers)) == 1, (case, answers)
     for case in ["vPair", "vNumbers", "vTriple", "vTripleText", "vPairPaged"]:
         assert run("vectored", "Sale", case) == 1, case
+    # one group and no test: blocks with holes fold their present rows' bits
+    assert run("gapbits", "Sale", "vSums") == 1
+    for case in ["vAll", "vRange", "vByQty", "vPaged"]:
+        assert not run("gapbits", "Sale", case), case
     # a field with a default takes the Luau loops
     for case in BIT_CASES + ["bDefault"]:
         answers = same(run, "paths", case)

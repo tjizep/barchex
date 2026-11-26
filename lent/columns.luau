@@ -2092,13 +2092,18 @@ function start_fold(t: any, fields: any, spec: any): any
         job.vec, job.gis, job.capacity = vec, if #keys == 0 then { 1 } else {}, 0
         job.presence = take(g.pbase + g.rows)
         job.selb, job.gidb = take(unit * 4), take(unit * 4)
+        local text = false
         for _, a in aggs do
             if a.source and a.source.text then
                 -- see fold_text
                 a.text, a.tcap = true, 16
                 a.trecs = new_records(16)
+                text = true
             end
         end
+        -- one group and no test: a chunk with absent rows folds the bits of
+        -- its present ones; see vector_chunk
+        job.gapbits = #conds == 0 and #keys == 0 and spec.budget == nil and not text
         -- text sources whose order or groups a long value would change
         local texts = {}
         for _, c in conds do
@@ -2940,6 +2945,28 @@ end
 -- vector_chunk for a job whose number conditions make one bit program. The
 -- program's bits and the presence bits pick the rows, and with one group
 -- and no other test each aggregate folds them without a slot list.
+-- Folds the slots set in bits into the job's one group.
+local function fold_bits(job: any, bits: buffer, n: number, unit: number)
+    local v = job.vec
+    if #job.records == 0 then
+        new_group(job, {})
+    end
+    grow(job, 1)
+    for _, ag in job.aggs do
+        local c, recs = ag.source, ag.recs
+        if c == nil then
+            -- a count's record counts the rows
+            buffer.writef64(recs, 0, buffer.readf64(recs, 0) + n)
+        elseif c.int then
+            local f = c.int
+            v.foldBits(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, bits, 0, unit,
+                nil, recs)
+        elseif c.b ~= nil then
+            v.foldBits("f64", c.b, c.at, 8, nil, bits, 0, unit, nil, recs)
+        end
+    end
+end
+
 local function bit_chunk(job: any, first: number, from: number, packed_block: boolean,
                          unit: number): boolean
     local v = job.vec
@@ -2972,23 +2999,7 @@ local function bit_chunk(job: any, first: number, from: number, packed_block: bo
         return false
     end
     if job.foldbits then
-        if #job.records == 0 then
-            new_group(job, {})
-        end
-        grow(job, 1)
-        for _, ag in job.aggs do
-            local c, recs = ag.source, ag.recs
-            if c == nil then
-                -- a count's record counts the rows
-                buffer.writef64(recs, 0, buffer.readf64(recs, 0) + n)
-            elseif c.int then
-                local f = c.int
-                v.foldBits(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, bits, 0, unit,
-                    nil, recs)
-            elseif c.b ~= nil then
-                v.foldBits("f64", c.b, c.at, 8, nil, bits, 0, unit, nil, recs)
-            end
-        end
+        fold_bits(job, bits, n, unit)
         return false
     end
     local sel: buffer? = nil
@@ -3009,6 +3020,32 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
         return bit_chunk(job, first, from, packed_block, unit)
     end
     local v = job.vec
+    if job.gapbits and not packed_block then
+        -- folding the bits costs less than listing the present slots and
+        -- folding the list
+        local bits = job.pbits or buffer.create((job.unit + 7) // 8)
+        job.pbits = bits
+        local n = v.compare("i8", job.pdata, from, 1, "~=", 0, nil, unit, bits, 0)
+        job.seen += n
+        if n == 0 then
+            return false
+        end
+        -- a job without a budget leaves job.last unset
+        load_sources(job, first)
+        if needs_luau(job) then
+            local sel: buffer? = nil
+            if n < unit then
+                sel = job.selb
+                v.maskBits(bits, 0, unit, sel)
+            end
+            in_luau(job, sel, n)
+        elseif n == unit then
+            group_and_fold(job, nil, n)
+        else
+            fold_bits(job, bits, n, unit)
+        end
+        return false
+    end
     local selb: buffer = job.selb
     local budget, seen = job.budget, job.seen
     local sel: buffer?, n, more = nil, unit, false

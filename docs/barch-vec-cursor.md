@@ -216,24 +216,27 @@ up to 40% faster.
 
 ### Results in lent
 
-Lent `eed347c` on barch `05d5c09`, outside a transaction, with 524,288
-rows on range shards. Each cell gives G rows per second when copying, then
-when reading in place. Blocks of 4 KB are below the threshold, so both runs
-copy.
+Lent on barch `05d5c09`, outside a transaction, with 524,288 rows on
+range shards. Each cell gives G rows per second when copying, then when
+reading in place. Blocks of 4 KB are below the threshold, so both runs
+copy. The 4 KB and 16 KB rows are from lent `eed347c`. The 64 KB and
+256 KB rows are from the commit that folds chunks with absent rows as bits,
+which makes `sum all` faster at those sizes and leaves the other rows
+unchanged.
 
 | block | `sum all` | `age > 10 sum` | `grouped sum` |
 |---|---|---|---|
 | 4 KB | 0.83, 0.87 | 0.56, 0.56 | 0.42, 0.43 |
 | 16 KB | 2.28, 2.37 | 1.27, 1.42 | 0.96, 0.95 |
-| 64 KB | 3.52, 3.88 | 2.07, 2.42 | 1.34, 1.42 |
-| 256 KB | 2.41, 2.67 | 2.05, 2.51 | 1.34, 1.50 |
+| 64 KB | 3.65, 4.77 | 1.89, 2.47 | 1.29, 1.40 |
+| 256 KB | 3.99, 4.99 | 2.04, 2.50 | 1.36, 1.47 |
 
 Against the acceptance targets below:
 
-- With 524,288 rows, `age > 10 sum` is 15% faster at 64 KB blocks and 19%
-  faster at 256 KB. `sum all` is 9% faster at 64 KB and 10% at 256 KB.
-  `grouped sum` is 5% faster at 64 KB and 11% at 256 KB, because its group
-  key column is still copied.
+- With 524,288 rows, `age > 10 sum` is 23% faster at 64 KB blocks and 18%
+  faster at 256 KB. `sum all` is 23% faster at 64 KB and 20% at 256 KB.
+  `grouped sum` is 7% faster at both sizes, because its group key column
+  is still copied.
 - With 64 rows, measured on lent `799255f`, no query is slower by more
   than 0.006 ms, and queries on 256 KB blocks are 9 to 28% faster.
 - On lent `799255f`, no other query is slower by more than 0.004 ms.
