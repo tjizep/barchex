@@ -1269,14 +1269,14 @@ end
 -- kernels read are read in place through their cursor. Smaller blocks are
 -- copied, which costs less than the reads of an in-place block. nil copies
 -- every block. See in_place.
-local in_place_bytes: number? = 32768
+local in_place_bytes: number? = 16384
 
 -- Reads the header of the block at k through source c's cursor cur, and
 -- answers true when the kernels can read the block in place, as the
--- cursor's current value. Sets c.int and c.none from the header. An int
--- block passes its format's none until fold_none reads its nil count, so
--- most kernels read the block once: they check each slot for none at little
--- cost. Answers false for a missing or split block, which load copies.
+-- cursor's current value. Sets c.int and c.none from the header. The header
+-- is the block's only read, so an int block passes its format's none
+-- whether or not it holds nils: the kernels check each slot for none at
+-- little cost. Answers false for a missing or split block, which load copies.
 local function read_head(t: any, c: any, cur: any, k: string, block: number): boolean
     local head = c.head
     if head == nil then
@@ -1292,29 +1292,8 @@ local function read_head(t: any, c: any, cur: any, k: string, block: number): bo
         check_rows(t, "field " .. c.name, block, buffer.readu32(head, 4), rows)
     end
     local f = c.spec.short ~= nil and int_format(head)
-    c.int, c.none, c.size, c.uncounted = f, if f then f.none else nil, size, f and true or false
+    c.int, c.none = f, if f then f.none else nil
     return true
-end
-
--- The none that vec.fold takes for source c's loaded int block: nil when
--- the block counts no nils, which lets vec.fold take its faster loop. Reads
--- the nil count of a block that read_head left uncounted.
-local function fold_none(c: any): number?
-    if c.uncounted then
-        c.uncounted = false
-        local f, b, rows = c.int, c.b, c.rows
-        if type(b) == "buffer" then
-            c.none = if nil_free(b, f, rows) then nil else f.none
-        elseif c.size >= nils_at(f, rows) + 4 then
-            -- the current value stays the whole block
-            local head = c.head
-            b:read(c.k, head, 0, nils_at(f, rows), 4)
-            if buffer.readu32(head, 0) == 0 then
-                c.none = nil
-            end
-        end
-    end
-    return c.none
 end
 
 -- Copies source c's block into c.buf when the kernels read it in place, for
@@ -1372,7 +1351,6 @@ local function load(t: any, c: any, first: number)
         end
         c.int = not c.text and b ~= nil and c.spec.short ~= nil and int_format(b :: buffer)
         c.none = if c.int and not nil_free(b :: buffer, c.int, rows) then c.int.none else nil
-        c.uncounted = false
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
@@ -2616,7 +2594,7 @@ local function key_numbers(job: any, c: any, ks: any, sel: buffer?, n: number)
         kind, b, at = "str", elements(v, c), c.off * 8
     elseif c.int then
         local f = c.int
-        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, fold_none(c)
+        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, c.none
     end
     name = name or kind
     local e = ks.groupers[name]
@@ -2888,7 +2866,7 @@ local function group_and_fold(job: any, sel: buffer?, n: number)
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
         elseif c.int then
             local f = c.int
-            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, fold_none(c), sel, n, gids, recs)
+            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, sel, n, gids, recs)
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
