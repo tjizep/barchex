@@ -1265,9 +1265,72 @@ local function cursor_joined(t: any, c: any, cur: any, k: string, block: number)
     return out
 end
 
+-- Presence and number blocks of at least this many bytes that only the
+-- kernels read are read in place through their cursor. Smaller blocks are
+-- copied, which costs less than the reads of an in-place block. nil copies
+-- every block. See in_place.
+local in_place_bytes: number? = 32768
+
+-- Reads the header of the block at k through source c's cursor cur, and
+-- answers true when the kernels can read the block in place, as the
+-- cursor's current value. Sets c.int and c.none from the header. An int
+-- block passes its format's none until fold_none reads its nil count, so
+-- most kernels read the block once: they check each slot for none at little
+-- cost. Answers false for a missing or split block, which load copies.
+local function read_head(t: any, c: any, cur: any, k: string, block: number): boolean
+    local head = c.head
+    if head == nil then
+        head = buffer.create(SHEAD)
+        c.head = head
+    end
+    local size = cur:read(k, head, 0, 0, SHEAD)
+    if type(size) ~= "number" or buffer.readu16(head, 2) ~= 0 then
+        return false
+    end
+    local rows = c.rows
+    if buffer.readu32(head, 4) ~= rows then
+        check_rows(t, "field " .. c.name, block, buffer.readu32(head, 4), rows)
+    end
+    local f = c.spec.short ~= nil and int_format(head)
+    c.int, c.none, c.size, c.uncounted = f, if f then f.none else nil, size, f and true or false
+    return true
+end
+
+-- The none that vec.fold takes for source c's loaded int block: nil when
+-- the block counts no nils, which lets vec.fold take its faster loop. Reads
+-- the nil count of a block that read_head left uncounted.
+local function fold_none(c: any): number?
+    if c.uncounted then
+        c.uncounted = false
+        local f, b, rows = c.int, c.b, c.rows
+        if type(b) == "buffer" then
+            c.none = if nil_free(b, f, rows) then nil else f.none
+        elseif c.size >= nils_at(f, rows) + 4 then
+            -- the current value stays the whole block
+            local head = c.head
+            b:read(c.k, head, 0, nils_at(f, rows), 4)
+            if buffer.readu32(head, 0) == 0 then
+                c.none = nil
+            end
+        end
+    end
+    return c.none
+end
+
+-- Copies source c's block into c.buf when the kernels read it in place, for
+-- the Luau loops, which read buffers.
+local function as_buffer(c: any)
+    local b = c.b
+    if b ~= nil and type(b) ~= "buffer" then
+        local got = cursor_read(c, b, c.k)
+        c.b = if type(got) == "buffer" then got else nil
+    end
+end
+
 -- Reads the block of source c that holds id `first`, unless it holds it
 -- already, or notes that the block holds no value. Sets c.off to the slot
--- of `first` in the block, and c.at to where its f64 starts.
+-- of `first` in the block, and c.at to where its f64 starts. A block the
+-- kernels read in place leaves the cursor in c.b; see as_buffer.
 local function load(t: any, c: any, first: number)
     if c.id then
         c.base = first
@@ -1281,6 +1344,13 @@ local function load(t: any, c: any, first: number)
         local cur = c.cur
         local stored
         local through = cur and fb >= c.cfb and fb <= c.cfl
+        if through and c.direct and read_head(t, c, cur, k, fb) then
+            c.b, c.k, c.fb, c.located, c.elements, c.coded, c.gmap = cur, k, fb, false, false,
+                false, nil
+            c.off = first - fb * rows
+            c.at = c.spec.data + c.off * 8
+            return
+        end
         if through then
             stored = cursor_read(c, cur, k)
         else
@@ -1302,6 +1372,7 @@ local function load(t: any, c: any, first: number)
         end
         c.int = not c.text and b ~= nil and c.spec.short ~= nil and int_format(b :: buffer)
         c.none = if c.int and not nil_free(b :: buffer, c.int, rows) then c.int.none else nil
+        c.uncounted = false
     end
     c.off = first - fb * rows
     c.at = if c.text then 0 else c.spec.data + c.off * 8
@@ -1746,6 +1817,7 @@ local function operand(o: any, unit: number): (buffer?, number, number)
         end
         return tmp, 0, 0
     end
+    as_buffer(c)
     if c.b == nil then
         return nil, 0, if c.default == nil then NAN else c.default
     end
@@ -2544,7 +2616,7 @@ local function key_numbers(job: any, c: any, ks: any, sel: buffer?, n: number)
         kind, b, at = "str", elements(v, c), c.off * 8
     elseif c.int then
         local f = c.int
-        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, c.none
+        kind, at, stride, none = f.kind, SHEAD + c.off * f.width, f.width, fold_none(c)
     end
     name = name or kind
     local e = ks.groupers[name]
@@ -2640,6 +2712,9 @@ end
 -- Adds the chunk's slots in `sel, n` to the job's groups with Luau loops,
 -- once its blocks are loaded. A nil sel holds every slot.
 local function in_luau(job: any, sel: buffer?, n: number)
+    for _, c in job.sources do
+        as_buffer(c)
+    end
     for _, d in job.lazy or {} do
         if d.b == nil then
             ready(d, job.unit)
@@ -2813,7 +2888,7 @@ local function group_and_fold(job: any, sel: buffer?, n: number)
             v.fold("i8", ZEROS, 0, 1, nil, sel, n, gids, recs)
         elseif c.int then
             local f = c.int
-            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, c.none, sel, n, gids, recs)
+            v.fold(f.kind, c.b, SHEAD + c.off * f.width, f.width, fold_none(c), sel, n, gids, recs)
         elseif c.b ~= nil then
             v.fold("f64", c.b, c.at, 8, nil, sel, n, gids, recs)
         end
@@ -2859,7 +2934,7 @@ local function bit_chunk(job: any, first: number, from: number, packed_block: bo
     local pb: buffer?, n = nil, unit
     if not packed_block then
         pb = job.pbits
-        n = v.compare("i8", job.presence, from, 1, "~=", 0, nil, unit, pb, 0)
+        n = v.compare("i8", job.pdata, from, 1, "~=", 0, nil, unit, pb, 0)
     end
     job.seen += n
     if n == 0 then
@@ -2926,8 +3001,8 @@ local function vector_chunk(job: any, first: number, from: number, packed_block:
     local budget, seen = job.budget, job.seen
     local sel: buffer?, n, more = nil, unit, false
     if not (packed_block and (budget == nil or budget - seen >= unit)) then
-        -- job.presence holds no rows outside the fold's range
-        sel, n = selb, v.mask(job.presence, from, unit, selb)
+        -- job.pdata holds no rows outside the fold's range
+        sel, n = selb, v.mask(job.pdata, from, unit, selb)
         if budget ~= nil and n > budget - seen then
             n, more = budget - seen, true
         elseif n == unit then
@@ -2998,7 +3073,8 @@ end
 -- Adds the slots from `a` to `z` of a presence block to the job's groups,
 -- a chunk at a time. Answers true when the job's budget ran out before the
 -- block's last row. A nil presence means fold_span read the block into
--- job.presence.
+-- job.presence, or its header when job.pkey names a block that the kernels
+-- read in place.
 local function fold_block(job: any, block: number, presence: any, a: number, z: number): boolean
     local g, unit = job.g, job.unit
     local rows, pbase = g.rows, g.pbase
@@ -3025,21 +3101,66 @@ local function fold_block(job: any, block: number, presence: any, a: number, z: 
     else
         packed_block = whole and live(g, presence) == rows
     end
-    if job.vec and not (packed_block and job.budget == nil) then
+    -- the kernels read the presence of chunks the fold doesn't take whole
+    local reads = job.vec and not (packed_block and job.budget == nil)
+    local pcur = if presence == nil and job.pkey then job.pcur else nil
+    if reads and pcur == nil then
         if presence ~= nil then
             buffer.writestring(pb, 0, presence, pbase + rows)
         end
         buffer.fill(pb, pbase, 0, a)
         buffer.fill(pb, pbase + z + 1, 0, rows - 1 - z)
     end
+    job.pdata = pb
     local base = block * rows
     for c = a - a % unit, z, unit do
         local ca, cz = math.max(a - c, 0), math.min(z - c, unit - 1)
+        if reads and pcur then
+            if ca == 0 and cz == unit - 1 then
+                job.pdata = pcur
+            else
+                -- a chunk the span or the end cuts: job.presence holds its
+                -- slots, and no rows outside a..z
+                local at = pbase + c
+                pcur:read(job.pkey, pb, at, at, unit)
+                buffer.fill(pb, at, 0, ca)
+                buffer.fill(pb, at + cz + 1, 0, unit - 1 - cz)
+                job.pdata = pb
+            end
+        end
         if fold_chunk(job, base + c, presence, pbase + c, ca, cz, packed_block) then
             return true
         end
     end
     return false
+end
+
+-- Reads presence block k through cursor cur for fold_block, and answers
+-- whether the block holds a value. When job.pcur is set, a block of
+-- job.presence's size leaves only its header in job.presence and its key in
+-- job.pkey, for the kernels to read in place. Other blocks are copied into
+-- job.presence.
+local function read_presence(job: any, held: any, cur: any, k: string): boolean
+    local pb = job.presence
+    job.pkey = nil
+    if job.pcur then
+        local size = cur:read(k, pb, 0, 0, 16)
+        if type(size) ~= "number" then
+            return false
+        elseif size == buffer.len(pb) then
+            job.pkey = k
+            return true
+        end
+    end
+    local got = cursor_read(held, cur, k)
+    if type(got) ~= "buffer" then
+        return false
+    end
+    if got ~= pb then
+        -- a block of another size: job.presence holds its rows
+        buffer.copy(pb, 0, got, 0, buffer.len(pb))
+    end
+    return true
 end
 
 -- Adds the rows of the job's table from `lo` up to `hi`, row keys or key
@@ -3054,6 +3175,10 @@ local function fold_span(job: any, from: number, last: number, plo: string, phi:
     local open = barch.store.cursor
     local cur = if job.vec and open and not job.g.legacy then open(plo, phi) else nil
     local held = { buf = pb }
+    local v = job.vec
+    -- a presence block holds a byte per row
+    job.pcur = if cur and v.cursors == true and in_place_bytes ~= nil
+        and rows >= (in_place_bytes :: number) then cur else nil
     if cur and from ~= -math.huge then
         -- a span that starts at an id reads its presence blocks by number,
         -- and lists a key only to step over a gap: each range call costs
@@ -3061,17 +3186,13 @@ local function fold_span(job: any, from: number, last: number, plo: string, phi:
         local t, block = job.g.t, from // rows
         while block * rows <= last do
             local k = lay.present(t, block)
-            local got = cursor_read(held, cur, k)
-            if type(got) ~= "buffer" then
+            if not read_presence(job, held, cur, k) then
                 local found = barch.store.range(k, phi, 1)[1]
                 if found == nil then
                     return false
                 end
                 block = math.max(lay.present_block(found), block + 1)
                 continue
-            end
-            if got ~= pb then
-                buffer.copy(pb, 0, got, 0, buffer.len(pb))
             end
             local base = block * rows
             local a, z = math.max(from - base, 0), math.min(last - base, rows - 1)
@@ -3097,15 +3218,8 @@ local function fold_span(job: any, from: number, last: number, plo: string, phi:
                 continue
             end
             local presence = if values then values[i] else nil
-            if cur then
-                local got = cursor_read(held, cur, k)
-                if type(got) ~= "buffer" then
-                    continue
-                end
-                if got ~= pb then
-                    -- a block of another size: job.presence holds its rows
-                    buffer.copy(pb, 0, got, 0, buffer.len(pb))
-                end
+            if cur and not read_presence(job, held, cur, k) then
+                continue
             end
             if fold_block(job, block, presence, a, z) then
                 return true
@@ -3128,8 +3242,18 @@ function fold(t: any, job: any, lo: string, hi: string): boolean
     -- each column's blocks in the span reads them without copying them into
     -- the transaction, and records the span once for COMMITTX
     local open = barch.store.cursor
+    -- the groupers read keys from buffers
+    local keyed, v = {}, job.vec
+    for _, k in job.keys do
+        keyed[k] = true
+    end
+    local direct = open ~= nil and v ~= nil and v.cursors == true and in_place_bytes ~= nil
     for _, c in job.sources do
         c.fb = nil
+        -- an int field's block is sized for int16s, and an f64 block's for 8 bytes
+        c.direct = direct and plain(c) and c.spec.head
+            and c.rows * (if c.spec.short then 2 else 8) >= (in_place_bytes :: number)
+            and not keyed[c]
         if open and not c.id then
             local p = c.prefix
             c.cfb, c.cfl = from // c.rows, last // c.rows
@@ -3143,6 +3267,7 @@ function fold(t: any, job: any, lo: string, hi: string): boolean
     for _, c in job.sources do
         c.cur = nil
     end
+    job.pcur, job.pkey, job.pdata = nil, nil, nil
     if not ok then
         error(out, 0)
     end
@@ -3207,6 +3332,15 @@ end
 function kernels(v: any): any
     local was = vec
     vec = v
+    return was
+end
+
+-- Sets the fewest bytes of a presence or number block that folds read in
+-- place, or nil to copy every block. Answers the setting it replaces. Tests
+-- compare both.
+function in_place(bytes: number?): number?
+    local was = in_place_bytes
+    in_place_bytes = bytes
     return was
 end
 

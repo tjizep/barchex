@@ -452,20 +452,31 @@ function steps.ask(c, tname, name)
 end
 
 -- case `name` answered with each set of kernels a fold can use: barch.vec
--- when barch has it, lent.VEC, and the Luau loops
+-- reading every block in place and copying every block when barch has it,
+-- lent.VEC, and the Luau loops
 function steps.paths(c, tname, name)
     local out = {}
-    local was = col.kernels(nil)
-    for _, k in { barch.vec or false, require("lent.VEC"), false } do
-        col.kernels(k or nil)
+    local was, bytes = col.kernels(nil), col.in_place(nil)
+    local runs = { { false }, { require("lent.VEC") }, { false } }
+    if barch.vec then
+        runs[1] = { barch.vec }
+        if barch.vec.cursors then
+            table.insert(runs, 1, { barch.vec, 0 })
+        end
+    end
+    for _, r in runs do
+        col.kernels(r[1] or nil)
+        col.in_place(r[2])
         local ok, v = pcall(cases[name], c[tname])
         if not ok then
             col.kernels(was)
+            col.in_place(bytes)
             error(v, 0)
         end
         out[#out + 1] = show(v)
     end
     col.kernels(was)
+    col.in_place(bytes)
     return out
 end
 
