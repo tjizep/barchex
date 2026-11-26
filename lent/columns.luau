@@ -586,8 +586,32 @@ local function place(rows: number, pk: number): (number, number)
     return block, pk - block * rows
 end
 
+-- Block keys by prefix and block, kept between folds: making a key costs
+-- about as much as reading a block's header. A key depends only on its
+-- prefix and block, so a kept key never goes stale; KEYS_MAX bounds how
+-- many are kept.
+local key_cache: { [string]: { [number]: string } } = {}
+local nkeys = 0
+local KEYS_MAX = 16384
+
 local function block_key(prefix: string, block: number): string
-    return prefix .. kc.encode("int", block)
+    local list = key_cache[prefix]
+    local k = if list then list[block] else nil
+    if k == nil then
+        if nkeys >= KEYS_MAX then
+            table.clear(key_cache)
+            nkeys = 0
+        end
+        list = key_cache[prefix]
+        if list == nil then
+            list = {}
+            key_cache[prefix] = list
+        end
+        k = prefix .. kc.encode("int", block)
+        list[block] = k
+        nkeys += 1
+    end
+    return k
 end
 
 -- split blocks: a block whose value and key pass MAX_ENTRY splits into
@@ -3161,9 +3185,9 @@ local function fold_span(job: any, from: number, last: number, plo: string, phi:
         -- a span that starts at an id reads its presence blocks by number,
         -- and lists a key only to step over a gap: each range call costs
         -- about as much as reading a dozen blocks
-        local t, block = job.g.t, from // rows
+        local all, block = lay.present(job.g.t), from // rows
         while block * rows <= last do
-            local k = lay.present(t, block)
+            local k = block_key(all, block)
             if not read_presence(job, held, cur, k) then
                 local found = barch.store.range(k, phi, 1)[1]
                 if found == nil then
