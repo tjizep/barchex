@@ -142,9 +142,13 @@ These follow in this repository once barch has the change and
 `barch.vec.cursors` is `true`. On an older barch, lent keeps copying.
 
 - **Column blocks.** In `load`, read the block's header with
-  `cur:read(k, c.head, 0, 0, SHEAD)` and keep the size. Check the part
-  count and rows from the header, and give the kernels the cursor as the
-  source's data.
+  `cur:read(k, c.head, 0, 0, SHEAD)`. Check the part count and rows from
+  the header, and give the kernels the cursor as the source's data. This
+  header read is the block's only read: an int block passes its format's
+  none whether or not it holds nils, so lent skips the nil count after the
+  slots. This needs barch `05d5c09`, where `vec.fold` with a none runs
+  about as fast as without one. On an older barch, `vec.fold` over these
+  blocks runs about 2.5 times slower.
 - **Blocks that still copy.** Split blocks, text and dictionary blocks,
   group keys and the Luau row fallback read the block with Luau buffer
   functions, so they keep copying. Route every Luau read of a column
@@ -157,9 +161,12 @@ These follow in this repository once barch has the change and
   copy only the chunks that `a` or `z` cuts, into `job.presence`, and zero
   their slots outside the range. The end mark needs no zeroing, since no
   row lies at or past it.
-- **Small blocks.** If the latch and epoch check cost more than the copy on
-  small tables, keep copying blocks below a row count chosen from the
-  measurements.
+- **Small blocks.** Read presence and number blocks of at least 16384
+  bytes in place, and copy smaller ones. An int field's block counts 2
+  bytes per row, an f64 block 8 and a presence block 1. Below 16 KB the
+  header read costs about as much as the copy it saves. Tests call
+  `in_place(bytes)` to change the threshold, and `in_place(nil)` to copy
+  every block.
 
 ## Measurements
 
@@ -189,12 +196,50 @@ Before `887548a`, f64 `vec.foldBits` took 1.14 ns per slot, because it
 folded partly set bits one element at a time. With AVX2 it now takes
 0.22 ns.
 
+`vec.fold` over a whole block, with no selection or group ids, costs this
+much per slot at 64 KB blocks. Before `05d5c09`, a fold given a none took
+0.63 ns per slot at every width and ISA, because its loop stayed scalar.
+
+| kind | without a none | with a none |
+|---|---:|---:|
+| i8 | 0.03 | 0.065 |
+| i16 | 0.03 | 0.07 |
+| i32 | 0.06 | 0.14 |
+| i64 | 0.14 | 0.15 |
+
 Outside a transaction, `age > 10 sum` takes about 0.55 ns per row. Copying
 its presence block and one or two i16 blocks takes 0.075 to 0.125 ns of
 that. Removing the copies should make large i8 and i16 scans 10 to 20%
 faster. An f64 sum filtered on an i16 column spends about 0.40 ns per row
 in its kernels and 0.275 ns copying, so removing the copies should make it
 up to 40% faster.
+
+### Results in lent
+
+Lent `799255f` on barch `05d5c09`, outside a transaction, with 524,288
+rows. Each cell gives G rows per second when copying, then when reading
+in place, on hash shards and then range shards. Blocks of 4 KB are below
+the threshold, so both runs copy.
+
+| block | `sum all` | `age > 10 sum` | `grouped sum` |
+|---|---|---|---|
+| 4 KB | 0.61, 0.60 / 0.73, 0.72 | 0.41, 0.40 / 0.46, 0.45 | 0.32, 0.33 / 0.37, 0.36 |
+| 16 KB | 1.83, 1.90 / 2.03, 2.23 | 1.11, 1.17 / 1.17, 1.28 | 0.84, 0.82 / 0.85, 0.90 |
+| 64 KB | 3.33, 3.47 / 3.55, 3.85 | 1.95, 2.20 / 1.97, 2.37 | 1.31, 1.39 / 1.36, 1.46 |
+| 256 KB | 2.32, 2.57 / 2.40, 2.71 | 1.95, 2.32 / 2.01, 2.45 | 1.30, 1.45 / 1.34, 1.48 |
+
+Against the acceptance targets below:
+
+- With 524,288 rows, `age > 10 sum` is 11 to 17% faster at 64 KB blocks
+  and 16 to 18% faster at 256 KB. `sum all` is 4 to 8% faster at 64 KB
+  and 10 to 11% at 256 KB. `grouped sum` is 6% faster at 64 KB and 10%
+  at 256 KB, because its group key column is still copied.
+- With 64 rows, no query is slower by more than 0.006 ms, and queries on
+  256 KB blocks are 9 to 28% faster.
+- No other query is slower by more than 0.004 ms.
+
+Whole queries gain less than the kernel measurements above, because the
+copy is a smaller share of a query than of a kernel call.
 
 ## Testing
 
