@@ -342,7 +342,7 @@ local function geometry(t: any): any
     end
     if t.block == nil then
         g = { rows = LEGACY, pbase = 0, plive = LEGACY, legacy = true,
-              empty = buffer.create(LEGACY + 4), specs = {} }
+              empty = buffer.create(LEGACY + 4), specs = {}, sources = {} }
     else
         local rows = t.rows
         local empty = made_presence[rows]
@@ -350,7 +350,7 @@ local function geometry(t: any): any
             empty = header(16 + rows, "p", rows)
             made_presence[rows] = empty
         end
-        g = { rows = rows, pbase = 16, plive = 8, empty = empty, specs = {} }
+        g = { rows = rows, pbase = 16, plive = 8, empty = empty, specs = {}, sources = {} }
     end
     g.t = t
     geometries[t] = g
@@ -1219,28 +1219,38 @@ local function give(b: buffer?)
 end
 
 -- A field a fold reads: "id", which reads each row's id, or a field's
--- blocks, with the value a slot without one reads as.
+-- blocks, with the value a slot without one reads as. `fields` are those of
+-- t's catalog entry, so a source as made depends only on t and the name,
+-- and g.sources keeps one to copy for each fold.
 local function source(t: any, g: any, fields: any, name: string): any
     if name == "id" then
         return { id = true, base = 0 }
     end
-    local f
-    for _, d in fields.list do
-        if d.name == name then
-            f = d
+    local kept = g.sources[name]
+    if kept == nil then
+        local f
+        for _, d in fields.list do
+            if d.name == name then
+                f = d
+            end
         end
-    end
-    local default
-    for _, d in t.fields do
-        if d.name == name then
-            default = d.default
+        local default
+        for _, d in t.fields do
+            if d.name == name then
+                default = d.default
+            end
         end
+        local sp = spec(g, f)
+        kept = { name = name, prefix = lay.column(t, f.id), okey = lay.overflow(t, f.id),
+                 spec = sp, rows = sp.rows, text = TEXT_KINDS[f.kind] == true,
+                 bool = f.kind == "bool", default = default, off = 0, at = 0 }
+        g.sources[name] = kept
     end
-    local sp = spec(g, f)
-    return { name = name, prefix = lay.column(t, f.id), okey = lay.overflow(t, f.id), spec = sp,
-             rows = sp.rows, text = TEXT_KINDS[f.kind] == true, bool = f.kind == "bool",
-             default = default, starts = if TEXT_KINDS[f.kind] then table.create(sp.rows, 0) else nil,
-             off = 0, at = 0 }
+    local c = table.clone(kept)
+    if c.text then
+        c.starts = table.create(c.rows, 0)
+    end
+    return c
 end
 
 -- Reads the value at k through cursor cur into c.buf, which load reuses

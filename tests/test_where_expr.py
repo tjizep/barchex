@@ -15,22 +15,29 @@ local lent = require("lent.SCHEMA")
 local m = require("lent.MIGRATE")
 local client = require("lent.CLIENT")
 
-local app = lent.graph {
-    lent.schema "Emp" {
-        id = "int",
-        fields = {
-            lent.field.string "name":unique(),
-            lent.field.int "age":optional(),
-            lent.field.float "salary":default(0),
-            lent.field.bool "active":default(true),
-            lent.field.json "tags":optional(),
-            lent.field.bool "senior":computed(function(r) return (r.age or 0) >= 40 end),
+local function graph(senior)
+    return lent.graph {
+        lent.schema "Emp" {
+            id = "int",
+            fields = {
+                lent.field.string "name":unique(),
+                lent.field.int "age":optional(),
+                lent.field.float "salary":default(0),
+                lent.field.bool "active":default(true),
+                lent.field.json "tags":optional(),
+                senior,
+            },
+            indexes = { lent.index("age") },
+            edges = { lent.edge.to "knows" "Emp":fields { lent.field.int "years":default(1) } },
         },
-        indexes = { lent.index("age") },
-        edges = { lent.edge.to "knows" "Emp":fields { lent.field.int "years":default(1) } },
-    },
-}
+    }
+end
+local app = graph(lent.field.bool "senior":computed(function(r) return (r.age or 0) >= 40 end))
 local db = client.open(app)
+-- the same catalog, read by an app whose computed senior is a number
+local years = client.open(graph(lent.field.int "senior":computed(function(r)
+    return r.age or 0
+end)))
 
 local function names(q)
     local out = {}
@@ -193,7 +200,21 @@ function steps.slots(c)
     }
 end
 
+-- One where string, compiled for apps whose fields have different kinds.
+function steps.kinds()
+    local function read(d)
+        return d.tx(function(c)
+            local _, out = pcall(function() return names(c.Emp:query():where("senior > 40")) end)
+            return tostring(out)
+        end)
+    end
+    return { read(db), read(years), read(db), read(years) }
+end
+
 function call(step, mode, arg)
+    if step == "kinds" then
+        return steps.kinds()
+    end
     if step == "migrate" then
         return m.migrate(app).done and "done" or "more"
     end
@@ -320,3 +341,11 @@ def test_values_fill_question_marks(run):
         where + '"age > ?": parameter ?1 is a function; parameters are numbers, strings,'
                 ' booleans or JSON tables',
     ]
+
+
+def test_where_strings_compile_for_each_apps_field_kinds(run):
+    # senior is a bool for one app and a number for the other, so the same
+    # string fails for the first however often the second runs it
+    bool_error = ('LENT table Emp query where "senior > 40" at column 8: field senior'
+                  ' (bool) has no order')
+    assert run("kinds") == [bool_error, "bob,eve", bool_error, "bob,eve"]

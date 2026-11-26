@@ -1427,6 +1427,16 @@ end
 -- field with a value become conditions an index can serve, and an index can
 -- read just the value ranges of a part that holds only within them, such as
 -- `age < 20 or age > 100`.
+--
+-- Expressions without parameters keep their compiled parts, by `where` and
+-- source, with the kind each name had: compiling takes a large share of a
+-- short query's time. A query whose names have the same kinds
+-- reuses them; one that reads linked rows compiles afresh. COMPILED_MAX
+-- bounds how many are kept.
+local compiled: { [string]: any } = {}
+local ncompiled = 0
+local COMPILED_MAX = 256
+
 function Query:where(field: any, ...: any): any
     local op, value = ...
     if type(field) == "function" then
@@ -1443,7 +1453,8 @@ function Query:where(field: any, ...: any): any
         -- an edge name such as customer reads the linked row's id, and a
         -- dotted name such as customer.nation.name reads a linked row
         local paths, reads = {}, false
-        local parts = EXPR.compile(field, function(name)
+        local kinds, asked = {}, {}
+        local function kind(name: string): string?
             if tbl.edgeByName and field_kind(tbl, name) == nil
                 and (string.find(name, ".", 1, true) or tbl.edgeByName[name]) then
                 local k = group_key(tbl, name, "where")
@@ -1451,8 +1462,36 @@ function Query:where(field: any, ...: any): any
                 return k.kind
             end
             self.exprFields[name] = true
-            return field_kind(tbl, name)
-        end, op, where)
+            local k = field_kind(tbl, name)
+            if not asked[name] then
+                asked[name] = true
+                kinds[#kinds + 1] = { name, k }
+            end
+            return k
+        end
+        local key = if op == nil then where .. "\0" .. field else nil
+        local hit = if key then compiled[key] else nil
+        for _, nk in if hit then hit.kinds else {} do
+            if kind(nk[1]) ~= nk[2] or reads then
+                hit = nil
+                break
+            end
+        end
+        local parts
+        if hit then
+            parts = hit.parts
+        else
+            kinds, asked = {}, {}
+            parts = EXPR.compile(field, kind, op, where)
+            if key and not reads then
+                if ncompiled >= COMPILED_MAX then
+                    table.clear(compiled)
+                    ncompiled = 0
+                end
+                compiled[key] = { parts = parts, kinds = kinds }
+                ncompiled += 1
+            end
+        end
         for _, p in parts do
             if reads and (p.fn or paths[p.field]) then
                 self.preds[#self.preds + 1] = path_pred(self, paths, p)
