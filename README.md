@@ -13,7 +13,8 @@ barchd --port 14000 --dir data -g https://github.com/tjizep/barchex
 
 `package.luau` at the root of the repository says what goes where. Each sync
 creates the `vectors`, `s3`, `watchdog` and `lent` key spaces and loads each
-folder of the same name into its space.
+folder of the same name into its space. It loads `streams` into the global
+space, where its commands answer by their bare names on every connection.
 
 The space viewer that used to be part of barchex is a repository of its own now,
 [barch-spaces](https://github.com/tjizep/barch-spaces). To have it beside barchex,
@@ -31,7 +32,8 @@ described in [Install with FUNCTIONS SYNC](#install-with-functions-sync).
 
 ## What it contains
 
-Each folder that `package.luau` loads becomes a key space with that name.
+Each folder that `package.luau` loads becomes a key space with that name,
+except `streams`, which goes into the global space.
 
 ```
 package.luau       →  how barchd -g installs this repository
@@ -53,6 +55,8 @@ lent/
   migrate.luau     →  function MIGRATE    (the lent catalog and index builds)
   expr.luau        →  function EXPR       (expression filters for lent queries)
   client.luau      →  function CLIENT     (lent rows, edges and queries)
+streams/
+  streams.luau     →  function STREAMS    (XADD, XRANGE, XREAD, XQUEUE …)
 docs/             →  the reference pages listed below
 examples/
   blog/            →  a blog on lent, installed by hand (see its README)
@@ -66,6 +70,7 @@ Each module has a reference page in `docs/`:
 |---|---|
 | [docs/vectors.md](docs/vectors.md) | VECTORS: store vectors and find the closest ones |
 | [docs/s3.md](docs/s3.md) | S3, SIGV4 and BACKUP: bucket access, file stores that fall through to a bucket, and key space backups |
+| [docs/streams.md](docs/streams.md) | STREAMS: Redis-style streams for producers such as Debezium, forwarded to queues |
 | [docs/watchdog.md](docs/watchdog.md) | WATCHDOG: alerts by mail or webhook when error rates climb |
 | [docs/lent/codecs.md](docs/lent/codecs.md) | lent KEYCODEC, ROWCODEC, COLUMNS and LAYOUT: keys, stored rows, column blocks and store keys |
 | [docs/lent/schema.md](docs/lent/schema.md) | lent SCHEMA: tables, fields, indexes, edges, value rules, hooks, policies, computed fields and views |
