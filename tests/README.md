@@ -220,6 +220,11 @@ beside a development server.
 - `test_watchdog.py` sends to a local webhook: the climbing alert, the
   recovery message, retry after a refused delivery, the message formats, and
   `INSTALL`/`UNINSTALL`.
+- `test_streams.py` installs `STREAMS` in the global space and checks `XADD`
+  ids, trims and deletes, reads that page past 10000 entries, streams kept per
+  space, increasing ids from concurrent writers, and `XQUEUE` forwarding to a
+  declared queue, with and without `NOSTORE`, including the `XADD` error when
+  the queue is missing.
 - `test_stress.py` is opt-in. It measures concurrent inserts and p50/p95/p99
   query latency across thousands of HNSW vectors, and checks that the configured memory
   ceiling rejects writes while the server remains available. An optional soak
